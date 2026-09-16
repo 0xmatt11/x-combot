@@ -76,6 +76,24 @@ export class LiveXClient implements XClient {
     maxResults?: number;
     paginationToken?: string;
   }): Promise<{ events: DmEvent[]; nextToken?: string }> {
+    return this.listEvents("/2/dm_events", params);
+  }
+
+  async listConversationDmEvents(params: {
+    conversationId: string;
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<{ events: DmEvent[]; nextToken?: string }> {
+    return this.listEvents(
+      `/2/dm_conversations/${encodeURIComponent(params.conversationId)}/dm_events`,
+      params,
+    );
+  }
+
+  private async listEvents(
+    pathname: string,
+    params: { maxResults?: number; paginationToken?: string },
+  ): Promise<{ events: DmEvent[]; nextToken?: string }> {
     const search: Record<string, string> = {
       max_results: String(params.maxResults ?? 50),
       event_types: EVENT_TYPES,
@@ -87,7 +105,7 @@ export class LiveXClient implements XClient {
       search.pagination_token = params.paginationToken;
     }
 
-    const payload = await this.request<RawEventsResponse>("/2/dm_events", { search });
+    const payload = await this.request<RawEventsResponse>(pathname, { search });
     const users = indexUsers(payload.includes?.users ?? []);
     const events = (payload.data ?? []).map((raw) => normalizeEvent(raw, users));
     return {

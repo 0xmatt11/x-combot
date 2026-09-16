@@ -8,6 +8,11 @@ export interface XClient {
     maxResults?: number;
     paginationToken?: string;
   }): Promise<{ events: DmEvent[]; nextToken?: string }>;
+  listConversationDmEvents(params: {
+    conversationId: string;
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<{ events: DmEvent[]; nextToken?: string }>;
   sendMessage(
     conversationId: string,
     text: string,

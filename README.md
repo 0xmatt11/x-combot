@@ -43,6 +43,7 @@ There is **no documented streaming API for DMs** on v2, so the bot **polls** `GE
 7. **Notes** — `!note key text` / `!get key` per conversation.
 8. **Admin allowlist** — `BOT_OWNER_ID` always admin; `ADMIN_IDS` global; `!admin add` per group.
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
+10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. OpenAI-compatible; mockable.
 
 ## Commands
 
@@ -50,6 +51,9 @@ Public:
 
 - `!help`
 - `!rules`
+- `!ask <question>` — LLM reply (also `@botname …` or configured wake prefixes)
+- `!summarize [focus]` — load conversation history and summarize
+- `!analyze [prompt]` — load conversation history and answer about the thread
 
 Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 
@@ -62,7 +66,7 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 - `!del [event_id]`
 - `!note` / `!note key` / `!note key text`
 - `!get key`
-- `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`
+- `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`
 - `!settings`
 - `!admin add|remove @user`
 - `!admins`
@@ -114,6 +118,75 @@ npm start
 
 On first poll the bot records a watermark and **does not replay 30 days of history** (avoids mass welcomes). After that it processes new `MessageCreate` / `ParticipantsJoin` / `ParticipantsLeave` events for group conversations only.
 
+### 4. LLM replies (optional)
+
+This is independent of your X API tier. The bot always uses OpenAI-compatible **Chat Completions** (`POST {base}/chat/completions`). Pick a provider with env (primary) or YAML.
+
+`LLM_PROVIDER` wins over `llm.provider` in `config/default.yaml`. Per-conversation `!set llm_provider` is not supported — switch globally.
+
+| `LLM_PROVIDER` | Aliases | Default base URL | Default model | API key |
+| --- | --- | --- | --- | --- |
+| `openai` (default) | | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY`, else `LLM_API_KEY` |
+| `grok` | `xai` | `https://api.x.ai/v1` | `grok-4.6` | `XAI_API_KEY`, else `LLM_API_KEY`, else `OPENAI_API_KEY` |
+| `local` | `ollama`, `openai-compatible` | `http://127.0.0.1:11434/v1` (Ollama) | `llama3.2` | optional (`LLM_API_KEY` / dummy; Ollama does not need a cloud key) |
+| | `lmstudio` | `http://127.0.0.1:1234/v1` | `llama3.2` | optional |
+
+Shared overrides: `LLM_MODEL`, `LLM_BASE_URL` (wins over `OPENAI_BASE_URL`).
+
+**Grok (xAI)** — documented at [docs.x.ai](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions): `Authorization: Bearer $XAI_API_KEY` against `https://api.x.ai/v1/chat/completions`. xAI now prefers a newer Responses API; this bot keeps Chat Completions so every provider shares one client. Default model is **`grok-4.6`** (current public chat id; `grok-2` is no longer listed). Override with `LLM_MODEL`. Create a key at [console.x.ai](https://console.x.ai). If `LLM_PROVIDER=grok` is set without a key, startup **exits** with a setup message.
+
+**Local PC (Ollama / LM Studio / other OpenAI-compatible servers)**
+
+```bash
+# Ollama on the same machine as the bot
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.2
+# LLM_BASE_URL=http://127.0.0.1:11434/v1   # default
+
+# LM Studio
+LLM_PROVIDER=lmstudio
+LLM_MODEL=your-loaded-model
+# default base: http://127.0.0.1:1234/v1
+```
+
+`127.0.0.1` only works if **the bot process can open that port**. If the bot runs in the cloud or another host, point `LLM_BASE_URL` at the PC (`http://192.168.x.x:11434/v1`) or a tunnel. Local providers do **not** require `OPENAI_API_KEY`.
+
+**OpenAI**
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+# OPENAI_BASE_URL=https://api.openai.com/v1
+# LLM_MODEL=gpt-4o-mini
+```
+
+If you leave `LLM_PROVIDER` unset and omit keys, the rest of the bot still starts; `!ask` tells you how to configure it. Setting `LLM_PROVIDER=openai` or `grok` without a key fails loudly at startup.
+
+Then in a group DM:
+
+- `!ask should we ship Friday?`
+- `@YourBotName what did Alice mean?`
+- `!summarize` / `!analyze who owns the launch?`
+
+**Context modes** (YAML `llm.context_mode`, override with `!set llm_context_mode …`):
+
+| Mode | What is sent to the model | X reads |
+| --- | --- | --- |
+| `none` | The question plus a short recent window (`none_recent_messages`, default 3) | One small `GET /2/dm_conversations/:id/dm_events` page if that window > 0 |
+| `recent` (default) | Last N messages (`recent_messages`, default 20) | Same endpoint, capped at N |
+| `full` / `conversation` | Paginated history up to `full_max_messages` / `full_max_chars` (~30 day retention) | More pages (`max_pages`, default 5 × up to 100 events) |
+
+`!summarize` and `!analyze` **always** use full-history fetch (still truncated by those caps). Keep `context_mode: recent` unless you explicitly want every `!ask` to pull the thread.
+
+**Cost warnings**
+
+- X DM lookup is typically **pay-per-use**. Full mode and summarize/analyze paginate `GET /2/dm_conversations/:id/dm_events`. That is extra read volume on top of the normal poll loop (`GET /2/dm_events`).
+- LLM tokens scale with the assembled context (`full_max_chars` default 24k characters). Truncation drops oldest messages by default (`truncate: oldest`).
+- Per-user rate limits (`rate_limit_per_user` / `rate_limit_window_ms`) are stored in SQLite (timestamps only — prompts are not persisted or logged).
+- `llm.allow: admins` gates LLM commands to the owner / `ADMIN_IDS` / per-group admins.
+
+System prompt lives in `config/default.yaml` (`llm.system_prompt`). The bot is instructed that it is both a group assistant and the moderation bot, and that it cannot kick users on X.
+
 Dev loop:
 
 ```bash
@@ -124,20 +197,21 @@ npm test
 ## Configuration
 
 - `.env` — credentials and IDs (see `.env.example`).
-- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval.
-- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs.
+- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, LLM context/rate limits.
+- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts).
 
-Core moderation logic talks to an `XClient` interface. Tests use `MockXClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com`.
+Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.
 
 ## Project layout
 
 ```
 src/
   index.ts            # poll loop
-  bot/engine.ts       # ComBot-like actions
-  bot/parser.ts       # command parsing
+  bot/engine.ts       # ComBot-like actions + LLM dispatch
+  bot/parser.ts       # command + wake parsing
   bot/flood.ts        # flood window
   bot/filters.ts      # keyword/regex
+  llm/                # OpenAI-compatible client, context assembly, history fetch
   x/live-client.ts    # thin v2 HTTP client
   x/mock-client.ts    # in-memory client for tests
   store.ts            # SQLite

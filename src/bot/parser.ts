@@ -19,7 +19,12 @@ export type ParsedCommand =
   | { name: "set"; key: string; value: string }
   | { name: "settings" }
   | { name: "admin"; action: "add" | "remove"; target: UserRef }
-  | { name: "admins" };
+  | { name: "admins" }
+  | { name: "ask"; prompt: string }
+  | { name: "summarize"; prompt?: string }
+  | { name: "analyze"; prompt?: string };
+
+export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
 const COMMAND_RE = /^[!/]([A-Za-z]+)(?:\s+([\s\S]*))?$/;
 const USERNAME_RE = /^@?([A-Za-z0-9_]{1,15})$/;
@@ -96,6 +101,13 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       if (!target) return undefined;
       return { name: "admin", action: head, target };
     }
+    case "ask":
+      return { name: "ask", prompt: rest };
+    case "summarize":
+    case "summary":
+      return rest ? { name: "summarize", prompt: rest } : { name: "summarize" };
+    case "analyze":
+      return rest ? { name: "analyze", prompt: rest } : { name: "analyze" };
     default:
       return undefined;
   }
@@ -143,3 +155,71 @@ export function isAdmin(
     conversationAdminIds.includes(userId)
   );
 }
+
+export function isLlmCommandName(name: string): boolean {
+  return LLM_COMMANDS.has(name);
+}
+
+export interface LlmWakeMatch {
+  kind: "ask" | "summarize" | "analyze";
+  prompt: string;
+}
+
+export function parseLlmWake(
+  text: string | undefined | null,
+  options: {
+    botUsername?: string;
+    botUserId?: string;
+    wakePrefixes: string[];
+    mentions?: { username: string; id?: string }[];
+  },
+): LlmWakeMatch | undefined {
+  if (!text) return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+
+  const prefixes = collectWakePrefixes(options.wakePrefixes, options.botUsername);
+  for (const prefix of prefixes) {
+    const stripped = stripPrefix(trimmed, prefix);
+    if (stripped === undefined) continue;
+    return { kind: "ask", prompt: stripped };
+  }
+  return undefined;
+}
+
+export function llmRequestFromCommand(
+  command: ParsedCommand,
+): LlmWakeMatch | undefined {
+  if (command.name === "ask") return { kind: "ask", prompt: command.prompt };
+  if (command.name === "summarize") {
+    return { kind: "summarize", prompt: command.prompt ?? "" };
+  }
+  if (command.name === "analyze") {
+    return { kind: "analyze", prompt: command.prompt ?? "" };
+  }
+  return undefined;
+}
+
+function collectWakePrefixes(configured: string[], botUsername?: string): string[] {
+  const prefixes = [...configured];
+  if (botUsername) {
+    prefixes.push(`@${botUsername}`);
+  }
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const prefix of prefixes) {
+    const key = prefix.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(prefix.trim());
+  }
+  return unique.sort((a, b) => b.length - a.length);
+}
+
+function stripPrefix(text: string, prefix: string): string | undefined {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = text.match(new RegExp(`^${escaped}(?:[:\\s,]+|$)`, "i"));
+  if (!match) return undefined;
+  return text.slice(match[0].length).trim();
+}
+

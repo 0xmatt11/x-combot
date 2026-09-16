@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS last_messages (
   sender_id TEXT,
   created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS llm_rate (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_rate
+  ON llm_rate (conversation_id, user_id, ts_ms);
 `;
 
 export class Store {
@@ -351,5 +360,29 @@ export class Store {
       | undefined;
     if (!row) return undefined;
     return { eventId: row.event_id, senderId: row.sender_id ?? undefined };
+  }
+
+  recordLlmUse(
+    conversationId: string,
+    userId: string,
+    tsMs: number,
+    windowMs: number,
+  ): number {
+    this.db
+      .prepare(
+        "INSERT INTO llm_rate (conversation_id, user_id, ts_ms) VALUES (?, ?, ?)",
+      )
+      .run(conversationId, userId, tsMs);
+    this.db
+      .prepare(
+        "DELETE FROM llm_rate WHERE conversation_id = ? AND user_id = ? AND ts_ms < ?",
+      )
+      .run(conversationId, userId, tsMs - windowMs);
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM llm_rate WHERE conversation_id = ? AND user_id = ? AND ts_ms >= ?",
+      )
+      .get(conversationId, userId, tsMs - windowMs) as { count: number };
+    return row.count;
   }
 }

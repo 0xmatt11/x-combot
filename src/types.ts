@@ -7,6 +7,32 @@ export interface FilterRule {
   warn?: boolean;
 }
 
+export type LlmAllow = "everyone" | "admins";
+export type LlmContextMode = "none" | "recent" | "full" | "conversation";
+export type TruncateStrategy = "oldest" | "newest";
+
+export interface LlmConfig {
+  enabled: boolean;
+  allow: LlmAllow;
+  wake_prefixes: string[];
+  context_mode: LlmContextMode;
+  /** Short window used when context_mode is `none`. */
+  none_recent_messages: number;
+  recent_messages: number;
+  full_max_messages: number;
+  full_max_chars: number;
+  truncate: TruncateStrategy;
+  rate_limit_per_user: number;
+  rate_limit_window_ms: number;
+  max_reply_chars: number;
+  /** Safety cap on GET /2/dm_conversations/:id/dm_events pages (max 100 events each). */
+  max_pages: number;
+  system_prompt: string;
+  /** openai | grok | local — env `LLM_PROVIDER` wins when set. */
+  provider?: string;
+  model?: string;
+}
+
 export interface DefaultsConfig {
   welcome: {
     enabled: boolean;
@@ -35,6 +61,7 @@ export interface DefaultsConfig {
     attempt_on_flood: boolean;
     attempt_on_mute: boolean;
   };
+  llm?: LlmConfig;
 }
 
 export interface ConversationSettings {
@@ -48,6 +75,10 @@ export interface ConversationSettings {
   warn_limit?: number;
   auto_mute_ms?: number;
   filters?: FilterRule[];
+  llm_enabled?: boolean;
+  llm_allow?: LlmAllow;
+  llm_context_mode?: LlmContextMode;
+  llm_recent_messages?: number;
 }
 
 export interface ResolvedConversationConfig {
@@ -66,10 +97,25 @@ export interface ResolvedConversationConfig {
   attemptDeleteOnFilter: boolean;
   attemptDeleteOnFlood: boolean;
   attemptDeleteOnMute: boolean;
+  llmEnabled: boolean;
+  llmAllow: LlmAllow;
+  llmContextMode: LlmContextMode;
+  llmNoneRecentMessages: number;
+  llmRecentMessages: number;
+  llmFullMaxMessages: number;
+  llmFullMaxChars: number;
+  llmTruncate: TruncateStrategy;
+  llmRateLimitPerUser: number;
+  llmRateLimitWindowMs: number;
+  llmMaxReplyChars: number;
+  llmMaxPages: number;
+  llmWakePrefixes: string[];
+  llmSystemPrompt: string;
 }
 
 export interface BotRuntimeConfig {
   botUserId: string;
+  botUsername?: string;
   ownerId: string;
   globalAdminIds: string[];
   defaults: DefaultsConfig;

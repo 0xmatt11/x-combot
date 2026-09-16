@@ -16,6 +16,9 @@ help: |
   Public commands:
     !help — this message
     !rules — group rules
+    !ask <question> — ask the LLM (or @botname …)
+    !summarize [focus] — summarize the group thread (loads history)
+    !analyze [prompt] — answer about the whole conversation
 
   Admin commands:
     !warn @user [reason] — add a warning
@@ -65,3 +68,33 @@ delete:
   attempt_on_filter: true
   attempt_on_flood: true
   attempt_on_mute: true
+
+# LLM group-chat assistant. Full conversation context is opt-in because it
+# paginates GET /2/dm_conversations/:id/dm_events (~30 day retention, pay-per-use
+# X reads) and sends that text to the model (LLM tokens).
+# Provider is chosen with env LLM_PROVIDER (wins) or llm.provider below:
+#   openai | grok | local  (aliases: xai, ollama, lmstudio, openai-compatible)
+llm:
+  enabled: true
+  provider: openai
+  allow: everyone
+  wake_prefixes:
+    - "!ask"
+    - "@bot"
+  context_mode: recent
+  none_recent_messages: 3
+  recent_messages: 20
+  full_max_messages: 200
+  full_max_chars: 24000
+  truncate: oldest
+  rate_limit_per_user: 8
+  rate_limit_window_ms: 60000
+  max_reply_chars: 1800
+  max_pages: 5
+  system_prompt: |
+    You are a helpful assistant in an X (Twitter) group Direct Message.
+    You also act as this group's moderation bot (x-combot).
+    Be concise and practical. You cannot kick or ban people on X — the public
+    API has no remove-participant endpoint. Do not invent X API capabilities.
+    When using conversation context, stick to what appears in the thread.
+

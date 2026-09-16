@@ -36,6 +36,13 @@ export interface Env {
   databasePath: string;
   tokenPath: string;
   pollIntervalMs?: number;
+  openaiApiKey?: string;
+  openaiBaseUrl?: string;
+  llmProvider?: string;
+  llmApiKey?: string;
+  xaiApiKey?: string;
+  llmBaseUrl?: string;
+  llmModel?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -57,5 +64,12 @@ export function loadEnv(requireOwner = true): Env {
     databasePath: path.resolve(optional("DATABASE_PATH") ?? "data/bot.sqlite"),
     tokenPath: path.resolve(optional("TOKEN_PATH") ?? "data/tokens.json"),
     pollIntervalMs: pollRaw ? Number(pollRaw) : undefined,
+    openaiApiKey: optional("OPENAI_API_KEY"),
+    openaiBaseUrl: optional("OPENAI_BASE_URL"),
+    llmProvider: optional("LLM_PROVIDER"),
+    llmApiKey: optional("LLM_API_KEY"),
+    xaiApiKey: optional("XAI_API_KEY"),
+    llmBaseUrl: optional("LLM_BASE_URL"),
+    llmModel: optional("LLM_MODEL"),
   };
 }
