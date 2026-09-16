@@ -36,6 +36,9 @@ export interface Env {
   databasePath: string;
   tokenPath: string;
   pollIntervalMs?: number;
+  openaiApiKey?: string;
+  openaiBaseUrl?: string;
+  llmModel: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -57,5 +60,8 @@ export function loadEnv(requireOwner = true): Env {
     databasePath: path.resolve(optional("DATABASE_PATH") ?? "data/bot.sqlite"),
     tokenPath: path.resolve(optional("TOKEN_PATH") ?? "data/tokens.json"),
     pollIntervalMs: pollRaw ? Number(pollRaw) : undefined,
+    openaiApiKey: optional("OPENAI_API_KEY"),
+    openaiBaseUrl: optional("OPENAI_BASE_URL"),
+    llmModel: optional("LLM_MODEL") ?? "gpt-4o-mini",
   };
 }

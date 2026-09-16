@@ -1,19 +1,27 @@
-import { resolveConversationConfig } from "../config.js";
+import { isFullContextMode, normalizeAllow, normalizeContextMode, resolveConversationConfig } from "../config.js";
 import { log } from "../log.js";
 import { Store } from "../store.js";
 import type {
   BotRuntimeConfig,
   ConversationSettings,
   DmEvent,
+  LlmContextMode,
   ResolvedConversationConfig,
   XUser,
 } from "../types.js";
 import { displayName, isGroupConversation, type XClient } from "../x/client.js";
+import type { LlmClient } from "../llm/client.js";
+import { buildLlmMessages, selectContextTurns, splitReply } from "../llm/context.js";
+import { fetchConversationTurns } from "../llm/history.js";
 import { matchFilters } from "./filters.js";
 import {
   isAdmin,
+  isLlmCommandName,
+  llmRequestFromCommand,
   parseCommand,
+  parseLlmWake,
   renderTemplate,
+  type LlmWakeMatch,
   type ParsedCommand,
   type UserRef,
 } from "./parser.js";
@@ -28,6 +36,10 @@ const SETTING_KEYS = new Set([
   "flood_mute_ms",
   "warn_limit",
   "auto_mute_ms",
+  "llm_enabled",
+  "llm_allow",
+  "llm_context_mode",
+  "llm_recent_messages",
 ]);
 
 export interface EngineActions {
@@ -36,6 +48,7 @@ export interface EngineActions {
   notifies: string[];
   muted: boolean;
   warned: boolean;
+  llm: boolean;
 }
 
 export class ModerationEngine {
@@ -43,6 +56,7 @@ export class ModerationEngine {
     private readonly store: Store,
     private readonly client: XClient,
     private readonly config: BotRuntimeConfig,
+    private readonly llmClient?: LlmClient,
   ) {}
 
   async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
@@ -52,6 +66,7 @@ export class ModerationEngine {
       notifies: [],
       muted: false,
       warned: false,
+      llm: false,
     };
 
     if (this.store.hasProcessed(event.id)) {
@@ -94,8 +109,33 @@ export class ModerationEngine {
     );
 
     const command = parseCommand(event.text);
-    if (command) {
+    const llmFromCmd =
+      command && isLlmCommandName(command.name)
+        ? llmRequestFromCommand(command)
+        : undefined;
+    const llmWake =
+      llmFromCmd ??
+      parseLlmWake(event.text, {
+        botUsername: this.config.botUsername,
+        botUserId: this.config.botUserId,
+        wakePrefixes: settings.llmWakePrefixes,
+        mentions: event.mentions,
+      });
+
+    if (command && !llmFromCmd) {
       await this.handleCommand(event, command, senderIsAdmin, settings, actions);
+      return actions;
+    }
+
+    if (llmWake) {
+      if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
+        actions.muted = true;
+        if (settings.attemptDeleteOnMute) {
+          await this.tryDelete(event.id, actions);
+        }
+        return actions;
+      }
+      await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
       return actions;
     }
 
@@ -183,6 +223,131 @@ export class ModerationEngine {
     }
 
     return actions;
+  }
+
+  private async handleLlm(
+    event: DmEvent,
+    request: LlmWakeMatch,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const senderId = event.senderId!;
+
+    if (!settings.llmEnabled) {
+      await this.reply(
+        conversationId,
+        "LLM replies are disabled in this group. An admin can `!set llm_enabled on`.",
+        actions,
+      );
+      return;
+    }
+
+    if (settings.llmAllow === "admins" && !senderIsAdmin) {
+      await this.reply(
+        conversationId,
+        "LLM commands are limited to configured admins in this group.",
+        actions,
+      );
+      return;
+    }
+
+    if (!request.prompt && request.kind === "ask") {
+      await this.reply(
+        conversationId,
+        "Ask me with `!ask your question`, or address me with `@bot …`. `!summarize` and `!analyze` load group history (X API reads + LLM tokens).",
+        actions,
+      );
+      return;
+    }
+
+    if (!this.llmClient) {
+      await this.reply(
+        conversationId,
+        "LLM replies are not configured on this bot. Set OPENAI_API_KEY (and optional OPENAI_BASE_URL, LLM_MODEL).",
+        actions,
+      );
+      return;
+    }
+
+    const uses = this.store.recordLlmUse(
+      conversationId,
+      senderId,
+      nowMs,
+      settings.llmRateLimitWindowMs,
+    );
+    if (uses > settings.llmRateLimitPerUser) {
+      await this.reply(
+        conversationId,
+        `Slow down — LLM rate limit is ${settings.llmRateLimitPerUser} requests / ${Math.round(settings.llmRateLimitWindowMs / 1000)}s per user.`,
+        actions,
+      );
+      return;
+    }
+
+    const mode: LlmContextMode =
+      request.kind === "ask" ? settings.llmContextMode : "full";
+    const fetchCap = isFullContextMode(mode)
+      ? settings.llmFullMaxMessages
+      : mode === "recent"
+        ? settings.llmRecentMessages
+        : settings.llmNoneRecentMessages;
+
+    let turns = [] as Awaited<ReturnType<typeof fetchConversationTurns>>["turns"];
+    let pages = 0;
+    if (fetchCap > 0) {
+      const fetched = await fetchConversationTurns(this.client, conversationId, {
+        maxMessages: fetchCap,
+        maxPages: settings.llmMaxPages,
+        excludeEventId: event.id,
+      });
+      turns = fetched.turns;
+      pages = fetched.pages;
+    }
+
+    const assembled = selectContextTurns(turns, mode, {
+      noneRecentMessages: settings.llmNoneRecentMessages,
+      recentMessages: settings.llmRecentMessages,
+      fullMaxMessages: settings.llmFullMaxMessages,
+      fullMaxChars: settings.llmFullMaxChars,
+      truncate: settings.llmTruncate,
+    });
+
+    const question =
+      request.kind === "summarize"
+        ? request.prompt || "Summarize this group conversation."
+        : request.kind === "analyze"
+          ? request.prompt || "What are the main topics, decisions, and unanswered questions?"
+          : request.prompt;
+
+    log.info(
+      `LLM ${request.kind} conversation=${conversationId} user=${senderId} mode=${assembled.mode} turns=${assembled.turns.length} truncated=${assembled.truncated} x_pages=${pages}`,
+    );
+
+    try {
+      const messages = buildLlmMessages({
+        systemPrompt: settings.llmSystemPrompt,
+        context: assembled,
+        question,
+        askerLabel: displayName(event.sender, senderId),
+        kind: request.kind,
+      });
+      const answer = await this.llmClient.complete(messages);
+      const chunks = splitReply(answer, settings.llmMaxReplyChars);
+      for (const chunk of chunks) {
+        await this.reply(conversationId, chunk, actions);
+      }
+      actions.llm = true;
+    } catch (error) {
+      log.warn(`LLM completion failed for conversation=${conversationId}`, error);
+      await this.reply(
+        conversationId,
+        "The language model failed to reply. Try again later.",
+        actions,
+      );
+    }
   }
 
   private conversationConfig(conversationId: string): ResolvedConversationConfig {
@@ -582,6 +747,22 @@ function parseSetting(key: string, value: string): ConversationSettings | undefi
   if (normalized === "flood_mute_ms") return { flood_mute_ms: Number(value) };
   if (normalized === "warn_limit") return { warn_limit: Number(value) };
   if (normalized === "auto_mute_ms") return { auto_mute_ms: Number(value) };
+  if (normalized === "llm_enabled") {
+    return { llm_enabled: ["1", "true", "on", "yes"].includes(value.toLowerCase()) };
+  }
+  if (normalized === "llm_allow") {
+    const allow = normalizeAllow(value);
+    return allow ? { llm_allow: allow } : undefined;
+  }
+  if (normalized === "llm_context_mode") {
+    const mode = normalizeContextMode(value);
+    return mode ? { llm_context_mode: mode } : undefined;
+  }
+  if (normalized === "llm_recent_messages") {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return { llm_recent_messages: n };
+  }
   return undefined;
 }
 
@@ -592,5 +773,9 @@ function formatSettings(settings: ResolvedConversationConfig): string {
     `flood: ${settings.floodMaxMessages} msgs / ${settings.floodWindowMs}ms, mute ${settings.floodMuteMs}ms`,
     `filters: ${settings.filters.length}`,
     `auto_mute_ms: ${settings.autoMuteMs}`,
+    `llm_enabled: ${settings.llmEnabled}`,
+    `llm_allow: ${settings.llmAllow}`,
+    `llm_context_mode: ${settings.llmContextMode}`,
+    `llm_recent_messages: ${settings.llmRecentMessages}`,
   ].join("\n");
 }

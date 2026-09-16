@@ -6,6 +6,7 @@ export class MockXClient implements XClient {
   readonly direct: { participantId: string; text: string }[] = [];
   readonly deleted: string[] = [];
   readonly events: DmEvent[] = [];
+  readonly conversationListCalls: { conversationId: string; maxResults?: number }[] = [];
   readonly users = new Map<string, XUser>();
   bot: XUser;
   /** Official delete only succeeds for events owned by the bot user. */
@@ -37,6 +38,22 @@ export class MockXClient implements XClient {
 
   async listDmEvents(): Promise<{ events: DmEvent[]; nextToken?: string }> {
     return { events: [...this.events] };
+  }
+
+  async listConversationDmEvents(params: {
+    conversationId: string;
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<{ events: DmEvent[]; nextToken?: string }> {
+    this.conversationListCalls.push({
+      conversationId: params.conversationId,
+      maxResults: params.maxResults,
+    });
+    const events = this.events.filter(
+      (event) => event.conversationId === params.conversationId,
+    );
+    events.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+    return { events };
   }
 
   async sendMessage(conversationId: string, text: string): Promise<SendMessageResult> {

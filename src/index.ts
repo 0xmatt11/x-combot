@@ -4,6 +4,7 @@ import { log } from "./log.js";
 import { Poller } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { OpenAiCompatibleClient } from "./llm/openai.js";
 import { LiveXClient, loadTokensFromDisk } from "./x/live-client.js";
 
 async function main(): Promise<void> {
@@ -34,12 +35,31 @@ async function main(): Promise<void> {
   const me = await client.getMe();
   log.info(`Authenticated as @${me.username ?? "unknown"} (${me.id})`);
 
-  const engine = new ModerationEngine(store, client, {
-    botUserId: env.botUserId ?? me.id,
-    ownerId: env.botOwnerId,
-    globalAdminIds: env.adminIds,
-    defaults,
-  });
+  const llmClient = env.openaiApiKey
+    ? new OpenAiCompatibleClient({
+        apiKey: env.openaiApiKey,
+        baseUrl: env.openaiBaseUrl,
+        model: env.llmModel,
+      })
+    : undefined;
+  if (defaults.llm?.enabled && !llmClient) {
+    log.warn("LLM is enabled in config but OPENAI_API_KEY is unset; !ask / @bot will explain how to configure it.");
+  } else if (llmClient) {
+    log.info(`LLM enabled (model=${env.llmModel}, base=${env.openaiBaseUrl ?? "https://api.openai.com/v1"})`);
+  }
+
+  const engine = new ModerationEngine(
+    store,
+    client,
+    {
+      botUserId: env.botUserId ?? me.id,
+      botUsername: me.username,
+      ownerId: env.botOwnerId,
+      globalAdminIds: env.adminIds,
+      defaults,
+    },
+    llmClient,
+  );
 
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;
   const poller = new Poller(client, store, engine, intervalMs, defaults.poll.max_results);

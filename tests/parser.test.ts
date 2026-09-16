@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAdmin, parseCommand, parseUserRef, renderTemplate } from "../src/bot/parser.js";
+import { isAdmin, parseCommand, parseLlmWake, parseUserRef, renderTemplate } from "../src/bot/parser.js";
 
 describe("parseCommand", () => {
   it("parses public help and rules commands", () => {
@@ -69,6 +69,23 @@ describe("parseCommand", () => {
       value: "4",
     });
   });
+
+  it("parses LLM ask, summarize, and analyze commands", () => {
+    expect(parseCommand("!ask what did we decide?")).toEqual({
+      name: "ask",
+      prompt: "what did we decide?",
+    });
+    expect(parseCommand("/summarize")).toEqual({ name: "summarize" });
+    expect(parseCommand("!summarize focus on deadlines")).toEqual({
+      name: "summarize",
+      prompt: "focus on deadlines",
+    });
+    expect(parseCommand("!analyze who owns the launch?")).toEqual({
+      name: "analyze",
+      prompt: "who owns the launch?",
+    });
+    expect(parseCommand("!ask")).toEqual({ name: "ask", prompt: "" });
+  });
 });
 
 describe("parseUserRef", () => {
@@ -85,6 +102,35 @@ describe("isAdmin", () => {
     expect(isAdmin("x", "owner", ["a"], ["b"])).toBe(false);
     expect(isAdmin("a", "owner", ["a"], [])).toBe(true);
     expect(isAdmin("b", "owner", [], ["b"])).toBe(true);
+  });
+});
+
+describe("parseLlmWake", () => {
+  const options = {
+    botUsername: "modbot",
+    botUserId: "bot-1",
+    wakePrefixes: ["!ask", "@bot"],
+  };
+
+  it("matches configurable prefixes and @botname", () => {
+    expect(parseLlmWake("@bot what time is standup?", options)).toEqual({
+      kind: "ask",
+      prompt: "what time is standup?",
+    });
+    expect(parseLlmWake("@modbot, ship it?", options)).toEqual({
+      kind: "ask",
+      prompt: "ship it?",
+    });
+    expect(parseLlmWake("!ask explain the plan", options)).toEqual({
+      kind: "ask",
+      prompt: "explain the plan",
+    });
+  });
+
+  it("ignores mid-message mentions and unrelated chat", () => {
+    expect(parseLlmWake("hello there", options)).toBeUndefined();
+    expect(parseLlmWake("talk to @modbot later", options)).toBeUndefined();
+    expect(parseLlmWake("!warn @bob", options)).toBeUndefined();
   });
 });
 
