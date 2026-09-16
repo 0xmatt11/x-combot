@@ -120,14 +120,47 @@ On first poll the bot records a watermark and **does not replay 30 days of histo
 
 ### 4. LLM replies (optional)
 
-This is independent of your X API tier. The bot calls an OpenAI-compatible `POST {OPENAI_BASE_URL}/chat/completions`.
+This is independent of your X API tier. The bot always uses OpenAI-compatible **Chat Completions** (`POST {base}/chat/completions`). Pick a provider with env (primary) or YAML.
+
+`LLM_PROVIDER` wins over `llm.provider` in `config/default.yaml`. Per-conversation `!set llm_provider` is not supported — switch globally.
+
+| `LLM_PROVIDER` | Aliases | Default base URL | Default model | API key |
+| --- | --- | --- | --- | --- |
+| `openai` (default) | | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY`, else `LLM_API_KEY` |
+| `grok` | `xai` | `https://api.x.ai/v1` | `grok-4.6` | `XAI_API_KEY`, else `LLM_API_KEY`, else `OPENAI_API_KEY` |
+| `local` | `ollama`, `openai-compatible` | `http://127.0.0.1:11434/v1` (Ollama) | `llama3.2` | optional (`LLM_API_KEY` / dummy; Ollama does not need a cloud key) |
+| | `lmstudio` | `http://127.0.0.1:1234/v1` | `llama3.2` | optional |
+
+Shared overrides: `LLM_MODEL`, `LLM_BASE_URL` (wins over `OPENAI_BASE_URL`).
+
+**Grok (xAI)** — documented at [docs.x.ai](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions): `Authorization: Bearer $XAI_API_KEY` against `https://api.x.ai/v1/chat/completions`. xAI now prefers a newer Responses API; this bot keeps Chat Completions so every provider shares one client. Default model is **`grok-4.6`** (current public chat id; `grok-2` is no longer listed). Override with `LLM_MODEL`. Create a key at [console.x.ai](https://console.x.ai). If `LLM_PROVIDER=grok` is set without a key, startup **exits** with a setup message.
+
+**Local PC (Ollama / LM Studio / other OpenAI-compatible servers)**
 
 ```bash
-# in .env
+# Ollama on the same machine as the bot
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.2
+# LLM_BASE_URL=http://127.0.0.1:11434/v1   # default
+
+# LM Studio
+LLM_PROVIDER=lmstudio
+LLM_MODEL=your-loaded-model
+# default base: http://127.0.0.1:1234/v1
+```
+
+`127.0.0.1` only works if **the bot process can open that port**. If the bot runs in the cloud or another host, point `LLM_BASE_URL` at the PC (`http://192.168.x.x:11434/v1`) or a tunnel. Local providers do **not** require `OPENAI_API_KEY`.
+
+**OpenAI**
+
+```bash
+LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-...
-# OPENAI_BASE_URL=https://api.openai.com/v1   # or another vendor's /v1 URL
+# OPENAI_BASE_URL=https://api.openai.com/v1
 # LLM_MODEL=gpt-4o-mini
 ```
+
+If you leave `LLM_PROVIDER` unset and omit keys, the rest of the bot still starts; `!ask` tells you how to configure it. Setting `LLM_PROVIDER=openai` or `grok` without a key fails loudly at startup.
 
 Then in a group DM:
 

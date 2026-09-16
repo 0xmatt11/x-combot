@@ -153,6 +153,6 @@ describe("LLM engine", () => {
     const client = new MockXClient();
     const engine = new ModerationEngine(store, client, runtime());
     await engine.processEvent(message({ id: "q4", senderId: alice.id, text: "!ask hello" }));
-    expect(client.sent[0]?.text).toMatch(/OPENAI_API_KEY/);
+    expect(client.sent[0]?.text).toMatch(/LLM_PROVIDER/);
   });
 });

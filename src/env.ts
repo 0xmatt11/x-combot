@@ -38,7 +38,11 @@ export interface Env {
   pollIntervalMs?: number;
   openaiApiKey?: string;
   openaiBaseUrl?: string;
-  llmModel: string;
+  llmProvider?: string;
+  llmApiKey?: string;
+  xaiApiKey?: string;
+  llmBaseUrl?: string;
+  llmModel?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -62,6 +66,10 @@ export function loadEnv(requireOwner = true): Env {
     pollIntervalMs: pollRaw ? Number(pollRaw) : undefined,
     openaiApiKey: optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENAI_BASE_URL"),
-    llmModel: optional("LLM_MODEL") ?? "gpt-4o-mini",
+    llmProvider: optional("LLM_PROVIDER"),
+    llmApiKey: optional("LLM_API_KEY"),
+    xaiApiKey: optional("XAI_API_KEY"),
+    llmBaseUrl: optional("LLM_BASE_URL"),
+    llmModel: optional("LLM_MODEL"),
   };
 }

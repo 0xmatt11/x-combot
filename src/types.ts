@@ -28,6 +28,9 @@ export interface LlmConfig {
   /** Safety cap on GET /2/dm_conversations/:id/dm_events pages (max 100 events each). */
   max_pages: number;
   system_prompt: string;
+  /** openai | grok | local — env `LLM_PROVIDER` wins when set. */
+  provider?: string;
+  model?: string;
 }
 
 export interface DefaultsConfig {

@@ -266,7 +266,7 @@ export class ModerationEngine {
     if (!this.llmClient) {
       await this.reply(
         conversationId,
-        "LLM replies are not configured on this bot. Set OPENAI_API_KEY (and optional OPENAI_BASE_URL, LLM_MODEL).",
+        "LLM replies are not configured. Set LLM_PROVIDER (openai, grok, or local) and the matching key/URL: OPENAI_API_KEY, XAI_API_KEY, or LLM_BASE_URL for a local server.",
         actions,
       );
       return;

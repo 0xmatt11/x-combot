@@ -72,8 +72,11 @@ delete:
 # LLM group-chat assistant. Full conversation context is opt-in because it
 # paginates GET /2/dm_conversations/:id/dm_events (~30 day retention, pay-per-use
 # X reads) and sends that text to the model (LLM tokens).
+# Provider is chosen with env LLM_PROVIDER (wins) or llm.provider below:
+#   openai | grok | local  (aliases: xai, ollama, lmstudio, openai-compatible)
 llm:
   enabled: true
+  provider: openai
   allow: everyone
   wake_prefixes:
     - "!ask"

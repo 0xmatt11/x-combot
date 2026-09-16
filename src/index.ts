@@ -1,10 +1,13 @@
 import { loadDefaults } from "./config.js";
-import { loadEnv } from "./env.js";
+import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
 import { Poller } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import type { LlmClient } from "./llm/client.js";
 import { OpenAiCompatibleClient } from "./llm/openai.js";
+import { resolveLlmConnection } from "./llm/provider.js";
+import type { DefaultsConfig } from "./types.js";
 import { LiveXClient, loadTokensFromDisk } from "./x/live-client.js";
 
 async function main(): Promise<void> {
@@ -35,18 +38,7 @@ async function main(): Promise<void> {
   const me = await client.getMe();
   log.info(`Authenticated as @${me.username ?? "unknown"} (${me.id})`);
 
-  const llmClient = env.openaiApiKey
-    ? new OpenAiCompatibleClient({
-        apiKey: env.openaiApiKey,
-        baseUrl: env.openaiBaseUrl,
-        model: env.llmModel,
-      })
-    : undefined;
-  if (defaults.llm?.enabled && !llmClient) {
-    log.warn("LLM is enabled in config but OPENAI_API_KEY is unset; !ask / @bot will explain how to configure it.");
-  } else if (llmClient) {
-    log.info(`LLM enabled (model=${env.llmModel}, base=${env.openaiBaseUrl ?? "https://api.openai.com/v1"})`);
-  }
+  const llmClient = buildLlmClient(env, defaults);
 
   const engine = new ModerationEngine(
     store,
@@ -73,6 +65,56 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+function buildLlmClient(env: Env, defaults: DefaultsConfig): LlmClient | undefined {
+  if (defaults.llm?.enabled === false) {
+    return undefined;
+  }
+
+  const resolved = resolveLlmConnection({
+    provider: env.llmProvider,
+    yamlProvider: defaults.llm?.provider,
+    yamlModel: defaults.llm?.model,
+    llmModel: env.llmModel,
+    llmApiKey: env.llmApiKey,
+    xaiApiKey: env.xaiApiKey,
+    openaiApiKey: env.openaiApiKey,
+    llmBaseUrl: env.llmBaseUrl,
+    openaiBaseUrl: env.openaiBaseUrl,
+  });
+
+  if (!resolved.ok) {
+    if (resolved.fatal) {
+      throw new Error(resolved.message);
+    }
+    log.warn(`${resolved.message} !ask / @bot will explain how to configure it.`);
+    return undefined;
+  }
+
+  const connection = resolved.connection;
+  if (connection.requiresNetworkToPc && isLoopback(connection.baseUrl)) {
+    log.info(
+      "Local LLM base URL is loopback (127.0.0.1/localhost). If the bot is not running on the same PC as Ollama/LM Studio, set LLM_BASE_URL to that machine's reachable address.",
+    );
+  }
+  log.info(
+    `LLM enabled (provider=${connection.provider} model=${connection.model} base=${connection.baseUrl})`,
+  );
+  return new OpenAiCompatibleClient({
+    apiKey: connection.apiKey,
+    baseUrl: connection.baseUrl,
+    model: connection.model,
+  });
+}
+
+function isLoopback(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
 }
 
 main().catch((error: unknown) => {

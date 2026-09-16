@@ -2,7 +2,7 @@ import { log } from "../log.js";
 import type { ChatMessage, LlmClient } from "./client.js";
 
 export interface OpenAiCompatibleOptions {
-  apiKey: string;
+  apiKey?: string;
   baseUrl?: string;
   model: string;
   timeoutMs?: number;
@@ -15,19 +15,23 @@ export class OpenAiCompatibleClient implements LlmClient {
   private readonly timeoutMs: number;
 
   constructor(options: OpenAiCompatibleOptions) {
-    this.apiKey = options.apiKey;
+    this.apiKey = options.apiKey?.trim() ?? "";
     this.baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
     this.model = options.model;
     this.timeoutMs = options.timeoutMs ?? 60_000;
   }
 
   async complete(messages: ChatMessage[]): Promise<string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (this.apiKey) {
+      headers.Authorization = `Bearer ${this.apiKey}`;
+    }
+
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify({
         model: this.model,
         messages,
