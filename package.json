@@ -1,0 +1,35 @@
+{
+  "name": "x-combot",
+  "version": "1.0.0",
+  "description": "ComBot-style moderation for X (Twitter) group Direct Messages",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "oauth": "tsx scripts/oauth.ts"
+  },
+  "keywords": [
+    "x",
+    "twitter",
+    "dm",
+    "moderation",
+    "combot"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.5.0",
+    "tsx": "^4.19.4",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

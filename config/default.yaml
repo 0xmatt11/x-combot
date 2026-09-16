@@ -1,0 +1,67 @@
+# Default moderation settings. Per-conversation overrides are stored in SQLite
+# (keyed by dm_conversation_id) and merged on top of this file.
+
+welcome:
+  enabled: true
+  text: |
+    Welcome @{username}!
+    Please read the group rules with !rules. Type !help for commands.
+
+rules: |
+  1. Be respectful — no harassment or hate.
+  2. No spam, floods, or unsolicited promo.
+  3. Follow X's rules: https://help.x.com/rules-and-policies
+
+help: |
+  Public commands:
+    !help — this message
+    !rules — group rules
+
+  Admin commands:
+    !warn @user [reason] — add a warning
+    !warns @user — show warning count
+    !unwarn @user — remove one warning
+    !kick @user [reason] — mute + notify (X has no kick API)
+    !mute @user [minutes] — local soft-mute
+    !unmute @user
+    !del [event_id] — try to delete a DM event (usually only the bot's own)
+    !note [key] [text] — save or list admin notes
+    !get <key> — read a note
+    !set <key> <value> — per-conversation setting
+    !settings — show this conversation's settings
+    !admin add|remove @user — conversation admin allowlist
+    !admins — list admins
+
+flood:
+  max_messages: 5
+  window_ms: 8000
+  mute_ms: 300000
+  warn_on_flood: true
+
+warns:
+  limit: 3
+  auto_mute_ms: 3600000
+  notify_admins: true
+
+# Keyword / regex filters. Matching MessageCreate events are auto-actioned.
+# type: keyword (substring) or regex (JavaScript)
+filters:
+  - type: keyword
+    pattern: "free followers"
+    case_insensitive: true
+    warn: true
+  - type: regex
+    pattern: "\\b(crypto\\s*giveaway|whatsapp\\s*me)\\b"
+    case_insensitive: true
+    warn: true
+
+poll:
+  interval_ms: 12000
+  max_results: 50
+
+# X DELETE /2/dm_events/:event_id only succeeds for events owned by the
+# authenticated bot user. Attempts on other users' messages are logged.
+delete:
+  attempt_on_filter: true
+  attempt_on_flood: true
+  attempt_on_mute: true
