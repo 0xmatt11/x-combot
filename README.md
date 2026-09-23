@@ -128,21 +128,23 @@ BOOBS_ENABLED=true
 
 The command is exact. `!boobs`, `!BOOBS`, and `/boobs` run it. `!boobs anything` is refused and is **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. This is a text filter, not a vision model.
 
-**Search.** Default provider is Reddit. No API key. It requests the desktop listing at `gateway.reddit.com` for fixed adult chest subreddits (`sort=hot`, `allow_over18=1`) and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud and datacenter IPs, and a block on that path alone does not fail the command.
+**Search.** Default provider is DuckDuckGo. No API key. It follows the same keyless image search as the Python `ddgs` library: fetch `https://duckduckgo.com/?q=…` and read the `vqd` token, then `https://duckduckgo.com/i.js` with `o=json` and safesearch off (`p=-1`). The query is the fixed adult chest phrase. It is never text from the command. Each hit uses that result's direct `image` URL. Titles, sources, and URLs still go through the same 18+ text filter as the other providers.
+
+If DuckDuckGo fails (or returns no direct image URLs), the bot tries Reddit. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo. Reddit reads the desktop listing at `gateway.reddit.com` for fixed adult chest subreddits (`sort=hot`, `allow_over18=1`) and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud and datacenter IPs.
 
 ```bash
-# optional; reddit is the default
-BOOBS_SEARCH_PROVIDER=reddit
+# optional; duckduckgo is the default (aliases: ddg, ddgs). No key.
+BOOBS_SEARCH_PROVIDER=duckduckgo
 ```
-
-Keyed providers, if Reddit is blocked:
 
 | `BOOBS_SEARCH_PROVIDER` | Key | Request |
 | --- | --- | --- |
-| `serpapi` | `BOOBS_SEARCH_API_KEY` | SerpAPI Google Images, `safe=off`, fixed adult close-up query |
+| `duckduckgo` (default) | none | DuckDuckGo `i.js`, `p=-1`, fixed adult close-up query |
+| `reddit` | none | `gateway.reddit.com` listings, then `hot.json` |
+| `serpapi` | `BOOBS_SEARCH_API_KEY` | SerpAPI Google Images, `safe=off`, same query |
 | `bing` | `BOOBS_SEARCH_API_KEY` | Bing Image Search, `safeSearch=Off`, same query |
 
-The key is sent only to that provider. It is not logged. A missing key makes `!boobs` say so and does not call the API.
+A key is sent only to SerpAPI or Bing. It is not logged. A missing key on those providers makes `!boobs` say so and does not call the API. DuckDuckGo and Reddit do not use `BOOBS_SEARCH_API_KEY`.
 
 **What gets posted.**
 
@@ -430,7 +432,7 @@ src/
   bot/engine.ts       # ComBot-like actions + LLM dispatch
   bot/parser.ts       # command + wake parsing
   bot/adult-filter.ts # 18+ text gate for !boobs
-  bot/image-search.ts # reddit / serpapi / bing image search
+  bot/image-search.ts # duckduckgo / reddit / serpapi / bing image search
   bot/image-fetch.ts  # https image download for DM upload
   bot/flood.ts        # flood window
   bot/filters.ts      # keyword/regex

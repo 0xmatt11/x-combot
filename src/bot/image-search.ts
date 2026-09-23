@@ -24,15 +24,42 @@ export class ImageSearchError extends Error {
 
 const USER_AGENT = "x-combot/1.0 (adult image command)";
 
+/** Browser-like agent. DuckDuckGo rejects the default Node user agent on vqd and i.js. */
+const DDG_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+export type BoobsSearchProvider = "duckduckgo" | "reddit" | "serpapi" | "bing";
+
+/** `ddg` and `ddgs` are aliases. Empty input is not a provider. */
+export function normalizeBoobsSearchProvider(provider: string): BoobsSearchProvider | undefined {
+  const value = provider.trim().toLowerCase();
+  if (value === "duckduckgo" || value === "ddg" || value === "ddgs") return "duckduckgo";
+  if (value === "reddit" || value === "serpapi" || value === "bing") return value;
+  return undefined;
+}
+
 export function createImageSearch(options: {
   provider?: string;
   apiKey?: string;
+  /**
+   * When DuckDuckGo fails, try Reddit. Defaults to true for the DuckDuckGo provider.
+   * Set false to surface the DuckDuckGo error instead.
+   */
+  fallbackToReddit?: boolean;
   fetchImpl?: typeof fetch;
   random?: () => number;
 }): ImageSearch {
-  const provider = (options.provider ?? "reddit").trim().toLowerCase();
+  const requested = options.provider?.trim() ?? "";
+  const provider: BoobsSearchProvider | "unknown" =
+    requested === "" ? "duckduckgo" : (normalizeBoobsSearchProvider(requested) ?? "unknown");
   const fetchImpl = options.fetchImpl ?? fetch;
   const random = options.random ?? Math.random;
+  if (provider === "duckduckgo") {
+    const fallback = options.fallbackToReddit !== false;
+    return {
+      searchAdultChestImages: () => searchDuckDuckGoOrReddit(fetchImpl, random, fallback),
+    };
+  }
   if (provider === "reddit") {
     return { searchAdultChestImages: () => searchReddit(fetchImpl, random) };
   }
@@ -43,7 +70,7 @@ export function createImageSearch(options: {
         async searchAdultChestImages() {
           throw new ImageSearchError(
             `BOOBS_SEARCH_API_KEY is required for provider ${provider}`,
-            "Image search needs BOOBS_SEARCH_API_KEY. An admin can set it, or use BOOBS_SEARCH_PROVIDER=reddit (no key).",
+            "Image search needs BOOBS_SEARCH_API_KEY. An admin can set it, or leave BOOBS_SEARCH_PROVIDER unset for DuckDuckGo (no key).",
           );
         },
       };
@@ -56,8 +83,8 @@ export function createImageSearch(options: {
   return {
     async searchAdultChestImages() {
       throw new ImageSearchError(
-        `Unknown BOOBS_SEARCH_PROVIDER ${provider}`,
-        "Image search provider is not recognized. Use reddit, serpapi, or bing.",
+        `Unknown BOOBS_SEARCH_PROVIDER ${requested}`,
+        "Image search provider is not recognized. Use duckduckgo, reddit, serpapi, or bing.",
       );
     },
   };
@@ -88,6 +115,81 @@ export function redditGatewayListingUrl(subreddit: string): string {
 
 export function redditHotJsonUrl(subreddit: string): string {
   return `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/hot.json?limit=40&raw_json=1`;
+}
+
+/**
+ * DuckDuckGo HTML page that embeds the `vqd` token.
+ * The query is always `ADULT_CHEST_QUERY` — never caller text.
+ */
+export function duckDuckGoVqdPageUrl(): string {
+  const params = new URLSearchParams({ q: ADULT_CHEST_QUERY });
+  return `https://duckduckgo.com/?${params.toString()}`;
+}
+
+/**
+ * Same `i.js` request current `ddgs` sends for images: `o=json`, safesearch off (`p=-1`).
+ * `vqd` comes from the HTML page. The query stays the fixed adult chest phrase.
+ */
+export function duckDuckGoImageScriptUrl(vqd: string): string {
+  const params = new URLSearchParams({
+    o: "json",
+    q: ADULT_CHEST_QUERY,
+    l: "us-en",
+    vqd,
+    p: "-1",
+    ct: "AT",
+  });
+  return `https://duckduckgo.com/i.js?${params.toString()}`;
+}
+
+const VQD_TOKEN = /^[A-Za-z0-9._-]{8,256}$/;
+
+/**
+ * Pull `vqd` out of DuckDuckGo HTML the way `ddgs` does:
+ * `vqd="…"`, then `vqd=…&`, then `vqd='…'`.
+ */
+export function extractDuckDuckGoVqd(html: string): string | undefined {
+  const patterns: Array<[string, string]> = [
+    ['vqd="', '"'],
+    ["vqd=", "&"],
+    ["vqd='", "'"],
+  ];
+  for (const [startMark, endMark] of patterns) {
+    let from = 0;
+    while (from < html.length) {
+      const start = html.indexOf(startMark, from);
+      if (start < 0) break;
+      const valueStart = start + startMark.length;
+      const end = html.indexOf(endMark, valueStart);
+      if (end > valueStart) {
+        const token = html.slice(valueStart, end).trim();
+        if (VQD_TOKEN.test(token)) return token;
+      }
+      from = valueStart;
+    }
+  }
+  return undefined;
+}
+
+/** Direct `image` URLs only, matching `r["image"]` from `DDGS().images()`. */
+export function parseDuckDuckGoImages(body: unknown): AdultImageCandidate[] {
+  if (!body || typeof body !== "object") return [];
+  const results = (body as { results?: unknown }).results;
+  if (!Array.isArray(results)) return [];
+  const out: AdultImageCandidate[] = [];
+  for (const row of results) {
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    const url = stringField(record, "image");
+    if (!url || !/^https:\/\//i.test(url)) continue;
+    out.push({
+      url,
+      title: stringField(record, "title"),
+      snippet: stringField(record, "source"),
+      adult: true,
+    });
+  }
+  return out;
 }
 
 async function searchReddit(
@@ -284,6 +386,99 @@ function httpsUrl(value: unknown): string | undefined {
   if (trimmed.startsWith("//")) trimmed = `https:${trimmed}`;
   if (!/^https:\/\//i.test(trimmed)) return undefined;
   return trimmed;
+}
+
+async function searchDuckDuckGoOrReddit(
+  fetchImpl: typeof fetch,
+  random: () => number,
+  fallbackToReddit: boolean,
+): Promise<AdultImageCandidate[]> {
+  try {
+    return await searchDuckDuckGo(fetchImpl);
+  } catch (error) {
+    if (!fallbackToReddit) {
+      if (error instanceof ImageSearchError) throw error;
+      throw new ImageSearchError("duckduckgo request failed", "Image search is unavailable right now.");
+    }
+    try {
+      return await searchReddit(fetchImpl, random);
+    } catch (redditError) {
+      const ddgDetail = error instanceof Error ? error.message : "duckduckgo failed";
+      const redditDetail = redditError instanceof Error ? redditError.message : "reddit failed";
+      throw new ImageSearchError(
+        `duckduckgo failed (${ddgDetail}); reddit fallback failed (${redditDetail})`,
+        "Image search is unavailable right now.",
+      );
+    }
+  }
+}
+
+async function searchDuckDuckGo(fetchImpl: typeof fetch): Promise<AdultImageCandidate[]> {
+  const pageUrl = duckDuckGoVqdPageUrl();
+  let page: Response;
+  try {
+    page = await fetchImpl(pageUrl, {
+      headers: {
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.5",
+        "User-Agent": DDG_USER_AGENT,
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new ImageSearchError("duckduckgo vqd request failed", "Image search is unavailable right now.");
+  }
+  if (!page.ok) {
+    throw new ImageSearchError(
+      `duckduckgo vqd HTTP ${page.status}`,
+      "Image search is unavailable right now.",
+    );
+  }
+  const vqd = extractDuckDuckGoVqd(await page.text());
+  if (!vqd) {
+    throw new ImageSearchError("duckduckgo vqd missing", "Image search is unavailable right now.");
+  }
+
+  const scriptUrl = duckDuckGoImageScriptUrl(vqd);
+  let images: Response;
+  try {
+    images = await fetchImpl(scriptUrl, {
+      headers: {
+        Accept: "*/*",
+        "Accept-Language": "en-US,en;q=0.5",
+        Referer: "https://duckduckgo.com/",
+        "User-Agent": DDG_USER_AGENT,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new ImageSearchError("duckduckgo i.js request failed", "Image search is unavailable right now.");
+  }
+  if (!images.ok) {
+    throw new ImageSearchError(
+      `duckduckgo i.js HTTP ${images.status}`,
+      "Image search is unavailable right now.",
+    );
+  }
+  let body: unknown;
+  try {
+    body = await images.json();
+  } catch (error) {
+    if (error instanceof ImageSearchError) throw error;
+    throw new ImageSearchError(
+      "duckduckgo i.js response was not JSON",
+      "Image search is unavailable right now.",
+    );
+  }
+  const parsed = parseDuckDuckGoImages(body);
+  if (parsed.length === 0) {
+    throw new ImageSearchError("duckduckgo returned no images", "Image search is unavailable right now.");
+  }
+  return parsed;
 }
 
 async function searchSerpApi(fetchImpl: typeof fetch, apiKey: string): Promise<AdultImageCandidate[]> {

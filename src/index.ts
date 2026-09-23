@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   if (env.boobsEnabled !== undefined) {
     defaults.boobs = normalizeBoobsConfig({ ...defaults.boobs, enabled: env.boobsEnabled });
   }
-  const provider = env.boobsSearchProvider ?? "reddit";
+  const provider = env.boobsSearchProvider ?? "duckduckgo";
   if (defaults.boobs?.enabled) {
     const needsKey = provider === "serpapi" || provider === "bing";
     if (needsKey && !env.boobsSearchApiKey) {
