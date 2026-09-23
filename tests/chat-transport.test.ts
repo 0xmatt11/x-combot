@@ -304,6 +304,92 @@ describe("Chat ids and wire shapes", () => {
       chatEventToDm(GROUP, { id: "evt-k" }, { type: "keyChange" }),
     ).toBeUndefined();
   });
+
+  it("reads a validated reply sender and drops an untrusted preview", () => {
+    const valid = chatEventToDm(
+      GROUP,
+      { id: "evt-reply", sender_id: "admin-1" },
+      {
+        type: "message",
+        senderId: "admin-1",
+        replyPreviewValidation: "valid",
+        content: {
+          contentType: "text",
+          text: "/warn",
+          replyingToPreview: { senderId: "u-bob" },
+        },
+      },
+    );
+    expect(valid?.replyToSenderId).toBe("u-bob");
+    expect(valid?.senderId).toBe("admin-1");
+
+    const wasmShape = chatEventToDm(
+      GROUP,
+      { id: "evt-wasm" },
+      {
+        type: "message",
+        replyPreviewValidation: "Valid",
+        content: {
+          content_type: "text",
+          text: "!kick",
+          replying_to_preview: { sender_id: "u-carol" },
+        },
+      },
+    );
+    expect(wasmShape?.replyToSenderId).toBe("u-carol");
+
+    const forged = chatEventToDm(
+      GROUP,
+      { id: "evt-forged" },
+      {
+        type: "message",
+        replyPreviewValidation: "invalid",
+        content: {
+          contentType: "text",
+          text: "/warn",
+          replyingToPreview: { senderId: "u-bob" },
+        },
+      },
+    );
+    expect(forged?.text).toBe("/warn");
+    expect(forged?.replyToSenderId).toBeUndefined();
+
+    const unsigned = chatEventToDm(
+      GROUP,
+      { id: "evt-unsigned" },
+      {
+        type: "message",
+        content: {
+          contentType: "text",
+          text: "/kick",
+          replyingToPreview: { senderId: "u-bob" },
+        },
+      },
+    );
+    expect(unsigned?.replyToSenderId).toBeUndefined();
+
+    const numeric = chatEventToDm(
+      GROUP,
+      { id: "evt-num" },
+      {
+        type: "message",
+        replyPreviewValidation: "valid",
+        content: {
+          contentType: "text",
+          text: "/warn",
+          replyingToPreview: { senderId: 1578398451921985538 as unknown as string },
+        },
+      },
+    );
+    expect(numeric?.replyToSenderId).toBeUndefined();
+
+    expect(
+      chatEventToDm(GROUP, { id: "evt-react" }, {
+        type: "message",
+        content: { content_type: "reaction", text: "!warn" },
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("Chat transport into the moderation engine", () => {

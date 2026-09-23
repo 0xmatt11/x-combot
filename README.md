@@ -76,7 +76,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 
 1. **Welcome** — on `ParticipantsJoin`, send configurable text (`{username}`, `{user_id}`, `{name}`).
 2. **Rules / help** — `!rules` and `!help` reply in the group.
-3. **Warn** — `!warn @user [reason]`; counts in SQLite; at N warns, soft-mute + admin notify.
+3. **Warn** — `!warn @user [reason]`, or reply to their message with `!warn` / `/warn`; counts in SQLite; at N warns, soft-mute + admin notify.
 4. **Delete** — `!del [event_id]`. Classic group DMs call `DELETE /2/dm_events/:event_id`, which succeeds only for events the authenticated account sent. Encrypted Chat (`g…`) calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`: the bot's own messages, and other people's messages when this account administers the group. Chat delete needs a sequence id from a message this process decrypted.
 5. **Anti-flood** — more than N messages in a window → delete attempt, local mute, warn.
 6. **Filters** — keyword / regex rules auto-delete (attempt) and optionally warn.
@@ -101,10 +101,10 @@ Public:
 
 Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 
-- `!warn @user [reason]`
+- `!warn @user [reason]` — or reply to their message with `!warn` / `/warn`
 - `!warns @user`
 - `!unwarn @user`
-- `!kick @user [reason]` — warn + soft-mute + notify (no API kick)
+- `!kick @user [reason]` — warn + soft-mute + notify (no API kick). Reply with `!kick` / `/kick` to target that sender.
 - `!mute @user [minutes]`
 - `!unmute @user`
 - `!del [event_id]` — classic DMs: own events only (`DELETE /2/dm_events/:event_id`); Chat: `delete_for_all` for own messages, or others' when this account is a group admin
@@ -112,10 +112,22 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 - `!get key`
 - `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`
 - `!settings`
-- `!admin add|remove @user`
+- `!admin add|remove @user` — a reply with no @user targets that sender
 - `!admins`
 
 `/` works as an alias for `!`.
+
+**Reply to target.** Admin commands that take a user (`!warn`, `!warns`, `!unwarn`, `!kick`, `!mute`, `!unmute`, `!admin add`, `!admin remove`) can use the author of the message you reply to when you leave the user off. `!del`, `!note`, and the public commands do not take a user and are unchanged.
+
+Precedence:
+
+1. An explicit user argument (`@name`, `name`, or a numeric id) wins, including when that lookup fails. The bot does not fall back to the reply.
+2. If there is no user argument and the command is a reply, the bot uses the replied-to sender.
+3. If there is neither, the bot answers `Who? Reply to their message, or pass @user.`
+
+Encrypted X Chat carries that sender on the decrypted message (`replying_to_preview.senderId`, or `replyingToPreview`). It is used only when chat-xdk sets `replyPreviewValidation` to `valid` (the preview matched the embedded signed original). An `invalid` or missing verdict is ignored, so a forged preview cannot redirect a warn or kick. Classic `GET /2/dm_events` has no reply-to sender. `referenced_tweets` is a post linked in the text, not the author of a DM, so reply-to-target applies in encrypted Chat groups.
+
+Replying to your own message targets you. That matches `!warn` with your own @name, which was already allowed.
 
 ## Adult image command
 
@@ -383,7 +395,7 @@ Then in a group DM:
 
 **Unknown bang commands**
 
-A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, and the rest of the list above) are unchanged, including incomplete ones such as `!warn` with no target. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
+A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, and the rest of the list above) stay on their own path. `!warn` with no @user is still that command: it uses a reply target or asks who, and it does not become a joke. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
 
 The joke uses a dedicated prompt. It does **not** load group history, so it does not spend X read quota the way `!summarize` does. The invented command token and any arguments are included so the reply can riff on them. The model is asked for one or two group-chat sentences, with no actionable harmful advice, and the posted text is cut to `llm.max_reply_chars`.
 

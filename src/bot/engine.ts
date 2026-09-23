@@ -521,11 +521,8 @@ export class ModerationEngine {
 
     switch (command.name) {
       case "warn": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         await this.applyWarn(
           event,
           target.id,
@@ -538,11 +535,8 @@ export class ModerationEngine {
         return;
       }
       case "warns": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         const count = this.store.getWarnCount(conversationId, target.id);
         await this.reply(
           conversationId,
@@ -552,11 +546,8 @@ export class ModerationEngine {
         return;
       }
       case "unwarn": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         const count = this.store.removeWarn(conversationId, target.id);
         await this.reply(
           conversationId,
@@ -566,11 +557,8 @@ export class ModerationEngine {
         return;
       }
       case "kick": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         const count = await this.applyWarn(
           event,
           target.id,
@@ -600,11 +588,8 @@ export class ModerationEngine {
         return;
       }
       case "mute": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         const minutes = command.minutes && command.minutes > 0 ? command.minutes : 30;
         this.store.mute(conversationId, target.id, Date.now() + minutes * 60_000, "manual");
         actions.muted = true;
@@ -616,11 +601,8 @@ export class ModerationEngine {
         return;
       }
       case "unmute": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         this.store.unmute(conversationId, target.id);
         await this.reply(
           conversationId,
@@ -709,11 +691,8 @@ export class ModerationEngine {
         return;
       }
       case "admin": {
-        const target = await this.resolveTarget(command.target, event);
-        if (!target) {
-          await this.reply(conversationId, "Could not resolve that user.", actions);
-          return;
-        }
+        const target = await this.resolveModerationUser(command.target, event, actions);
+        if (!target) return;
         if (command.action === "add") {
           this.store.addConversationAdmin(conversationId, target.id);
           await this.reply(
@@ -899,6 +878,39 @@ export class ModerationEngine {
       }
     }
     return count;
+  }
+
+  /**
+   * User for a mod command.
+   *
+   * An explicit @user, username, or id wins. Otherwise a validated reply
+   * sender is the target. With neither, the bot asks who.
+   *
+   * Replying to your own message targets you. `!warn @yourself` already
+   * does that, so a self-reply is not a separate block.
+   */
+  private async resolveModerationUser(
+    target: UserRef | undefined,
+    event: DmEvent,
+    actions: EngineActions,
+  ): Promise<XUser | undefined> {
+    if (target) {
+      const resolved = await this.resolveTarget(target, event);
+      if (!resolved) {
+        await this.reply(event.conversationId, "Could not resolve that user.", actions);
+      }
+      return resolved;
+    }
+    const replySenderId = event.replyToSenderId;
+    if (replySenderId) {
+      return (await this.client.getUserById(replySenderId)) ?? { id: replySenderId };
+    }
+    await this.reply(
+      event.conversationId,
+      "Who? Reply to their message, or pass @user.",
+      actions,
+    );
+    return undefined;
   }
 
   private async resolveTarget(ref: UserRef, event: DmEvent): Promise<XUser | undefined> {

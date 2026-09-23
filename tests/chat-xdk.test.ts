@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { chatEventToDm } from "../src/chat/normalize.js";
 import { generateIdentity, readKeyFile, writeKeyFile } from "../src/chat/identity.js";
 import { createWasmChat, importIdentity, loadWasmModule, wrapCipher } from "../src/chat/wasm-engine.js";
 import type { XdkLike } from "../src/chat/wasm-engine.js";
@@ -23,27 +24,35 @@ const vectors = JSON.parse(
   event_key_change_b64: string;
   event_message_b64: string;
   event_message_text: string;
+  event_reply_valid_b64: string;
+  event_reply_text: string;
+  event_reply_forged_b64: string;
+  event_reply_forged_preview_text: string;
   signing_public_b64: string;
   identity_public_b64: string;
   identity_public_key_signature_b64: string;
 };
 
+async function openFixtureChat() {
+  const chat = await createWasmChat();
+  importIdentity(chat, vectors.private_keys_concat_b64, "1");
+  chat.setIdentity(vectors.event_sender_id, "1");
+  chat.setCacheKeys(true);
+  chat.setSigningKeys([
+    {
+      userId: vectors.event_sender_id,
+      publicKeyVersion: vectors.event_signing_key_version,
+      publicKey: vectors.signing_public_b64,
+      identityPublicKey: vectors.identity_public_b64,
+      identityPublicKeySignature: vectors.identity_public_key_signature_b64,
+    },
+  ]);
+  return wrapCipher(chat);
+}
+
 describe("chat-xdk WASM boundary", () => {
   it("decrypts the official fixture message after its key change", async () => {
-    const chat = await createWasmChat();
-    importIdentity(chat, vectors.private_keys_concat_b64, "1");
-    chat.setIdentity(vectors.event_sender_id, "1");
-    chat.setCacheKeys(true);
-    chat.setSigningKeys([
-      {
-        userId: vectors.event_sender_id,
-        publicKeyVersion: vectors.event_signing_key_version,
-        publicKey: vectors.signing_public_b64,
-        identityPublicKey: vectors.identity_public_b64,
-        identityPublicKeySignature: vectors.identity_public_key_signature_b64,
-      },
-    ]);
-    const cipher = wrapCipher(chat);
+    const cipher = await openFixtureChat();
     const result = cipher.decryptEvents([
       vectors.event_key_change_b64,
       vectors.event_message_b64,
@@ -133,6 +142,43 @@ describe("chat-xdk WASM boundary", () => {
       ],
     });
     expect(JSON.stringify(seen[0])).not.toContain("media_type");
+  });
+
+  it("keeps a validated reply sender and drops a forged preview", async () => {
+    const cipher = await openFixtureChat();
+    const valid = cipher.decryptEvents([
+      vectors.event_key_change_b64,
+      vectors.event_reply_valid_b64,
+    ]);
+    expect(valid.errors).toEqual({});
+    const validMessage = valid.messages.find((item) => item.event.type === "message");
+    expect(validMessage?.event.content?.text).toBe(vectors.event_reply_text);
+    const validDm = chatEventToDm(
+      vectors.event_conversation_id,
+      { id: "reply-valid", sender_id: vectors.event_sender_id },
+      validMessage!.event,
+    );
+    expect(validDm?.replyToSenderId).toBe(vectors.event_sender_id);
+    expect(validDm?.text).toBe(vectors.event_reply_text);
+
+    const forged = cipher.decryptEvents([
+      vectors.event_key_change_b64,
+      vectors.event_reply_forged_b64,
+    ]);
+    expect(forged.errors).toEqual({});
+    const forgedMessage = forged.messages.find((item) => item.event.type === "message");
+    expect(forgedMessage?.event.content?.text).toBe(vectors.event_reply_text);
+    const preview = forgedMessage?.event.content?.replying_to_preview as
+      | { messageText?: string }
+      | undefined;
+    expect(preview?.messageText).toBe(vectors.event_reply_forged_preview_text);
+    const forgedDm = chatEventToDm(
+      vectors.event_conversation_id,
+      { id: "reply-forged", sender_id: vectors.event_sender_id },
+      forgedMessage!.event,
+    );
+    expect(forgedDm?.text).toBe(vectors.event_reply_text);
+    expect(forgedDm?.replyToSenderId).toBeUndefined();
   });
 
   it("reads dimensions from a jpeg without requiring a media_type", async () => {

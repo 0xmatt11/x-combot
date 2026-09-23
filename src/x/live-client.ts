@@ -150,7 +150,7 @@ export class LiveXClient implements XClient {
 
     const payload = await this.request<RawEventsResponse>(pathname, { search });
     const users = indexUsers(payload.includes?.users ?? []);
-    const events = (payload.data ?? []).map((raw) => normalizeEvent(raw, users));
+    const events = (payload.data ?? []).map((raw) => normalizeClassicDmEvent(raw, users));
     return {
       events,
       nextToken: payload.meta?.next_token,
@@ -646,6 +646,11 @@ interface RawDmEvent {
   entities?: {
     mentions?: { username: string; id?: string }[];
   };
+  /**
+   * Post ids linked in the message text. Not a reply-to DM author.
+   * Present so callers can see the field and still leave `replyToSenderId` unset.
+   */
+  referenced_tweets?: { id?: string }[];
 }
 
 function indexUsers(users: XUser[]): Map<string, XUser> {
@@ -659,7 +664,13 @@ function indexUsers(users: XUser[]): Map<string, XUser> {
   return map;
 }
 
-function normalizeEvent(raw: RawDmEvent, users: Map<string, XUser>): DmEvent {
+/**
+ * Classic DM events from `GET /2/dm_events` have no reply-to-message sender.
+ * `referenced_tweets` is a post URL found in the text, not the author of a
+ * DM this event quotes. Reply-target moderation is filled in by
+ * `chatEventToDm` for encrypted X Chat only.
+ */
+export function normalizeClassicDmEvent(raw: RawDmEvent, users: Map<string, XUser>): DmEvent {
   const participantIds = raw.participant_ids ?? [];
   const mentions: Mention[] = (raw.entities?.mentions ?? []).map((mention) => ({
     username: mention.username,

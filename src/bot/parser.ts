@@ -7,18 +7,18 @@ export type UserRef = {
 export type ParsedCommand =
   | { name: "help" }
   | { name: "rules" }
-  | { name: "warn"; target: UserRef; reason?: string }
-  | { name: "warns"; target: UserRef }
-  | { name: "unwarn"; target: UserRef }
-  | { name: "kick"; target: UserRef; reason?: string }
-  | { name: "mute"; target: UserRef; minutes?: number }
-  | { name: "unmute"; target: UserRef }
+  | { name: "warn"; target?: UserRef; reason?: string }
+  | { name: "warns"; target?: UserRef }
+  | { name: "unwarn"; target?: UserRef }
+  | { name: "kick"; target?: UserRef; reason?: string }
+  | { name: "mute"; target?: UserRef; minutes?: number }
+  | { name: "unmute"; target?: UserRef }
   | { name: "del"; eventId?: string }
   | { name: "note"; key?: string; value?: string }
   | { name: "get"; key: string }
   | { name: "set"; key: string; value: string }
   | { name: "settings" }
-  | { name: "admin"; action: "add" | "remove"; target: UserRef }
+  | { name: "admin"; action: "add" | "remove"; target?: UserRef }
   | { name: "admins" }
   | { name: "ask"; prompt: string }
   | { name: "summarize"; prompt?: string }
@@ -31,8 +31,8 @@ export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
 /**
  * Names `parseCommand` recognizes, including aliases that map to another command.
- * A bang that uses one of these names keeps today's behavior even when the
- * arguments are incomplete (`!warn` with no target stays a normal message).
+ * `parseUnknownBang` ignores these so a known name never becomes a witty
+ * unknown-command joke, including `!warn` with no @user.
  */
 const KNOWN_COMMAND_NAMES = new Set([
   "help",
@@ -128,6 +128,7 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "admins" };
     case "warn":
     case "kick": {
+      if (!rest) return { name };
       const { target, remainder } = splitTarget(rest);
       if (!target) return undefined;
       return remainder
@@ -137,11 +138,13 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
     case "warns":
     case "unwarn":
     case "unmute": {
+      if (!rest) return { name };
       const { target } = splitTarget(rest);
       if (!target) return undefined;
       return { name, target };
     }
     case "mute": {
+      if (!rest) return { name: "mute" };
       const { target, remainder } = splitTarget(rest);
       if (!target) return undefined;
       const minutes = remainder ? Number.parseInt(remainder, 10) : undefined;
@@ -175,6 +178,7 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
     case "admin": {
       const { head, tail } = splitHead(rest);
       if (head !== "add" && head !== "remove") return undefined;
+      if (!tail) return { name: "admin", action: head };
       const { target } = splitTarget(tail);
       if (!target) return undefined;
       return { name: "admin", action: head, target };
