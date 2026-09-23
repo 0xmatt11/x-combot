@@ -1,5 +1,6 @@
 import "dotenv/config";
 import path from "node:path";
+import { parseChatConversationIds } from "./chat/ids.js";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -43,6 +44,12 @@ export interface Env {
   xaiApiKey?: string;
   llmBaseUrl?: string;
   llmModel?: string;
+  /** Encrypted X Chat group ids (`g` + digits). Empty keeps classic DM polling only. */
+  chatConversationIds: string[];
+  chatKeysPath: string;
+  /** Juicebox PIN. Used only when no local key file exists. Never commit this. */
+  chatPin?: string;
+  chatPollIntervalMs?: number;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -51,6 +58,7 @@ export function loadEnv(requireOwner = true): Env {
     : (optional("BOT_OWNER_ID") ?? "0");
 
   const pollRaw = optional("POLL_INTERVAL_MS");
+  const chatPollRaw = optional("CHAT_POLL_INTERVAL_MS");
   return {
     clientId: optional("CLIENT_ID"),
     clientSecret: optional("CLIENT_SECRET"),
@@ -71,5 +79,9 @@ export function loadEnv(requireOwner = true): Env {
     xaiApiKey: optional("XAI_API_KEY"),
     llmBaseUrl: optional("LLM_BASE_URL"),
     llmModel: optional("LLM_MODEL"),
+    chatConversationIds: parseChatConversationIds(optional("CHAT_CONVERSATION_IDS")),
+    chatKeysPath: path.resolve(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
+    chatPin: optional("CHAT_PIN"),
+    chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,
   };
 }

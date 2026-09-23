@@ -1,7 +1,7 @@
 {
   "name": "x-combot",
   "version": "1.0.0",
-  "description": "ComBot-style moderation for X (Twitter) group Direct Messages",
+  "description": "ComBot-style moderation for X group DMs and encrypted X Chat groups",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -10,7 +10,9 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
-    "oauth": "tsx scripts/oauth.ts"
+    "oauth": "tsx scripts/oauth.ts",
+    "chat:register": "tsx scripts/chat-register.ts",
+    "chat:rotate": "tsx scripts/chat-rotate.ts"
   },
   "keywords": [
     "x",
@@ -21,6 +23,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@xdevplatform/chat-xdk": "^0.5.0",
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.5.0",
     "tsx": "^4.19.4",

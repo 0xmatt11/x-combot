@@ -1,6 +1,6 @@
 # x-combot
 
-A ComBot-inspired moderation bot for **X group Direct Messages** (not Communities). It is a TypeScript/Node process that polls [X API v2 Direct Message](https://docs.x.com/x-api/direct-messages/introduction) endpoints with a **user-context** OAuth 2.0 token and applies local moderation state in SQLite.
+A ComBot-inspired moderation bot for **X group Direct Messages** and **encrypted X Chat groups** (`/i/chat/g…`). It is a TypeScript/Node process that polls X API v2 with a **user-context** OAuth 2.0 token and applies local moderation state in SQLite. Classic group DMs and Chat groups share one command layer (`!help`, warns, filters, and the rest).
 
 Telegram's ComBot can kick, ban, and delete anyone's messages because Telegram exposes those actions to bots. X does not. This project implements the closest documented equivalents and is explicit about the rest.
 
@@ -23,13 +23,36 @@ There is **no documented streaming API for DMs** on v2, so the bot **polls** `GE
 
 1:1 conversation IDs look like `{smaller_user_id}-{larger_user_id}`. Group IDs are a single snowflake. The bot only moderates group conversations.
 
+### Encrypted X Chat (`g…`) vs classic group DMs
+
+These are different products. A URL like `https://x.com/i/chat/g2029561975647150382` is **not** a group DM.
+
+| | Classic group DM | Encrypted X Chat group |
+| --- | --- | --- |
+| Id | bare snowflake | `g` + digits |
+| Read | `GET /2/dm_events` | `GET /2/chat/conversations/{id}/events` |
+| Body | plaintext `text` | base64 Thrift ciphertext (`encoded_event`) |
+| Send | `POST /2/dm_conversations/{id}/messages` `{text}` | `POST /2/chat/conversations/{id}/messages` with an encrypted payload |
+| Delete | `DELETE /2/dm_events/{id}` (own events only) | `POST /2/chat/conversations/{id}/messages/delete` (signed; delete-for-all) |
+| Keys | none | `POST /2/users/{id}/public_keys`, conversation keys from `KeyChange` events |
+
+`GET /2/dm_events` never returns Chat messages. The bot only polls Chat for ids listed in `CHAT_CONVERSATION_IDS`. Crypto is [chat-xdk](https://github.com/xdevplatform/chat-xdk) (`@xdevplatform/chat-xdk`, the WASM engine shipped in that package). The public `createChat()` entrypoint does not expose `importKeys` / `exportKeys` (browser-safe). This process loads the WASM `Chat` class from the same package so a server can keep an identity blob on disk. Juicebox (`CHAT_PIN` + `juicebox-sdk`) is the other supported unlock path.
+
+Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. The same 429 / 402 backoff used by the DM poller applies here.
+
+There is still **no documented remove-member endpoint** on Chat (only add members, which rotates the key). `!kick` stays a local soft-mute plus an admin DM.
+
 ### Honest gaps vs Telegram ComBot
 
 - **No kick/ban.** `!kick` warns, locally soft-mutes, and DMs admins. A human still has to remove the user in the X app.
-- **No reliable delete of other people's messages.** `DELETE /2/dm_events/:event_id` succeeds only for events the bot sent. `!del`, anti-flood, and filters still *attempt* delete, then tell the group when X refuses.
+- **No reliable delete of other people's classic DM messages.** `DELETE /2/dm_events/:event_id` succeeds only for events the bot sent. In an encrypted Chat group the bot instead calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`. X documents that as working for messages the account sent, and for other people's messages when the account administers the group. If X refuses, the bot says so.
+- **Chat delete needs a sequence id** from a message this process decrypted. `!del` with no argument uses the last user message it saw. A numeric id can be a sequence id. UUID message ids are not accepted by the `!del` parser.
 - **Soft-mute is local.** Timed-out users are ignored by the bot (and delete is attempted). They can still talk in the X client.
 - **Polling, not realtime.** Default interval is 12s; DM lookup is rate-limited. Events older than ~30 days are not returned.
-- **Group DMs ≠ Communities.** Communities are a different X product and are not used here.
+- **Group DMs ≠ Communities ≠ encrypted Chat.** Communities are unused. Chat is a separate encrypted inbox; see above.
+- **Admin notify DMs are classic 1:1.** `!kick` and filter alerts still use `POST /2/dm_conversations/with/:id/messages`. That message may not appear inside the encrypted Chat inbox.
+- **Chat reactions, edits, and media are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer.
+- **No Activity API webhook in v1.** `chat.received` is unused. The bot polls.
 - **Paid API access.** DM read/write is not available on a typical free app-only key. You need a developer account, a Project/App with OAuth 2.0 user auth, and a plan that includes DM endpoints.
 
 ## Features
@@ -118,7 +141,39 @@ npm start
 
 On first poll the bot records a watermark and **does not replay 30 days of history** (avoids mass welcomes). After that it processes new `MessageCreate` / `ParticipantsJoin` / `ParticipantsLeave` events for group conversations only.
 
-### 4. LLM replies (optional)
+### 4. Run against an encrypted X Chat group
+
+Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access` — Chat reads and writes use those user scopes, not an app-only bearer token.
+
+1. Register the bot's Chat identity once (rate-limited; a 429 stops instead of retrying):
+
+```bash
+npm run chat:register -- --confirm
+```
+
+That calls `generateKeypairs()`, saves `data/chat-keys.json` (mode `0600`, gitignored), and `POST /2/users/{id}/public_keys`. The file holds unencrypted private key bytes. Do not commit it, log it, or paste it into chat. Re-running without `--force` reuses the file and skips the POST when that public key is already on the account.
+
+2. Put the group id in `.env`:
+
+```bash
+CHAT_CONVERSATION_IDS=g2029561975647150382
+```
+
+Ids must look like `g` plus digits. A classic group-DM snowflake is rejected at startup so it is not sent to `/2/chat`.
+
+3. The bot must be a member, and the latest conversation key must be wrapped to the public key you just registered. If the account was added **before** registration, it cannot decrypt history. Rotate the key (this wraps every current member whose public key we can fetch, and aborts without posting if any member key is missing):
+
+```bash
+npm run chat:rotate -- g2029561975647150382 --confirm
+```
+
+4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup.
+
+Optional: `CHAT_PIN` unlocks a Juicebox-stored identity instead of the file, via `createChat().unlock()`. That needs `npm install juicebox-sdk`. A key file wins when both are set. `CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_KEYS_PATH` moves the identity file.
+
+Juicebox realm tokens come from `juicebox_config` on `GET /2/users/{id}/public_keys`. They are not written by this repo.
+
+### 5. LLM replies (optional)
 
 This is independent of your X API tier. The bot always uses OpenAI-compatible **Chat Completions** (`POST {base}/chat/completions`). Pick a provider with env (primary) or YAML.
 
@@ -212,8 +267,10 @@ src/
   bot/flood.ts        # flood window
   bot/filters.ts      # keyword/regex
   llm/                # OpenAI-compatible client, context assembly, history fetch
-  x/live-client.ts    # thin v2 HTTP client
+  x/live-client.ts    # thin v2 HTTP client (DM + Chat)
+  x/routed-client.ts  # g… ids use Chat; everything else stays on /2/dm_*
   x/mock-client.ts    # in-memory client for tests
+  chat/               # poller, decrypt/encrypt, key file, wire bodies
   store.ts            # SQLite
   oauth.ts            # PKCE helpers
 scripts/oauth.ts      # interactive user-token helper
@@ -227,3 +284,6 @@ tests/
 - No v2 DM streaming; Account Activity webhooks are a separate, historically enterprise product and are not used here.
 - Delete of another participant's `MessageCreate` is not part of the documented v2 contract.
 - Communities, Spaces, and public posts are unrelated surfaces.
+- Encrypted Chat has no documented kick/remove-member call. Add-member (`POST /2/chat/conversations/{id}/members`) rotates the key; this bot does not call it from `!kick`.
+- The WASM binding's local key file is unencrypted identity material. The public JS API prefers Juicebox so raw keys never enter application JavaScript; this server uses the WASM `importKeys` / `exportKeys` methods that the official JS example uses for a headless bot.
+- Chat ciphertext in CI tests is the upstream `chat-xdk` fixture (`tests/fixtures/sdk_vectors.json`), not a live account.

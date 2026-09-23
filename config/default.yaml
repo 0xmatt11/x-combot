@@ -27,7 +27,7 @@ help: |
     !kick @user [reason] — mute + notify (X has no kick API)
     !mute @user [minutes] — local soft-mute
     !unmute @user
-    !del [event_id] — try to delete a DM event (usually only the bot's own)
+    !del [event_id] — try to delete (classic DM: only the bot's own event; Chat: delete-for-all if this account sent it or is a group admin)
     !note [key] [text] — save or list admin notes
     !get <key> — read a note
     !set <key> <value> — per-conversation setting

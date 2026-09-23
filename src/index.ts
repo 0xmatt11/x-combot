@@ -4,11 +4,17 @@ import { log } from "./log.js";
 import { Poller } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { ChatPoller } from "./chat/poller.js";
+import { openChatCipher } from "./chat/identity.js";
+import { chatHttpFromLive } from "./chat/live-http.js";
+import { ChatService } from "./chat/service.js";
 import type { LlmClient } from "./llm/client.js";
 import { OpenAiCompatibleClient } from "./llm/openai.js";
 import { resolveLlmConnection } from "./llm/provider.js";
 import type { DefaultsConfig } from "./types.js";
+import type { XClient } from "./x/client.js";
 import { LiveXClient, loadTokensFromDisk } from "./x/live-client.js";
+import { RoutedXClient } from "./x/routed-client.js";
 
 async function main(): Promise<void> {
   const env = loadEnv(true);
@@ -39,12 +45,15 @@ async function main(): Promise<void> {
   log.info(`Authenticated as @${me.username ?? "unknown"} (${me.id})`);
 
   const llmClient = buildLlmClient(env, defaults);
+  const botUserId = env.botUserId ?? me.id;
+  const chatService = await openChatService(env, client, store, botUserId);
+  const xClient: XClient = chatService ? new RoutedXClient(client, chatService) : client;
 
   const engine = new ModerationEngine(
     store,
-    client,
+    xClient,
     {
-      botUserId: env.botUserId ?? me.id,
+      botUserId,
       botUsername: me.username,
       ownerId: env.botOwnerId,
       globalAdminIds: env.adminIds,
@@ -56,15 +65,45 @@ async function main(): Promise<void> {
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;
   const poller = new Poller(client, store, engine, intervalMs, defaults.poll.max_results);
   poller.start();
+  const chatInterval = env.chatPollIntervalMs ?? intervalMs;
+  const chatPoller = chatService
+    ? new ChatPoller(
+        chatService,
+        store,
+        engine,
+        chatInterval,
+        env.chatConversationIds,
+        defaults.poll.max_results,
+      )
+    : undefined;
+  chatPoller?.start();
 
   const shutdown = () => {
     log.info("Shutting down");
     poller.stop();
+    chatPoller?.stop();
     store.close();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+}
+
+async function openChatService(
+  env: Env,
+  client: LiveXClient,
+  store: Store,
+  botUserId: string,
+): Promise<ChatService | undefined> {
+  if (env.chatConversationIds.length === 0) return undefined;
+  const cipher = await openChatCipher({
+    userId: botUserId,
+    keysPath: env.chatKeysPath,
+    pin: env.chatPin,
+    loadPublicKeys: () => client.getUserPublicKeys(botUserId),
+  });
+  log.info(`X Chat groups: ${env.chatConversationIds.join(", ")}`);
+  return new ChatService(chatHttpFromLive(client), cipher, store);
 }
 
 function buildLlmClient(env: Env, defaults: DefaultsConfig): LlmClient | undefined {

@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { log } from "../log.js";
-import type { DeleteResult, DmEvent, Mention, SendMessageResult, TokenSet, XUser } from "../types.js";
+import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
+import type { RawChatEventsPage } from "../chat/http.js";
+import type { DeleteHint, DeleteResult, DmEvent, Mention, SendMessageResult, TokenSet, XUser } from "../types.js";
 import {
   DM_EVENT_FIELDS,
   DM_EXPANSIONS,
@@ -154,7 +156,7 @@ export class LiveXClient implements XClient {
     };
   }
 
-  async deleteEvent(eventId: string): Promise<DeleteResult> {
+  async deleteEvent(eventId: string, _hint?: DeleteHint): Promise<DeleteResult> {
     try {
       const payload = await this.request<{ data?: { deleted?: boolean } }>(
         `/2/dm_events/${encodeURIComponent(eventId)}`,
@@ -169,6 +171,80 @@ export class LiveXClient implements XClient {
       log.warn(`DELETE /2/dm_events/${eventId} failed: ${message}`);
       return { deleted: false, error: message };
     }
+  }
+
+  async getChatConversationEvents(
+    conversationId: string,
+    params: { maxResults?: number; paginationToken?: string },
+  ): Promise<RawChatEventsPage> {
+    const search: Record<string, string> = {
+      max_results: String(params.maxResults ?? 50),
+      "chat_message_event.fields":
+        "id,sender_id,conversation_id,created_at,encoded_event,conversation_token,previous_id",
+    };
+    if (params.paginationToken) search.pagination_token = params.paginationToken;
+    return this.request<RawChatEventsPage>(
+      `/2/chat/conversations/${encodeURIComponent(conversationId)}/events`,
+      { search },
+    );
+  }
+
+  async getChatMemberIds(conversationId: string): Promise<string[]> {
+    const body = await this.request<unknown>(
+      `/2/chat/conversations/${encodeURIComponent(conversationId)}`,
+      { search: { expansions: "member_ids,admin_ids,participant_ids" } },
+    );
+    return memberIdsFromConversation(body);
+  }
+
+  async getUserPublicKeys(userId: string): Promise<RemotePublicKey[]> {
+    const body = await this.request<unknown>(
+      `/2/users/${encodeURIComponent(userId)}/public_keys`,
+    );
+    return normalizePublicKeys(body, userId);
+  }
+
+  async addUserPublicKey(
+    userId: string,
+    body: Record<string, unknown>,
+  ): Promise<{ version?: string }> {
+    const payload = await this.request<{ data?: { public_key_version?: string } }>(
+      `/2/users/${encodeURIComponent(userId)}/public_keys`,
+      { method: "POST", json: body },
+    );
+    return { version: payload.data?.public_key_version };
+  }
+
+  async sendChatMessage(
+    conversationId: string,
+    body: Record<string, string>,
+  ): Promise<{ messageId: string }> {
+    await this.request(
+      `/2/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
+      { method: "POST", json: body },
+    );
+    return { messageId: body.message_id ?? "" };
+  }
+
+  async deleteChatMessages(
+    conversationId: string,
+    body: Record<string, unknown>,
+  ): Promise<{ deleted: boolean }> {
+    const payload = await this.request<{ data?: { deleted?: boolean } }>(
+      `/2/chat/conversations/${encodeURIComponent(conversationId)}/messages/delete`,
+      { method: "POST", json: body },
+    );
+    return { deleted: Boolean(payload.data?.deleted) };
+  }
+
+  async addChatConversationKeys(
+    conversationId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    await this.request(`/2/chat/conversations/${encodeURIComponent(conversationId)}/keys`, {
+      method: "POST",
+      json: body,
+    });
   }
 
   private async request<T>(

@@ -86,6 +86,16 @@ CREATE TABLE IF NOT EXISTS llm_rate (
 
 CREATE INDEX IF NOT EXISTS idx_llm_rate
   ON llm_rate (conversation_id, user_id, ts_ms);
+
+CREATE TABLE IF NOT EXISTS chat_message_index (
+  event_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  sequence_id TEXT,
+  created_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_sequence
+  ON chat_message_index (sequence_id);
 `;
 
 export class Store {
@@ -360,6 +370,45 @@ export class Store {
       | undefined;
     if (!row) return undefined;
     return { eventId: row.event_id, senderId: row.sender_id ?? undefined };
+  }
+
+  rememberChatMessage(
+    eventId: string,
+    conversationId: string,
+    sequenceId: string | undefined,
+    createdAt?: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO chat_message_index (event_id, conversation_id, sequence_id, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(event_id) DO UPDATE SET
+           conversation_id = excluded.conversation_id,
+           sequence_id = COALESCE(excluded.sequence_id, chat_message_index.sequence_id),
+           created_at = COALESCE(excluded.created_at, chat_message_index.created_at)`,
+      )
+      .run(eventId, conversationId, sequenceId ?? null, createdAt ?? null);
+  }
+
+  lookupChatMessage(
+    id: string,
+  ): { eventId: string; conversationId: string; sequenceId?: string } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT event_id, conversation_id, sequence_id
+         FROM chat_message_index
+         WHERE event_id = ? OR sequence_id = ?
+         LIMIT 1`,
+      )
+      .get(id, id) as
+      | { event_id: string; conversation_id: string; sequence_id: string | null }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      eventId: row.event_id,
+      conversationId: row.conversation_id,
+      sequenceId: row.sequence_id ?? undefined,
+    };
   }
 
   recordLlmUse(

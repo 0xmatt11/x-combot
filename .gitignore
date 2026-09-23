@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 data/
+chat-keys.json
 *.log
 .DS_Store
 coverage/

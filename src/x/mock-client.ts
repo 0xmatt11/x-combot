@@ -1,4 +1,4 @@
-import type { DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
+import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
 import type { XClient } from "./client.js";
 
 export class MockXClient implements XClient {
@@ -71,7 +71,7 @@ export class MockXClient implements XClient {
     return { dmEventId, dmConversationId: `${this.bot.id}-${participantId}` };
   }
 
-  async deleteEvent(eventId: string): Promise<DeleteResult> {
+  async deleteEvent(eventId: string, _hint?: DeleteHint): Promise<DeleteResult> {
     if (this.failDeleteIds.has(eventId)) {
       return { deleted: false, error: "not owned by authenticated user" };
     }

@@ -157,6 +157,22 @@ describe("LiveXClient 429 and 402", () => {
     expect(error.retryAfterMs).toBe(600_000);
   });
 
+  it("requests Chat conversation events on /2/chat", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: [], meta: { conversation_key_events: [] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await client().getChatConversationEvents("g2029561975647150382", { maxResults: 25 });
+    const url = String((fetchMock.mock.calls as unknown[][])[0]?.[0]);
+    expect(url).toContain("/2/chat/conversations/g2029561975647150382/events");
+    expect(url).toContain("max_results=25");
+    expect(url).toContain("encoded_event");
+  });
+
   it("does not attach retryAfterMs to other HTTP failures", async () => {
     vi.stubGlobal(
       "fetch",
