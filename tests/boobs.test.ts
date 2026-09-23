@@ -13,13 +13,17 @@ import { ModerationEngine } from "../src/bot/engine.js";
 import { fetchAdultImage } from "../src/bot/image-fetch.js";
 import {
   createImageSearch,
+  duckDuckGoImageScriptUrl,
+  extractDuckDuckGoVqd,
   ImageSearchError,
+  parseDuckDuckGoImages,
   parseRedditGateway,
   parseRedditListing,
   serpApiImageSearchUrl,
   type ImageSearch,
 } from "../src/bot/image-search.js";
 import { loadDefaults } from "../src/config.js";
+import { loadEnv } from "../src/env.js";
 import { Store } from "../src/store.js";
 import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
 import { MockXClient } from "../src/x/mock-client.js";
@@ -315,6 +319,246 @@ describe("image search parsers", () => {
     expect(seenKey).toBe("bing-secret");
     expect(seenUrl).not.toContain("bing-secret");
     expect(seenUrl).toContain("safeSearch=Off");
+  });
+
+  it("reads a DuckDuckGo vqd token from the three ddgs quote forms", () => {
+    expect(extractDuckDuckGoVqd('vqd="4-quotedtoken123"')).toBe("4-quotedtoken123");
+    expect(extractDuckDuckGoVqd("vqd='4-singlequotetoken'")).toBe("4-singlequotetoken");
+    expect(extractDuckDuckGoVqd("before vqd=4-ampersandtoken&after")).toBe("4-ampersandtoken");
+    expect(extractDuckDuckGoVqd("<html>no token</html>")).toBeUndefined();
+  });
+
+  it("keeps the direct image URL and ignores the thumbnail", () => {
+    const parsed = parseDuckDuckGoImages({
+      results: [
+        {
+          image: "https://cdn.example/adult-close-up.jpg",
+          thumbnail: "https://tse.mm.bing.net/th?id=thumb",
+          title: "adult close-up chest crop",
+          url: "https://example.com/page",
+          source: "Example",
+        },
+        { thumbnail: "https://cdn.example/only-thumb.jpg", title: "no direct image" },
+        { image: "http://cdn.example/plain.jpg", title: "not https" },
+      ],
+    });
+    expect(parsed).toEqual([
+      {
+        url: "https://cdn.example/adult-close-up.jpg",
+        title: "adult close-up chest crop",
+        snippet: "Example",
+        adult: true,
+      },
+    ]);
+    expect(duckDuckGoImageScriptUrl("4-token12345678")).toContain("p=-1");
+    expect(new URL(duckDuckGoImageScriptUrl("4-token12345678")).searchParams.get("q")).toBe(
+      ADULT_CHEST_QUERY,
+    );
+  });
+
+  it("searches DuckDuckGo with vqd and safesearch off when no provider is set", async () => {
+    const urls: string[] = [];
+    const agents: string[] = [];
+    let referer = "";
+    const search = createImageSearch({
+      fetchImpl: async (url, init) => {
+        const href = String(url);
+        urls.push(href);
+        const headers = new Headers(init?.headers);
+        agents.push(headers.get("user-agent") ?? "");
+        if (href.includes("reddit.com")) {
+          return new Response("should not run", { status: 500 });
+        }
+        if (href.startsWith("https://duckduckgo.com/i.js?")) {
+          referer = headers.get("referer") ?? "";
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  image: "https://cdn.example/adult-close-up.jpg",
+                  thumbnail: "https://tse.mm.bing.net/th?id=thumb",
+                  title: "adult close-up chest crop",
+                  source: "Example",
+                },
+                {
+                  image: "https://cdn.example/teen-crop.jpg",
+                  title: "teen close-up",
+                  source: "Example",
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/x-javascript" } },
+          );
+        }
+        return new Response('<script>vqd="4-testtoken12345678";</script>', { status: 200 });
+      },
+    });
+    const hits = await search.searchAdultChestImages();
+    expect(urls).toHaveLength(2);
+    const page = new URL(urls[0]!);
+    expect(page.origin + page.pathname).toBe("https://duckduckgo.com/");
+    expect(page.searchParams.get("q")).toBe(ADULT_CHEST_QUERY);
+    expect(page.search).not.toMatch(/teen|lolita|schoolgirl/i);
+    const script = new URL(urls[1]!);
+    expect(script.origin + script.pathname).toBe("https://duckduckgo.com/i.js");
+    expect(script.searchParams.get("o")).toBe("json");
+    expect(script.searchParams.get("p")).toBe("-1");
+    expect(script.searchParams.get("vqd")).toBe("4-testtoken12345678");
+    expect(script.searchParams.get("q")).toBe(ADULT_CHEST_QUERY);
+    expect(agents.every((agent) => agent.includes("Mozilla"))).toBe(true);
+    expect(referer).toBe("https://duckduckgo.com/");
+    expect(hits.map((hit) => hit.url)).toEqual([
+      "https://cdn.example/adult-close-up.jpg",
+      "https://cdn.example/teen-crop.jpg",
+    ]);
+    expect(hits.every((hit) => !hit.url.includes("bing.net"))).toBe(true);
+    expect(pickAdultChestImage(hits)?.url).toBe("https://cdn.example/adult-close-up.jpg");
+  });
+
+  it("accepts ddg and ddgs aliases", async () => {
+    for (const provider of ["ddg", "ddgs", "DuckDuckGo"]) {
+      const urls: string[] = [];
+      const search = createImageSearch({
+        provider,
+        fetchImpl: async (url) => {
+          const href = String(url);
+          urls.push(href);
+          if (href.includes("/i.js?")) {
+            return new Response(
+              JSON.stringify({
+                results: [{ image: "https://cdn.example/alias.jpg", title: "close-up chest" }],
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response("vqd='4-aliastoken12345'", { status: 200 });
+        },
+      });
+      const hits = await search.searchAdultChestImages();
+      expect(hits.map((hit) => hit.url)).toEqual(["https://cdn.example/alias.jpg"]);
+      expect(urls.some((href) => href.includes("reddit.com"))).toBe(false);
+    }
+  });
+
+  it("falls back to Reddit when the DuckDuckGo vqd page fails", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "duckduckgo",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.includes("duckduckgo.com")) return new Response("blocked", { status: 403 });
+        if (href.includes("gateway.reddit.com")) {
+          return new Response(
+            JSON.stringify({
+              postIds: ["t3_ok"],
+              posts: {
+                t3_ok: { isNSFW: true, title: "close-up chest", url: SAFE_URL },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("blocked", { status: 403 });
+      },
+    });
+    const hits = await search.searchAdultChestImages();
+    expect(hits.map((hit) => hit.url)).toEqual([SAFE_URL]);
+    expect(urls[0]).toContain("duckduckgo.com");
+    expect(urls.some((href) => href.includes("gateway.reddit.com"))).toBe(true);
+    expect(urls.some((href) => href.includes("/i.js?"))).toBe(false);
+  });
+
+  it("falls back to Reddit when i.js returns no direct images", async () => {
+    const search = createImageSearch({
+      provider: "duckduckgo",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        if (href.includes("/i.js?")) {
+          return new Response(JSON.stringify({ results: [{ thumbnail: "https://cdn.example/t.jpg" }] }), {
+            status: 200,
+          });
+        }
+        if (href.includes("duckduckgo.com")) {
+          return new Response('vqd="4-emptytoken123456"', { status: 200 });
+        }
+        if (href.includes("hot.json")) {
+          return new Response(
+            JSON.stringify({
+              data: { children: [{ data: { over_18: true, title: "close-up", url: SAFE_URL } }] },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("blocked", { status: 403 });
+      },
+    });
+    await expect(search.searchAdultChestImages()).resolves.toEqual([
+      expect.objectContaining({ url: SAFE_URL, adult: true }),
+    ]);
+  });
+
+  it("says image search is unavailable when DuckDuckGo and Reddit both fail", async () => {
+    const search = createImageSearch({
+      provider: "ddgs",
+      random: () => 0,
+      fetchImpl: async () => new Response("nope", { status: 502 }),
+    });
+    await expect(search.searchAdultChestImages()).rejects.toBeInstanceOf(ImageSearchError);
+    try {
+      await search.searchAdultChestImages();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ImageSearchError);
+      const failure = error as ImageSearchError;
+      expect(failure.userMessage).toBe("Image search is unavailable right now.");
+      expect(failure.message).toMatch(/duckduckgo failed/);
+      expect(failure.message).toMatch(/reddit fallback failed/);
+    }
+  });
+
+  it("does not call Reddit when DuckDuckGo fallback is disabled", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "duckduckgo",
+      fallbackToReddit: false,
+      fetchImpl: async (url) => {
+        urls.push(String(url));
+        return new Response("down", { status: 503 });
+      },
+    });
+    await expect(search.searchAdultChestImages()).rejects.toMatchObject({
+      userMessage: "Image search is unavailable right now.",
+    });
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain("duckduckgo.com");
+  });
+});
+
+describe("BOOBS_SEARCH_PROVIDER", () => {
+  const previousProvider = process.env.BOOBS_SEARCH_PROVIDER;
+  const previousOwner = process.env.BOT_OWNER_ID;
+
+  afterEach(() => {
+    if (previousProvider === undefined) delete process.env.BOOBS_SEARCH_PROVIDER;
+    else process.env.BOOBS_SEARCH_PROVIDER = previousProvider;
+    if (previousOwner === undefined) delete process.env.BOT_OWNER_ID;
+    else process.env.BOT_OWNER_ID = previousOwner;
+  });
+
+  it("defaults to unset and accepts duckduckgo aliases", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    delete process.env.BOOBS_SEARCH_PROVIDER;
+    expect(loadEnv(true).boobsSearchProvider).toBeUndefined();
+    process.env.BOOBS_SEARCH_PROVIDER = "ddg";
+    expect(loadEnv(true).boobsSearchProvider).toBe("duckduckgo");
+    process.env.BOOBS_SEARCH_PROVIDER = "ddgs";
+    expect(loadEnv(true).boobsSearchProvider).toBe("duckduckgo");
+    process.env.BOOBS_SEARCH_PROVIDER = "reddit";
+    expect(loadEnv(true).boobsSearchProvider).toBe("reddit");
+    process.env.BOOBS_SEARCH_PROVIDER = "nope";
+    expect(() => loadEnv(true)).toThrow(/duckduckgo, reddit, serpapi, or bing/);
   });
 });
 

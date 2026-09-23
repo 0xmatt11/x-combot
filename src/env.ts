@@ -32,11 +32,14 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
-function optionalBoobsProvider(name: string): "reddit" | "serpapi" | "bing" | undefined {
+function optionalBoobsProvider(
+  name: string,
+): "duckduckgo" | "reddit" | "serpapi" | "bing" | undefined {
   const value = optional(name)?.toLowerCase();
   if (!value) return undefined;
+  if (value === "duckduckgo" || value === "ddg" || value === "ddgs") return "duckduckgo";
   if (value === "reddit" || value === "serpapi" || value === "bing") return value;
-  throw new Error(`${name} must be reddit, serpapi, or bing`);
+  throw new Error(`${name} must be duckduckgo, reddit, serpapi, or bing`);
 }
 
 function optionalActivityTransport(name: string): "stream" | "webhook" | "both" | undefined {
@@ -95,9 +98,9 @@ export interface Env {
   activityWebhookUrl?: string;
   /** Overrides `boobs.enabled` in YAML when set. */
   boobsEnabled?: boolean;
-  /** `reddit` (default, no key), `serpapi`, or `bing`. */
-  boobsSearchProvider?: "reddit" | "serpapi" | "bing";
-  /** SerpAPI key or Bing Image Search key. Unused by the Reddit provider. */
+  /** `duckduckgo` (default, no key; aliases `ddg` / `ddgs`), `reddit`, `serpapi`, or `bing`. */
+  boobsSearchProvider?: "duckduckgo" | "reddit" | "serpapi" | "bing";
+  /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
   boobsSearchApiKey?: string;
 }
 

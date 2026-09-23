@@ -85,7 +85,8 @@ delete:
   attempt_on_mute: true
 
 # Adult chest image (`!boobs`). Off by default so a moderation deploy does not
-# post NSFW. Set enabled: true or BOOBS_ENABLED=true (env wins). The command
+# post NSFW. Set enabled: true or BOOBS_ENABLED=true (env wins). Search defaults
+# to DuckDuckGo with no API key (BOOBS_SEARCH_PROVIDER). The command
 # ignores extra text so members cannot change the search. See the README.
 boobs:
   enabled: false
