@@ -53,7 +53,7 @@ These are different products. A URL like `https://x.com/i/chat/gYOUR_GROUP_ID` i
 
 Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. Chat polling uses the same 429 / 402 backoff as the DM poller (see **Rate limits and credits** above).
 
-**Watermark.** Each Chat conversation stores a cursor (`chat_events:<id>`) at the newest event id on the page, including events this process cannot decrypt. The next poll does not submit ciphertext at or before that cursor, so messages encrypted with a retired key version are not decrypted again every interval. The first poll only seeds the cursor and does not replay commands. If the stored id has fallen off the latest pages, the cursor jumps to the newest id so those pages are not re-fetched forever. Decrypt failures are logged at most once a minute per conversation.
+**Watermark.** Each Chat conversation stores a cursor (`chat_events:<id>`). The first poll records the newest event id and does not replay commands. Later polls decrypt only ciphertext newer than that cursor, and the cursor moves only through events that decrypted. A failed decrypt stays in place and is retried — that is how a KeyChange the process could not verify yet still gets another chance once signing keys load. Decrypt failures are logged at most once a minute per conversation. History that can never be opened (a conversation key wrapped to a different device) holds the cursor until you rotate onto the key this process holds; it is not skipped.
 
 **Polling volume.** With only `CHAT_CONVERSATION_IDS` set, classic `GET /2/dm_events` is not polled (`DM_POLL=true` turns it back on). Quiet Chat polls stretch from `poll.interval_ms` up to `poll.chat_idle_max_ms` (default 120s) and snap back when a new event arrives. Activity push (below) is what makes back-to-back commands realtime; the poll stays as catch-up.
 
@@ -188,11 +188,21 @@ Ids must look like `g` plus digits. A classic group-DM snowflake is rejected at 
 npm run chat:rotate -- gYOUR_GROUP_ID --confirm
 ```
 
-**Rotate aborts if any member has no public key.** The command lists current members, then `GET /2/users/{id}/public_keys` for each one. An empty key list for **any** member stops the command before it posts, so that person is not locked out. Every member must have opened X Chat and registered a public key, or be removed from the group, before rotate can finish — including when you are only trying to wrap keys for a bot that joined before `chat:register`. Rotate does not remove members. Skip this step when the bot was added after its public key was already on the account.
+**Rotate aborts if any member has no public key.** The command lists current members, then `GET /2/users/{id}/public_keys` for each one (one at a time; a 429 backs off and does not treat the member as keyless). An empty key list for **any** member stops the command before it posts, so that person is not locked out. Every member must have opened X Chat and registered a public key, or be removed from the group, before rotate can finish — including when you are only trying to wrap keys for a bot that joined before `chat:register`. Rotate does not remove members. Skip this step when the bot was added after its public key was already on the account.
 
-4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup. Ciphertext older than that cursor, including pre-rotation messages this key cannot open, is not decrypted on later polls.
+**One account can have two Chat identities.** `data/chat-keys.json` is the key this process can decrypt with. Opening X Chat in a browser, or unlocking Juicebox with a new passcode, registers a **newer** public key on the same account. `chat-xdk` wraps a conversation key to only the newest public key it is given for each user. Rotate therefore submits the **loaded** key for this bot (the file version, or the Juicebox version `CHAT_PIN` unlocked), not whatever `latest` the API returns. If those versions differ, rotate **refuses** unless you pass `--force`:
+
+```bash
+npm run chat:rotate -- gYOUR_GROUP_ID --confirm --force
+```
+
+`--force` wraps the key this process holds. The newer browser key will not read messages under that conversation key. The safer alignment is to leave the file unused and set `CHAT_PIN` so this process unlocks the same Juicebox key the browser registered. A file wins when both the file and `CHAT_PIN` are set.
+
+4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup. Later polls move that cursor only past events that decrypted. A message that fails to decrypt is retried, which matters when the failure is a KeyChange the process could not verify yet.
 
 Optional: `CHAT_PIN` unlocks a Juicebox-stored identity instead of the file, via `createChat().unlock()`. That needs `npm install juicebox-sdk`. A key file wins when both are set. `CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_KEYS_PATH` moves the identity file. `CHAT_POLL_IDLE_MAX_MS` caps how far a quiet Chat poll stretches (default 120s). `DM_POLL=true` also polls classic group DMs; leave it unset to skip `GET /2/dm_events` when Chat ids are configured.
+
+YAML still defaults `poll.interval_ms` to **12000**. On a busy group that interval, together with classic DM polling, is what produces long 429 backoffs. The running bot should set `POLL_INTERVAL_MS=30000` and `CHAT_POLL_INTERVAL_MS=30000` until Activity push is on. With Activity enabled, the catch-up poll defaults to 5 minutes (`activity.poll_interval_ms`).
 
 Juicebox realm tokens come from `juicebox_config` on `GET /2/users/{id}/public_keys`. They are not written by this repo.
 

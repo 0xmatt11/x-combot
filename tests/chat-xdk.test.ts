@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { generateIdentity, readKeyFile, writeKeyFile } from "../src/chat/identity.js";
 import { createWasmChat, importIdentity, wrapCipher } from "../src/chat/wasm-engine.js";
+import { boundSigningEntries } from "../src/chat/signing-keys.js";
 import { addConversationKeysBody, deleteMessagesBody } from "../src/chat/wire.js";
 
 /**
@@ -98,5 +99,42 @@ describe("chat-xdk WASM boundary", () => {
     const keysBody = addConversationKeysBody(prepared, cipher.signingPublicKey());
     expect(keysBody.conversation_key_version).toBe(prepared.conversationKeyVersion);
     expect(keysBody.conversation_participant_keys).toHaveLength(1);
+  });
+
+  it("binds a raw SEC1 identity key to the SPKI bytes the signature covers", async () => {
+    const generated = await generateIdentity("111");
+    const cipher = wrapCipher(generated.chat, {
+      userId: "111",
+      version: generated.file.version,
+      publicKey: generated.file.public_key,
+    });
+    const rawIdentity = generated.chat.getPublicKeys().identity;
+    const signature = generated.registration.publicKey.identityPublicKeySignature;
+    const signing = generated.file.signing_public_key;
+    expect(cipher.verifyKeyBinding(rawIdentity, signing, signature)).toBe(false);
+    expect(cipher.verifyKeyBinding(generated.file.public_key, signing, signature)).toBe(true);
+
+    const { entries, unboundVersions } = boundSigningEntries(
+      [
+        {
+          userId: "111",
+          publicKeyVersion: generated.file.version,
+          publicKey: rawIdentity,
+          signingPublicKey: signing,
+          identityPublicKeySignature: signature,
+        },
+      ],
+      (identity, signingKey, sig) => cipher.verifyKeyBinding(identity, signingKey, sig),
+    );
+    expect(unboundVersions).toEqual([]);
+    expect(entries[0]?.identityPublicKey.startsWith("MFkw")).toBe(true);
+    expect(
+      cipher.verifyKeyBinding(
+        entries[0]!.identityPublicKey,
+        entries[0]!.publicKey,
+        entries[0]!.identityPublicKeySignature,
+      ),
+    ).toBe(true);
+    expect(cipher.loadedIdentity()?.version).toBe(generated.file.version);
   });
 });

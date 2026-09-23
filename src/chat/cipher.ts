@@ -62,9 +62,29 @@ export interface PublicKeyMaterial {
   keyVersion: string;
 }
 
+/** The key this process can decrypt with (file or Juicebox), not "latest on the account". */
+export interface LoadedChatIdentity {
+  userId: string;
+  version: string;
+  /** Identity public key as registered, usually SPKI. */
+  publicKey: string;
+}
+
 export interface ChatCipher {
   setSigningKeys(keys: SigningKeyEntry[]): void;
-  decryptEvents(eventsB64: string[]): DecryptEventsResult;
+  decryptEvents(eventsB64: string[], signingKeys?: SigningKeyEntry[]): DecryptEventsResult;
+  /**
+   * True when `identityPublicKeySignature` is a valid binding of `signingPublicKey`
+   * over the exact bytes of `identityPublicKey`.
+   */
+  verifyKeyBinding(
+    identityPublicKey: string,
+    signingPublicKey: string,
+    identityPublicKeySignature: string,
+  ): boolean;
+  /** True when `publicKey` is the identity loaded in this process (SEC1 or SPKI). */
+  matchesRegisteredKey(publicKey: string): boolean;
+  loadedIdentity(): LoadedChatIdentity | undefined;
   encryptMessage(conversationId: string, text: string): SendPayload;
   prepareMessageDelete(
     conversationId: string,

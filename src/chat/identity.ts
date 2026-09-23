@@ -74,7 +74,11 @@ export async function openChatCipher(options: {
     log.info(
       `Loaded X Chat identity from ${options.keysPath} (public key version ${file.version}, registered=${file.registered}).`,
     );
-    return wrapCipher(chat);
+    return wrapCipher(chat, {
+      userId: file.user_id,
+      version: file.version,
+      publicKey: file.public_key,
+    });
   }
 
   if (options.pin) {
@@ -122,7 +126,11 @@ async function openJuiceboxCipher(
   chat.setIdentity(userId, latest.publicKeyVersion);
   chat.setCacheKeys(true);
   log.info(`Unlocked X Chat identity from Juicebox (public key version ${latest.publicKeyVersion}).`);
-  return wrapCipher(chat);
+  return wrapCipher(chat, {
+    userId,
+    version: latest.publicKeyVersion,
+    publicKey: latest.publicKey,
+  });
 }
 
 export async function generateIdentity(userId: string): Promise<{

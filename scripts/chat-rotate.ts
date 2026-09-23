@@ -11,12 +11,17 @@ import { LiveXClient, loadTokensFromDisk } from "../src/x/live-client.js";
  * whose public key we can fetch. Aborts without posting if any member key is missing.
  */
 async function main(): Promise<void> {
-  const args = process.argv.slice(2).filter((arg) => arg !== "--confirm");
+  const args = process.argv.slice(2).filter((arg) => arg !== "--confirm" && arg !== "--force");
   const confirm = process.argv.includes("--confirm");
+  const force = process.argv.includes("--force");
   const conversationId = args.find((arg) => isChatGroupId(arg));
   if (!conversationId || !confirm) {
     console.log("Rotate the Chat conversation key so every current member (including this bot) can decrypt.");
     console.log("  npm run chat:rotate -- g2029561975647150382 --confirm");
+    console.log("The wrap includes the public key loaded by this process (data/chat-keys.json, or Juicebox via CHAT_PIN).");
+    console.log("If that key is older than the account's latest key, rotate refuses unless you pass --force.");
+    console.log("  npm run chat:rotate -- g2029561975647150382 --confirm --force");
+    console.log("Prefer CHAT_PIN so this process unlocks the same Juicebox key the browser registered.");
     console.log("Run chat:register first. This does not remove members.");
     process.exit(1);
   }
@@ -48,7 +53,7 @@ async function main(): Promise<void> {
   });
   const store = new Store(":memory:");
   const service = new ChatService(chatHttpFromLive(client), cipher, store);
-  await service.rotateConversationKey(conversationId);
+  await service.rotateConversationKey(conversationId, { force });
   store.close();
   console.log(`Rotated keys for ${conversationId}.`);
 }
