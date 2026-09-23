@@ -171,7 +171,8 @@ export class ChatService {
   /**
    * Rotate the conversation key and wrap it for every member we can see.
    * The chat-xdk keeps only the highest version per user, so this process's
-   * loaded identity is the only key submitted for the bot. Aborts without
+   * loaded identity is the only key submitted for the bot. Other members get
+   * every registered version (the SDK wraps their newest). Aborts without
    * posting when that loaded key is older than the account's latest key,
    * unless `force` is set.
    */

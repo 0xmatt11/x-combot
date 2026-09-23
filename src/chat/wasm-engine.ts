@@ -15,10 +15,11 @@ import type {
 
 /**
  * Crypto methods shared by the WASM `Chat` class and the public
- * `createChat()` wrapper. The published package entrypoint hides
- * `importKeys` / `exportKeys`; the WASM class that ships in the same
- * package exposes them, which is how the official JS example persists a
- * server-side identity blob.
+ * `createChat()` wrapper. `ChatWithJuicebox` (what `createChat()` returns)
+ * does not forward `importKeys` / `exportKeys`. The WASM `Chat` class in the
+ * same package does: the wrapper calls them internally to move Juicebox
+ * secret bytes into the engine. A server persists that blob with
+ * `exportKeys()` after unlock.
  */
 export interface XdkLike {
   setIdentity(userId: string, signingKeyVersion: string): void;
@@ -32,7 +33,12 @@ export interface XdkLike {
   ): boolean;
   matchesRegisteredKey(publicKeyB64: string): boolean;
   decryptEvents(events: string[], signingKeys?: SigningKeyEntry[]): DecryptEventsResult;
-  encryptMessage(params: { conversationId: string; text: string }): SendPayload & {
+  encryptMessage(params: {
+    conversationId: string;
+    text: string;
+    conversationKey?: Uint8Array;
+    conversationKeyVersion?: string;
+  }): SendPayload & {
     encodedEventSignature?: string;
   };
   prepareMessageDelete(params: {
@@ -46,6 +52,7 @@ export interface XdkLike {
   }): PreparedKeyChange;
   importKeys?(keys: Uint8Array, version?: string | null): void;
   exportKeys?(): Uint8Array;
+  lock?(): void;
   generateKeypairs?(): {
     publicKey: {
       publicKey: string;
@@ -103,6 +110,7 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
     signing = inner.getPublicKeys().signing;
   };
   return {
+    identity,
     setSigningKeys(keys) {
       inner.setSigningKeys(keys);
     },
@@ -159,10 +167,14 @@ export function importIdentity(chat: XdkLike, privateKeysB64: string, version: s
     throw new Error("This chat-xdk build does not expose importKeys.");
   }
   const bytes = Buffer.from(privateKeysB64, "base64");
-  if (bytes.length === 0) {
-    throw new Error("Chat identity file has an empty private key.");
+  try {
+    if (bytes.length === 0) {
+      throw new Error("Chat identity file has an empty private key.");
+    }
+    chat.importKeys(bytes, version);
+  } finally {
+    bytes.fill(0);
   }
-  chat.importKeys(bytes, version);
 }
 
 export function exportIdentity(chat: XdkLike): string {
@@ -170,5 +182,11 @@ export function exportIdentity(chat: XdkLike): string {
     throw new Error("This chat-xdk build does not expose exportKeys.");
   }
   const bytes = chat.exportKeys();
-  return Buffer.from(bytes).toString("base64");
+  const copy = Buffer.from(bytes);
+  bytes.fill(0);
+  try {
+    return copy.toString("base64");
+  } finally {
+    copy.fill(0);
+  }
 }

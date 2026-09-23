@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+# Chat identity (mode 0600). Never commit.
 data/
 chat-keys.json
 *.log
