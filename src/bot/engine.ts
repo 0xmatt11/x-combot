@@ -25,6 +25,7 @@ import {
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import { matchFilters } from "./filters.js";
+import { diceReply } from "./games/index.js";
 import {
   isAdmin,
   isLlmCommandName,
@@ -696,6 +697,9 @@ export class ModerationEngine {
       case "ass":
       case "booty":
         await this.handleAdultImage(event, command.name, command.extra, settings, actions, nowMs);
+        return;
+      case "dice":
+        await this.reply(conversationId, diceReply(command.notation), actions);
         return;
       default:
         break;

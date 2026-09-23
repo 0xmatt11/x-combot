@@ -86,6 +86,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
 11. **Adult image** — `!boobs` posts one random chest / cleavage photo. `!ass` and `!booty` post one random butt photo and share that switch. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed. An optional vision check (`BOOBS_VISION`) is off by default.
 12. **XP / levels** — messages (and Chat reactions, when those events arrive) earn XP on a ComBot-like curve. Crossing a level posts `@handle leveled up to level N!`. Reply `+` or `-` to give or take one level. `!xp` / `!level` / `!rank` and `!top`. On by default. See [XP and levels](#xp-and-levels).
+13. **Games** — anyone in the group can play. Games start with `!dice` (1d6, or notation like `!dice 2d20`).
 
 ## Commands
 
@@ -101,6 +102,7 @@ Public:
 - `!ask <question>` — LLM reply (also `@botname …` or configured wake prefixes)
 - `!summarize [focus]` — load conversation history and summarize
 - `!analyze [prompt]` — load conversation history and answer about the thread
+- `!dice [NdM]` — roll dice. Default is 1d6. Also `!dice d20` and `!dice 1d6+2`. Anyone in the group can roll. See [Games](#games).
 - `!<made-up>` — if the name is not a real command (`!diediesillygoat`, `!banana …`), a one- or two-sentence witty LLM reply. The bot stays quiet when the LLM is off, unconfigured, limited to admins, or rate-limited. See [Unknown bang commands](#unknown-bang-commands).
 
 Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
@@ -194,6 +196,12 @@ The same giver can change the same target only once per `xp.level_grant_cooldown
 | `leaderboard_size` | `10` | Rows in `!top` (clamped to 1–25). |
 
 `!xp` with no XP yet reports level 0, 0 XP, unranked, and the next threshold (100). `!top` skips members at 0 XP.
+
+## Games
+
+Anyone in the group can play. There is no admin gate. Games start with `!dice`.
+
+`!dice` rolls **1d6** and replies like `🎲 You rolled a 4`. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice and 100 sides so the reply stays short. Anything else gets a one-line usage reply. `/dice` works the same way.
 
 ## Adult image command
 
@@ -463,7 +471,7 @@ Then in a group DM:
 
 **Unknown bang commands**
 
-A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, and the rest of the list above) stay on their own path. `!warn` with no @user is still that command: it uses a reply target or asks who, and it does not become a joke. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
+A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, `!xp`, `!top`, `!dice`, and the rest of the list above) stay on their own path. `!warn` with no @user is still that command: it uses a reply target or asks who, and it does not become a joke. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
 
 The joke uses a dedicated prompt. It does **not** load group history, so it does not spend X read quota the way `!summarize` does. The invented command token and any arguments are included so the reply can riff on them. The model is asked for one or two group-chat sentences, with no actionable harmful advice, and the posted text is cut to `llm.max_reply_chars`.
 
@@ -512,6 +520,7 @@ src/
   index.ts            # poll loop, optional Activity stream/webhook
   bot/engine.ts       # ComBot-like actions + LLM dispatch
   bot/parser.ts       # command + wake parsing
+  bot/games/          # group games; dice is the first
   bot/adult-filter.ts # topic, genital, and age text gate for !boobs, !ass, and !booty
   bot/adult-vision.ts # optional LLM vision check (BOOBS_VISION, default off)
   bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
