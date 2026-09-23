@@ -20,10 +20,21 @@ interface LiveClientOptions {
   tokens: TokenSet;
 }
 
-interface ApiError extends Error {
+export interface ApiError extends Error {
   status?: number;
   body?: unknown;
+  /** How long callers should wait before retrying, when the API asked us to back off. */
+  retryAfterMs?: number;
 }
+
+/** Used when a 429 has neither x-rate-limit-reset nor Retry-After. */
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 15_000;
+const MIN_RATE_LIMIT_BACKOFF_MS = 1_000;
+/**
+ * HTTP 402 means credits are depleted. Polling again on the normal interval
+ * just burns the window, so wait several minutes before the next attempt.
+ */
+export const CREDITS_DEPLETED_BACKOFF_MS = 5 * 60 * 1000;
 
 export class LiveXClient implements XClient {
   private tokens: TokenSet;
@@ -193,11 +204,19 @@ export class LiveXClient implements XClient {
       return this.request<T>(pathname, { ...options, retryAuth: false });
     }
 
-    if (response.status === 429) {
-      const reset = Number(response.headers.get("x-rate-limit-reset") ?? "0");
-      const waitMs = reset > 0 ? Math.max(reset * 1000 - Date.now(), 1_000) : 15_000;
-      const error = new Error(`Rate limited; retry after ${waitMs}ms`) as ApiError;
-      error.status = 429;
+    if (response.status === 429 || response.status === 402) {
+      const fromHeaders = headerBackoffMs(response.headers, Date.now());
+      const waitMs =
+        response.status === 402
+          ? Math.max(fromHeaders ?? 0, CREDITS_DEPLETED_BACKOFF_MS)
+          : (fromHeaders ?? DEFAULT_RATE_LIMIT_BACKOFF_MS);
+      const error = new Error(
+        response.status === 402
+          ? `Credits depleted; retry after ${waitMs}ms`
+          : `Rate limited; retry after ${waitMs}ms`,
+      ) as ApiError;
+      error.status = response.status;
+      error.retryAfterMs = waitMs;
       throw error;
     }
 
@@ -275,6 +294,40 @@ export class LiveXClient implements XClient {
       this.refreshPromise = undefined;
     }
   }
+}
+
+/**
+ * Milliseconds until a 429/402 window lifts, from `x-rate-limit-reset` (UTC
+ * epoch seconds) and/or `Retry-After` (delay-seconds or HTTP-date). Returns
+ * undefined when neither header is usable so the caller can apply a default.
+ * When both are present, the longer wait wins.
+ */
+export function headerBackoffMs(headers: Headers, now = Date.now()): number | undefined {
+  const waits: number[] = [];
+
+  const resetRaw = headers.get("x-rate-limit-reset");
+  if (resetRaw) {
+    const resetSec = Number(resetRaw);
+    if (Number.isFinite(resetSec) && resetSec > 0) {
+      waits.push(resetSec * 1000 - now);
+    }
+  }
+
+  const retryAfter = headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (retryAfter.trim() !== "" && Number.isFinite(seconds)) {
+      waits.push(seconds * 1000);
+    } else {
+      const dateMs = Date.parse(retryAfter);
+      if (Number.isFinite(dateMs)) {
+        waits.push(dateMs - now);
+      }
+    }
+  }
+
+  if (waits.length === 0) return undefined;
+  return Math.max(MIN_RATE_LIMIT_BACKOFF_MS, ...waits);
 }
 
 interface RawEventsResponse {
