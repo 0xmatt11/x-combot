@@ -16,9 +16,13 @@ const API_BASE = "https://api.x.com";
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 
 /**
- * Fields accepted by `chat_message_event.fields` on
- * GET /2/chat/conversations/:id/events. `created_at_msec` and `sequence_id`
- * are not in that set and make the request return HTTP 400.
+ * `chat_message_event.fields` for GET /2/chat/conversations/:id/events.
+ * The API accepts only `id`, `conversation_id`, `conversation_token`,
+ * `created_at`, `encoded_event`, `is_trusted`, `previous_id`, `sender_id`,
+ * and `message_event_signature`. `created_at_msec` and `sequence_id` return
+ * HTTP 400; those values are read from the payload when present.
+ * `message_event_signature` and `is_trusted` are allowed but unused:
+ * decrypt consumes `encoded_event` only.
  */
 export const CHAT_MESSAGE_EVENT_FIELDS = [
   "id",

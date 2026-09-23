@@ -172,8 +172,21 @@ describe("LiveXClient 429 and 402", () => {
     expect(url.pathname).toBe("/2/chat/conversations/g2029561975647150382/events");
     expect(url.searchParams.get("max_results")).toBe("25");
     const fields = url.searchParams.get("chat_message_event.fields")?.split(",") ?? [];
+    const allowed = [
+      "id",
+      "conversation_id",
+      "conversation_token",
+      "created_at",
+      "encoded_event",
+      "is_trusted",
+      "previous_id",
+      "sender_id",
+      "message_event_signature",
+    ];
     expect(fields).toEqual(CHAT_MESSAGE_EVENT_FIELDS.split(","));
+    expect(fields.every((field) => allowed.includes(field))).toBe(true);
     expect(fields).toContain("created_at");
+    expect(fields).toContain("encoded_event");
     expect(fields).not.toContain("created_at_msec");
     expect(fields).not.toContain("sequence_id");
   });
