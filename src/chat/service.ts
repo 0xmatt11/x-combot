@@ -1,10 +1,12 @@
 import { log } from "../log.js";
 import type { Store } from "../store.js";
 import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult } from "../types.js";
+import { logDecryptErrors } from "./decrypt-log.js";
 import { isChatGroupId } from "./ids.js";
 import type { ChatCipher, SigningKeyEntry } from "./cipher.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
 import { chatEventToDm } from "./normalize.js";
+import { newestRawId, normalizeChatPage, rawEventsAfterWatermark } from "./raw.js";
 import {
   addConversationKeysBody,
   deleteMessagesBody,
@@ -16,10 +18,19 @@ import {
 
 const MAX_CATCHUP_PAGES = 4;
 
+export interface ChatPull {
+  newestId?: string;
+  events: DmEvent[];
+  /** True when the stored cursor was older than every page we were willing to read. */
+  replacedStaleWatermark: boolean;
+}
+
 export class ChatService {
   private readonly signingByUser = new Map<string, SigningKeyEntry[]>();
   private readonly membersLoaded = new Set<string>();
   private readonly tokens = new Map<string, string>();
+  /** Key-change blobs already submitted to decryptEvents. Old versions are not retried. */
+  private readonly seenKeyEvents = new Set<string>();
 
   constructor(
     private readonly http: ChatHttp,
@@ -29,39 +40,61 @@ export class ChatService {
 
   /**
    * Fetch the newest page (and older pages until the watermark is found).
-   * Decrypts even when seeding a watermark so the conversation-key cache is warm.
-   * Returns moderation events that are strictly newer than `watermarkId`, oldest first.
+   * Ciphertext at or before the watermark is not decrypted again — pre-rotation
+   * history stays on the page X returns, but it is not re-submitted every poll.
+   * Key-change events are still applied so the conversation-key cache stays warm.
+   * Returns moderation events strictly newer than `watermarkId`, oldest first.
    */
   async pullNew(
     conversationId: string,
     watermarkId: string | undefined,
     maxResults: number,
-  ): Promise<{ newestId?: string; events: DmEvent[] }> {
-    const pages = await this.loadPages(conversationId, watermarkId, maxResults);
-    const decrypted = await this.decryptPages(conversationId, pages);
-    const newestId = pages[0]?.data?.find((event) => event.id)?.id;
-    // First sight of a conversation seeds the watermark in the poller.
-    // Decrypt anyway so the conversation-key cache is warm for the next send.
-    if (watermarkId === undefined) {
-      return { newestId, events: [] };
+  ): Promise<ChatPull> {
+    const { pages, watermarkFound } = await this.loadPages(
+      conversationId,
+      watermarkId,
+      maxResults,
+    );
+    const newestId = newestRawId(pages[0]);
+    const replacedStaleWatermark = Boolean(
+      watermarkId && watermarkId !== "empty" && !watermarkFound && newestId && newestId !== watermarkId,
+    );
+    if (replacedStaleWatermark) {
+      log.info(
+        `Chat watermark for ${conversationId} was not in the latest pages; advancing to ${newestId} so undecryptable history is not fetched again.`,
+      );
     }
 
-    const stopAt = watermarkId === "empty" ? undefined : watermarkId;
-    const newIds = new Set<string>();
-    for (const page of pages) {
-      let reachedWatermark = false;
-      for (const raw of page.data ?? []) {
-        if (!raw.id) continue;
-        if (stopAt && raw.id === stopAt) {
-          reachedWatermark = true;
-          break;
-        }
-        newIds.add(raw.id);
-      }
-      if (reachedWatermark) break;
+    const newer = rawEventsAfterWatermark(pages, watermarkId);
+    const onlyEncoded = new Set<string>();
+    for (const raw of newer) {
+      if (raw.encoded_event) onlyEncoded.add(raw.encoded_event);
     }
+    const decrypted = await this.decryptPages(conversationId, pages, { onlyEncoded });
+    // First sight of a conversation seeds the watermark in the poller and does not replay.
+    if (watermarkId === undefined) {
+      return { newestId, events: [], replacedStaleWatermark: false };
+    }
+
+    const newIds = new Set(newer.map((raw) => raw.id).filter((id): id is string => Boolean(id)));
     const fresh = decrypted.filter((event) => newIds.has(event.id));
-    return { newestId, events: fresh.reverse() };
+    return { newestId, events: fresh.reverse(), replacedStaleWatermark };
+  }
+
+  /**
+   * One Activity push (`chat.received`). Same decrypt path as a poll page:
+   * key-change blobs first, then `encoded_event`.
+   */
+  async ingestActivity(input: {
+    conversationId: string;
+    raw: RawChatEvent;
+    keyEvents: string[];
+  }): Promise<DmEvent[]> {
+    const page: RawChatEventsPage = {
+      data: [input.raw],
+      meta: { conversation_key_events: input.keyEvents },
+    };
+    return this.decryptPages(input.conversationId, [normalizeChatPage(page)]);
   }
 
   async listHistory(params: {
@@ -178,35 +211,50 @@ export class ChatService {
     conversationId: string,
     watermarkId: string | undefined,
     maxResults: number,
-  ): Promise<RawChatEventsPage[]> {
+  ): Promise<{ pages: RawChatEventsPage[]; watermarkFound: boolean }> {
     const pages: RawChatEventsPage[] = [];
     let token: string | undefined;
+    let watermarkFound = watermarkId === undefined || watermarkId === "empty";
     for (let pageIndex = 0; pageIndex < MAX_CATCHUP_PAGES; pageIndex += 1) {
-      const page = await this.http.getConversationEvents(conversationId, {
-        maxResults,
-        paginationToken: token,
-      });
+      const page = normalizeChatPage(
+        await this.http.getConversationEvents(conversationId, {
+          maxResults,
+          paginationToken: token,
+        }),
+      );
       pages.push(page);
       if (watermarkId === undefined) break;
-      const ids = (page.data ?? []).map((event) => event.id);
+      const ids = (page.data ?? []).map((event) => event.id).filter((id): id is string => Boolean(id));
       const found = watermarkId === "empty" || ids.includes(watermarkId);
+      if (found) watermarkFound = true;
       token = page.meta?.next_token;
       if (found || !token) break;
     }
-    return pages;
+    return { pages, watermarkFound };
   }
 
   private async decryptPages(
     conversationId: string,
     pages: RawChatEventsPage[],
+    options?: { onlyEncoded?: ReadonlySet<string> },
   ): Promise<DmEvent[]> {
-    await this.ensureMemberKeys(conversationId);
+    const membersReady = await this.ensureMemberKeys(conversationId);
+    const normalized = pages.map((page) => normalizeChatPage(page));
+    const includeEncoded = (raw: RawChatEvent): boolean => {
+      if (!options?.onlyEncoded) return true;
+      return Boolean(raw.encoded_event && options.onlyEncoded.has(raw.encoded_event));
+    };
+
     const senderIds = new Set<string>();
     let newestToken: string | undefined;
-    for (const page of pages) {
+    for (const page of normalized) {
       for (const raw of page.data ?? []) {
+        if (!includeEncoded(raw)) continue;
         if (raw.sender_id) senderIds.add(raw.sender_id);
-        // Pages are newest-first, so the first token is the one to send with.
+      }
+    }
+    for (const page of normalized) {
+      for (const raw of page.data ?? []) {
         if (!newestToken && raw.conversation_token) newestToken = raw.conversation_token;
       }
     }
@@ -214,14 +262,18 @@ export class ChatService {
     await this.ensureSigningKeys([...senderIds]);
 
     const encoded: string[] = [];
-    for (const page of pages) {
+    const freshKeys: string[] = [];
+    for (const page of normalized) {
       for (const keyEvent of page.meta?.conversation_key_events ?? []) {
-        if (keyEvent) encoded.push(keyEvent);
+        if (!keyEvent || this.seenKeyEvents.has(keyEvent)) continue;
+        freshKeys.push(keyEvent);
+        encoded.push(keyEvent);
       }
     }
     const raws: RawChatEvent[] = [];
-    for (const page of pages) {
+    for (const page of normalized) {
       for (const raw of page.data ?? []) {
+        if (!includeEncoded(raw)) continue;
         raws.push(raw);
         if (raw.encoded_event) encoded.push(raw.encoded_event);
       }
@@ -229,14 +281,9 @@ export class ChatService {
 
     if (encoded.length === 0) return [];
     const result = this.cipher.decryptEvents(encoded);
-    const errors = Object.entries(result.errors);
-    if (errors.length > 0) {
-      log.warn(
-        `Chat decrypt reported ${errors.length} error(s) in ${conversationId}: ${errors
-          .slice(0, 3)
-          .map(([, message]) => message)
-          .join(" | ")}`,
-      );
+    logDecryptErrors(conversationId, result.errors);
+    if (membersReady) {
+      for (const keyEvent of freshKeys) this.seenKeyEvents.add(keyEvent);
     }
     const byB64 = new Map<string, (typeof result.messages)[number]["event"]>();
     for (const message of result.messages) {
@@ -254,17 +301,19 @@ export class ChatService {
     return events;
   }
 
-  private async ensureMemberKeys(conversationId: string): Promise<void> {
-    if (this.membersLoaded.has(conversationId)) return;
+  private async ensureMemberKeys(conversationId: string): Promise<boolean> {
+    if (this.membersLoaded.has(conversationId)) return true;
     try {
       const ids = await this.http.getMemberIds(conversationId);
       await this.ensureSigningKeys(ids);
       this.membersLoaded.add(conversationId);
+      return true;
     } catch (error) {
       log.warn(
         `Could not list members of ${conversationId} before decrypt`,
         error,
       );
+      return false;
     }
   }
 

@@ -1,0 +1,344 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ModerationEngine } from "../src/bot/engine.js";
+import {
+  ChatActivityIntake,
+  chatReceivedSubscriptionBody,
+  crcResponseToken,
+  hasChatReceivedSubscription,
+  parseActivityChat,
+  signWebhookBody,
+  takeActivityLines,
+} from "../src/chat/activity.js";
+import { readActivityBody } from "../src/chat/activity-stream.js";
+import { ensureChatActivitySubscription } from "../src/chat/activity-subscribe.js";
+import { startActivityWebhook } from "../src/chat/activity-webhook.js";
+import type { ChatCipher, DecryptedEvent } from "../src/chat/cipher.js";
+import { DECRYPT_WARN_INTERVAL_MS, logDecryptErrors, resetDecryptWarningWindow } from "../src/chat/decrypt-log.js";
+import type { ChatHttp, RawChatEventsPage } from "../src/chat/http.js";
+import { ChatService } from "../src/chat/service.js";
+import { Store } from "../src/store.js";
+import type { BotRuntimeConfig, DefaultsConfig } from "../src/types.js";
+import { MockXClient } from "../src/x/mock-client.js";
+import { RoutedXClient } from "../src/x/routed-client.js";
+
+const GROUP = "g2029561975647150382";
+
+const defaults: DefaultsConfig = {
+  welcome: { enabled: false, text: "Welcome @{username}!" },
+  rules: "Be nice.",
+  help: "CHAT_HELP_OK",
+  flood: { max_messages: 5, window_ms: 10_000, mute_ms: 60_000, warn_on_flood: false },
+  warns: { limit: 3, auto_mute_ms: 60_000, notify_admins: false },
+  filters: [],
+  poll: { interval_ms: 1000, max_results: 50 },
+  delete: { attempt_on_filter: false, attempt_on_flood: false, attempt_on_mute: false },
+};
+
+function runtime(): BotRuntimeConfig {
+  return {
+    botUserId: "bot-1",
+    botUsername: "miladybot",
+    ownerId: "owner-1",
+    globalAdminIds: [],
+    defaults,
+  };
+}
+
+class FakeCipher implements ChatCipher {
+  readonly texts: string[] = [];
+  readonly batches: string[][] = [];
+  readonly events = new Map<string, DecryptedEvent>();
+
+  setSigningKeys(): void {}
+
+  decryptEvents(eventsB64: string[]) {
+    this.batches.push([...eventsB64]);
+    const messages = [];
+    const errors: Record<string, string> = {};
+    for (const b64 of eventsB64) {
+      const event = this.events.get(b64);
+      if (event) messages.push({ event, originalB64: b64 });
+      else errors[b64] = "missing key";
+    }
+    return { messages, errors };
+  }
+
+  encryptMessage(_conversationId: string, text: string) {
+    this.texts.push(text);
+    return {
+      messageId: "mid-1",
+      encryptedContent: `enc:${text}`,
+      encodedEventSignature: "sig",
+    };
+  }
+
+  prepareMessageDelete() {
+    return {
+      messageId: "del",
+      encodedMessageEventDetail: "d",
+      signature: "s",
+      signatureVersion: "7",
+      publicKeyVersion: "1",
+    };
+  }
+
+  prepareConversationKeyChange(params: { conversationId: string }) {
+    return {
+      conversationId: params.conversationId,
+      conversationKeyVersion: "1",
+      participantKeys: [],
+      actionSignatures: [],
+    };
+  }
+
+  signingPublicKey(): string {
+    return "bot-signing-key";
+  }
+}
+
+class FakeHttp implements ChatHttp {
+  async getConversationEvents(): Promise<RawChatEventsPage> {
+    return { data: [] };
+  }
+  async getMemberIds(): Promise<string[]> {
+    return ["alice-1"];
+  }
+  async getUserPublicKeys() {
+    return [];
+  }
+  async sendChatMessage() {
+    return { messageId: "sent" };
+  }
+  async deleteChatMessages() {
+    return { deleted: true };
+  }
+  async addConversationKeys(): Promise<void> {}
+  async addUserPublicKey() {
+    return { version: "1" };
+  }
+}
+
+function envelope(overrides: Record<string, unknown> = {}) {
+  return {
+    data: {
+      event_type: "chat.received",
+      event_uuid: "99",
+      payload: {
+        id: "evt-2",
+        sender_id: "alice-1",
+        conversation_id: GROUP,
+        encoded_event: "b64-help",
+        conversation_token: "tok",
+        conversation_key_change_event: "key-new",
+        created_at_msec: "1710000000000",
+        ...overrides,
+      },
+    },
+  };
+}
+
+describe("Activity Chat parsing", () => {
+  it("reads a chat.received envelope and ignores 1:1 plus chat.sent", () => {
+    const parsed = parseActivityChat(envelope());
+    expect(parsed).toMatchObject({
+      eventType: "chat.received",
+      conversationId: GROUP,
+      keyEvents: ["key-new"],
+      raw: { id: "evt-2", encoded_event: "b64-help", conversation_token: "tok" },
+    });
+    expect(parsed?.raw.created_at).toBe(new Date(1_710_000_000_000).toISOString());
+
+    expect(
+      parseActivityChat({
+        data: {
+          event_type: "chat.received",
+          payload: { conversation_id: "111-222", encoded_event: "b64" },
+        },
+      }),
+    ).toBeUndefined();
+
+    const sent = parseActivityChat(envelope());
+    expect(sent?.eventType).toBe("chat.received");
+    const sentEnvelope = envelope();
+    (sentEnvelope.data as { event_type: string }).event_type = "chat.sent";
+    expect(parseActivityChat(sentEnvelope)?.eventType).toBe("chat.sent");
+  });
+
+  it("splits NDJSON and drops heartbeat blanks", () => {
+    const first = takeActivityLines('{"a":1}\n\n{"b":');
+    expect(first.lines).toEqual(['{"a":1}']);
+    expect(first.rest).toBe('{"b":');
+    const second = takeActivityLines(`${first.rest}2}\r\n`);
+    expect(second.lines).toEqual(['{"b":2}']);
+  });
+
+  it("answers CRC with the OAuth 2.0 client secret", () => {
+    expect(crcResponseToken("challenge", "secret")).toMatch(/^sha256=/);
+    expect(signWebhookBody("{}", "secret")).toBe(crcResponseToken("{}", "secret"));
+  });
+});
+
+describe("Activity intake", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  it("decrypts a mocked chat.received event and runs the command layer", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const dm = new MockXClient({ id: "bot-1", username: "miladybot" });
+    const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
+    const intake = new ChatActivityIntake(service, engine, [GROUP]);
+
+    await intake.handle(envelope());
+    expect(cipher.batches[0]?.[0]).toBe("key-new");
+    expect(cipher.batches[0]).toContain("b64-help");
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+
+    await intake.handle(envelope());
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+
+    const other = envelope({ conversation_id: "g999" });
+    await intake.handle(other);
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+  });
+
+  it("reads a stream body of two events", async () => {
+    const seen: unknown[] = [];
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const text = `${JSON.stringify(envelope())}\n\n${JSON.stringify({ data: { event_type: "profile.update.bio" } })}\n`;
+        controller.enqueue(new TextEncoder().encode(text));
+        controller.close();
+      },
+    });
+    await readActivityBody(stream, async (body) => {
+      seen.push(body);
+    });
+    expect(seen).toHaveLength(2);
+    expect(parseActivityChat(seen[0])?.conversationId).toBe(GROUP);
+    expect(parseActivityChat(seen[1])).toBeUndefined();
+  });
+});
+
+describe("Activity webhook", () => {
+  it("answers CRC and accepts a signed POST", async () => {
+    const received: unknown[] = [];
+    const webhook = await startActivityWebhook({
+      port: 0,
+      path: "/webhook",
+      clientSecret: "secret",
+      onEvent: async (body) => {
+        received.push(body);
+      },
+    });
+    try {
+      const crc = await fetch(`http://127.0.0.1:${webhook.port}/webhook?crc_token=abc`);
+      expect(crc.status).toBe(200);
+      expect(await crc.json()).toEqual({ response_token: crcResponseToken("abc", "secret") });
+
+      const payload = JSON.stringify(envelope());
+      const denied = await fetch(`http://127.0.0.1:${webhook.port}/webhook`, {
+        method: "POST",
+        headers: { "x-twitter-webhooks-signature-oauth2": "sha256=nope" },
+        body: payload,
+      });
+      expect(denied.status).toBe(401);
+
+      const ok = await fetch(`http://127.0.0.1:${webhook.port}/webhook`, {
+        method: "POST",
+        headers: { "x-twitter-webhooks-signature-oauth2": signWebhookBody(payload, "secret") },
+        body: payload,
+      });
+      expect(ok.status).toBe(200);
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+    } finally {
+      await webhook.close();
+    }
+  });
+});
+
+describe("Activity subscription", () => {
+  it("creates a group chat.received subscription when none exists", async () => {
+    const created: Record<string, unknown>[] = [];
+    const client = {
+      async listActivitySubscriptions() {
+        return { data: [] };
+      },
+      async createActivitySubscription(body: Record<string, unknown>) {
+        created.push(body);
+        return { data: {} };
+      },
+    };
+    await ensureChatActivitySubscription(client, "bot-1");
+    expect(created).toEqual([chatReceivedSubscriptionBody("bot-1", true)]);
+    expect(hasChatReceivedSubscription({
+      data: [{ event_type: "chat.received", filter: { user_id: "bot-1" } }],
+    }, "bot-1")).toBe(true);
+  });
+
+  it("does not create a duplicate and retries without the group qualifier on 400", async () => {
+    const created: Record<string, unknown>[] = [];
+    await ensureChatActivitySubscription({
+      async listActivitySubscriptions() {
+        return {
+          data: [{ event_type: "chat.received", filter: { user_id: "bot-1" } }],
+        };
+      },
+      async createActivitySubscription(body: Record<string, unknown>) {
+        created.push(body);
+        return {};
+      },
+    }, "bot-1");
+    expect(created).toHaveLength(0);
+
+    await ensureChatActivitySubscription({
+      async listActivitySubscriptions() {
+        return { data: [] };
+      },
+      async createActivitySubscription(body: Record<string, unknown>) {
+        created.push(body);
+        if (created.length === 1) {
+          const error = new Error("bad qualifier") as Error & { status?: number };
+          error.status = 400;
+          throw error;
+        }
+        return {};
+      },
+    }, "bot-1");
+    expect(created[0]).toEqual(chatReceivedSubscriptionBody("bot-1", true));
+    expect(created[1]).toEqual(chatReceivedSubscriptionBody("bot-1", false));
+  });
+});
+
+describe("decrypt warning rate limit", () => {
+  afterEach(() => {
+    resetDecryptWarningWindow();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("logs the first decrypt failure and suppresses repeats inside the window", () => {
+    resetDecryptWarningWindow();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-23T12:00:00.000Z"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logDecryptErrors(GROUP, { a: "version 1790176607769 missing" });
+    logDecryptErrors(GROUP, { b: "version 1790176607769 missing" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + DECRYPT_WARN_INTERVAL_MS);
+    logDecryptErrors(GROUP, { c: "version 1790176607769 missing" });
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[1]?.[0])).toContain("suppressed");
+  });
+});

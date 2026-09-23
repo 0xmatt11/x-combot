@@ -12,7 +12,7 @@ import {
   publicKeyRegistrationBody,
   sendMessageBody,
 } from "../src/chat/wire.js";
-import { nextPollDelayMs } from "../src/poller.js";
+import { nextPollDelayMs, shouldPollClassicDms } from "../src/poller.js";
 import { Store } from "../src/store.js";
 import type { BotRuntimeConfig, DefaultsConfig } from "../src/types.js";
 import { MockXClient } from "../src/x/mock-client.js";
@@ -44,17 +44,21 @@ function runtime(): BotRuntimeConfig {
 class FakeCipher implements ChatCipher {
   readonly texts: string[] = [];
   readonly deleted: string[][] = [];
+  readonly batches: string[][] = [];
   readonly events = new Map<string, DecryptedEvent>();
 
   setSigningKeys(): void {}
 
   decryptEvents(eventsB64: string[]) {
+    this.batches.push([...eventsB64]);
     const messages = [];
+    const errors: Record<string, string> = {};
     for (const b64 of eventsB64) {
       const event = this.events.get(b64);
       if (event) messages.push({ event, originalB64: b64 });
+      else errors[b64] = "Conversation key version 1790176607769 is not in available versions";
     }
-    return { messages, errors: {} };
+    return { messages, errors };
   }
 
   encryptMessage(_conversationId: string, text: string) {
@@ -97,8 +101,10 @@ class FakeHttp implements ChatHttp {
   sends: Record<string, string>[] = [];
   deletes: Record<string, unknown>[] = [];
   failNext: unknown;
+  gets = 0;
 
   async getConversationEvents(): Promise<RawChatEventsPage> {
+    this.gets += 1;
     if (this.failNext) {
       const error = this.failNext;
       this.failNext = undefined;
@@ -293,6 +299,69 @@ describe("Chat transport into the moderation engine", () => {
       encryptedContent: "enc:CHAT_HELP_OK",
       encodedEventSignature: "sig",
     }, "tok").conversation_token).toBe("tok");
+    const helpBatch = cipher.batches.at(-1) ?? [];
+    expect(helpBatch).toContain("b64-help");
+    expect(helpBatch).not.toContain("b64-old");
+  });
+
+  it("does not decrypt pre-watermark or undecryptable history on the next poll", async () => {
+    const { http, cipher, poller, store } = setup();
+    http.pages.push({
+      data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }],
+      meta: { conversation_key_events: ["key-old"] },
+    });
+    await poller.pollOnce();
+    expect(cipher.batches[0]).toEqual(["key-old"]);
+    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-1");
+
+    http.pages.push({
+      data: [
+        { id: "evt-dead", sender_id: "alice-1", encoded_event: "b64-dead" },
+        { id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" },
+      ],
+      meta: { conversation_key_events: ["key-old"] },
+    });
+    await poller.pollOnce();
+    expect(cipher.batches[1]).toEqual(["b64-dead"]);
+    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-dead");
+    expect(cipher.texts).toEqual([]);
+
+    http.pages.push({
+      data: [
+        { id: "evt-2", sender_id: "alice-1", encoded_event: "b64-help" },
+        { id: "evt-dead", sender_id: "alice-1", encoded_event: "b64-dead" },
+        { id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.batches[2]).toEqual(["b64-help"]);
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+
+    http.pages.push({
+      data: [
+        { id: "evt-2", sender_id: "alice-1", encoded_event: "b64-help" },
+        { id: "evt-dead", sender_id: "alice-1", encoded_event: "b64-dead" },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.batches).toHaveLength(3);
+  });
+
+  it("advances a watermark that has fallen off the latest pages", async () => {
+    const { http, poller, store } = setup();
+    store.setWatermark(`chat_events:${GROUP}`, "evt-ancient");
+    http.pages.push({
+      data: [{ id: "evt-9", sender_id: "alice-1", encoded_event: "b64-help" }],
+    });
+    await poller.pollOnce();
+    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-9");
+    expect(http.pages).toHaveLength(0);
+
+    http.pages.push({
+      data: [{ id: "evt-9", sender_id: "alice-1", encoded_event: "b64-help" }],
+    });
+    await poller.pollOnce();
+    expect(http.pages).toHaveLength(0);
   });
 
   it("deletes with the decrypted sequence id", async () => {
@@ -332,6 +401,57 @@ describe("Chat transport into the moderation engine", () => {
     http.pages.push({ data: [] });
     await vi.advanceTimersByTimeAsync(48_000);
     expect(http.failNext).toBeUndefined();
+    poller.stop();
+    vi.useRealTimers();
+  });
+
+  it("stretches idle Chat polls and returns to the base interval after a new event", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const store = new Store(":memory:");
+    stores.push(store);
+    const http = new FakeHttp();
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    const service = new ChatService(http, cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+    );
+    const poller = new ChatPoller(service, store, engine, 12_000, [GROUP], 50, 48_000);
+
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await poller.tick();
+    expect(http.gets).toBe(1);
+
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(http.gets).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(http.gets).toBe(2);
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(http.gets).toBe(3);
+
+    http.pages.push({
+      data: [
+        { id: "evt-2", sender_id: "alice-1", encoded_event: "b64-help" },
+        { id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" },
+      ],
+    });
+    await vi.advanceTimersByTimeAsync(48_000);
+    expect(http.gets).toBe(4);
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+
+    http.pages.push({ data: [] });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(http.gets).toBe(5);
     poller.stop();
     vi.useRealTimers();
   });

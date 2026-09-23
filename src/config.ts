@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
 import type {
+  ActivityConfig,
+  ActivityTransport,
   ConversationSettings,
   DefaultsConfig,
   LlmAllow,
@@ -37,6 +39,8 @@ export function loadDefaults(configPath: string): DefaultsConfig {
   }
   parsed.filters ??= [];
   parsed.poll ??= { interval_ms: 12_000, max_results: 50 };
+  parsed.poll.chat_idle_max_ms ??= 120_000;
+  parsed.activity = normalizeActivityConfig(parsed.activity);
   parsed.delete ??= {
     attempt_on_filter: true,
     attempt_on_flood: true,
@@ -114,4 +118,32 @@ export function isFullContextMode(mode: LlmContextMode): boolean {
 
 export function normalizeTruncate(value: string | undefined): TruncateStrategy {
   return value === "newest" ? "newest" : "oldest";
+}
+
+export const DEFAULT_ACTIVITY_CONFIG: ActivityConfig = {
+  enabled: false,
+  transport: "stream",
+  subscribe: true,
+  poll_interval_ms: 300_000,
+  webhook_port: 8080,
+  webhook_path: "/webhook",
+};
+
+export function normalizeActivityConfig(raw: ActivityConfig | undefined): ActivityConfig {
+  const merged: ActivityConfig = { ...DEFAULT_ACTIVITY_CONFIG, ...raw };
+  merged.transport = normalizeActivityTransport(merged.transport) ?? DEFAULT_ACTIVITY_CONFIG.transport;
+  if (!merged.webhook_path.startsWith("/")) merged.webhook_path = `/${merged.webhook_path}`;
+  if (!Number.isFinite(merged.poll_interval_ms) || merged.poll_interval_ms < 1_000) {
+    merged.poll_interval_ms = DEFAULT_ACTIVITY_CONFIG.poll_interval_ms;
+  }
+  if (!Number.isFinite(merged.webhook_port) || merged.webhook_port < 0 || merged.webhook_port > 65535) {
+    merged.webhook_port = DEFAULT_ACTIVITY_CONFIG.webhook_port;
+  }
+  return merged;
+}
+
+export function normalizeActivityTransport(value: string | undefined): ActivityTransport | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "stream" || normalized === "webhook" || normalized === "both") return normalized;
+  return undefined;
 }

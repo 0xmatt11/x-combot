@@ -22,7 +22,7 @@ export function chatEventToDm(
     (typeof decrypted.createdAtMsec === "number"
       ? new Date(decrypted.createdAtMsec).toISOString()
       : undefined);
-  const sequenceId = nonempty(decrypted.sequenceId);
+  const sequenceId = nonempty(decrypted.sequenceId) ?? nonempty(raw.sequence_id);
   const senderId = raw.sender_id || nonempty(decrypted.senderId);
 
   if (decrypted.type === "message") {
