@@ -4,6 +4,17 @@ A ComBot-inspired moderation bot for **X group Direct Messages** and **encrypted
 
 Telegram's ComBot can kick, ban, and delete anyone's messages because Telegram exposes those actions to bots. X does not. This project implements the closest documented equivalents and is explicit about the rest.
 
+## Quick start (encrypted Chat)
+
+Classic group DMs only need [sections 1–3](#1-x-developer-app). For an encrypted group (`g…`), in order:
+
+1. **OAuth as the bot account** — `npm run oauth` while logged into the dedicated bot, not the human owner. `BOT_USER_ID` is that OAuth'd account; `BOT_OWNER_ID` is the human owner and is always an admin. See [Install and authorize](#2-install-and-authorize-the-bot-account).
+2. **`npm run chat:register -- --confirm`** — once, as that same account.
+3. **`CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID`** — your group id (`g` plus digits).
+4. **`npm run chat:rotate -- gYOUR_GROUP_ID --confirm`** only if the bot joined before it registered. Rotate aborts when any current member has no public key; see [section 4](#4-run-against-an-encrypted-x-chat-group).
+5. **`npm start`**
+6. **Send `!help`** in the group. The first poll only records a watermark and does not replay messages already in the thread.
+
 ## What X actually allows
 
 Verified against current X API v2 Direct Message docs (`docs.x.com` / OpenAPI for `/2/dm_*`). App-only (bearer) auth **cannot** read or write DMs.
@@ -21,11 +32,13 @@ Verified against current X API v2 Direct Message docs (`docs.x.com` / OpenAPI fo
 
 There is **no documented streaming API for DMs** on v2, so the bot **polls** `GET /2/dm_events`. There is **no documented remove-participant / kick** endpoint. Unofficial web clients and third-party “remove participants” wrappers are out of scope.
 
+**Rate limits and credits.** DM and Chat polling are pay-per-use. On HTTP 429 the pollers wait for `x-rate-limit-reset` or `Retry-After` (about 15 seconds if neither header is present). On HTTP 402 (credits depleted) they wait at least five minutes, or longer when `Retry-After` is larger. Restarting in a tight loop to get past 429/402 skips that backoff and keeps spending credits.
+
 1:1 conversation IDs look like `{smaller_user_id}-{larger_user_id}`. Group IDs are a single snowflake. The bot only moderates group conversations.
 
 ### Encrypted X Chat (`g…`) vs classic group DMs
 
-These are different products. A URL like `https://x.com/i/chat/g2029561975647150382` is **not** a group DM.
+These are different products. A URL like `https://x.com/i/chat/gYOUR_GROUP_ID` is **not** a group DM. The id is `g` plus digits (shape example only, not a group to join or configure: `g2029561975647150382`).
 
 | | Classic group DM | Encrypted X Chat group |
 | --- | --- | --- |
@@ -38,7 +51,7 @@ These are different products. A URL like `https://x.com/i/chat/g2029561975647150
 
 `GET /2/dm_events` never returns Chat messages. The bot only polls Chat for ids listed in `CHAT_CONVERSATION_IDS`. Crypto is [chat-xdk](https://github.com/xdevplatform/chat-xdk) (`@xdevplatform/chat-xdk`, the WASM engine shipped in that package). The public `createChat()` entrypoint does not expose `importKeys` / `exportKeys` (browser-safe). This process loads the WASM `Chat` class from the same package so a server can keep an identity blob on disk. Juicebox (`CHAT_PIN` + `juicebox-sdk`) is the other supported unlock path.
 
-Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. The same 429 / 402 backoff used by the DM poller applies here.
+Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. Chat polling uses the same 429 / 402 backoff as the DM poller (see **Rate limits and credits** above).
 
 There is still **no documented remove-member endpoint** on Chat (only add members, which rotates the key). `!kick` stays a local soft-mute plus an admin DM.
 
@@ -48,7 +61,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 - **No reliable delete of other people's classic DM messages.** `DELETE /2/dm_events/:event_id` succeeds only for events the bot sent. In an encrypted Chat group the bot instead calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`. X documents that as working for messages the account sent, and for other people's messages when the account administers the group. If X refuses, the bot says so.
 - **Chat delete needs a sequence id** from a message this process decrypted. `!del` with no argument uses the last user message it saw. A numeric id can be a sequence id. UUID message ids are not accepted by the `!del` parser.
 - **Soft-mute is local.** Timed-out users are ignored by the bot (and delete is attempted). They can still talk in the X client.
-- **Polling, not realtime.** Default interval is 12s; DM lookup is rate-limited. Events older than ~30 days are not returned.
+- **Polling, not realtime.** Default interval is 12s. Both pollers back off on 429/402; ignoring that wait burns pay-per-use credits. Classic DM events older than ~30 days are not returned.
 - **Group DMs ≠ Communities ≠ encrypted Chat.** Communities are unused. Chat is a separate encrypted inbox; see above.
 - **Admin notify DMs are classic 1:1.** `!kick` and filter alerts still use `POST /2/dm_conversations/with/:id/messages`. That message may not appear inside the encrypted Chat inbox.
 - **Chat reactions, edits, and media are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer.
@@ -60,11 +73,11 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 1. **Welcome** — on `ParticipantsJoin`, send configurable text (`{username}`, `{user_id}`, `{name}`).
 2. **Rules / help** — `!rules` and `!help` reply in the group.
 3. **Warn** — `!warn @user [reason]`; counts in SQLite; at N warns, soft-mute + admin notify.
-4. **Delete** — `!del [event_id]` calls `DELETE /2/dm_events/:event_id`.
+4. **Delete** — `!del [event_id]`. Classic group DMs call `DELETE /2/dm_events/:event_id`, which succeeds only for events the authenticated account sent. Encrypted Chat (`g…`) calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`: the bot's own messages, and other people's messages when this account administers the group. Chat delete needs a sequence id from a message this process decrypted.
 5. **Anti-flood** — more than N messages in a window → delete attempt, local mute, warn.
 6. **Filters** — keyword / regex rules auto-delete (attempt) and optionally warn.
 7. **Notes** — `!note key text` / `!get key` per conversation.
-8. **Admin allowlist** — `BOT_OWNER_ID` always admin; `ADMIN_IDS` global; `!admin add` per group.
+8. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
 10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. OpenAI-compatible; mockable.
 
@@ -86,7 +99,7 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 - `!kick @user [reason]` — warn + soft-mute + notify (no API kick)
 - `!mute @user [minutes]`
 - `!unmute @user`
-- `!del [event_id]`
+- `!del [event_id]` — classic DMs: own events only (`DELETE /2/dm_events/:event_id`); Chat: `delete_for_all` for own messages, or others' when this account is a group admin
 - `!note` / `!note key` / `!note key text`
 - `!get key`
 - `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`
@@ -118,12 +131,16 @@ App-only / project bearer tokens will not work.
 
 ```bash
 cp .env.example .env
-# fill CLIENT_ID, CLIENT_SECRET, BOT_OWNER_ID (your numeric user ID)
+# CLIENT_ID, CLIENT_SECRET
+# BOT_USER_ID = the bot account you will authorize
+# BOT_OWNER_ID = the human owner (always an admin; do not OAuth as this account)
 npm install
 npm run oauth
 ```
 
-`npm run oauth` starts a localhost callback, prints `https://x.com/i/oauth2/authorize?...` (PKCE, `code_challenge_method=S256`), and exchanges the code at `POST https://api.x.com/2/oauth2/token`. **Authorize while logged into the bot account.** Tokens are written to `data/tokens.json` (gitignored). You can also paste `ACCESS_TOKEN` into `.env` for a short-lived token.
+`npm run oauth` starts a localhost callback, prints `https://x.com/i/oauth2/authorize?...` (PKCE, `code_challenge_method=S256`), and exchanges the code at `POST https://api.x.com/2/oauth2/token`. **Authorize while logged into the dedicated bot account, not the human owner.** Tokens are written to `data/tokens.json` (gitignored). You can also paste `ACCESS_TOKEN` into `.env` for a short-lived token.
+
+`BOT_USER_ID` is that OAuth'd bot account's numeric user id. It is optional: if unset, startup uses `GET /2/users/me` on the token. When you set it, it must be the same account as the token (Chat identity and "ignore my own messages" both use it). `BOT_OWNER_ID` is the human who should always be able to run mod commands, even though they are not the account the process runs as. Authorizing as the owner makes the bot and the owner the same user and is the wrong setup for a dedicated bot.
 
 Find numeric user IDs with `GET /2/users/me` (the oauth helper's token) or `GET /2/users/by/username/:username`.
 
@@ -153,19 +170,21 @@ npm run chat:register -- --confirm
 
 That calls `generateKeypairs()`, saves `data/chat-keys.json` (mode `0600`, gitignored), and `POST /2/users/{id}/public_keys`. The file holds unencrypted private key bytes. Do not commit it, log it, or paste it into chat. Re-running without `--force` reuses the file and skips the POST when that public key is already on the account.
 
-2. Put the group id in `.env`:
+2. Put **your** group id in `.env` (placeholder below — do not reuse someone else's id):
 
 ```bash
-CHAT_CONVERSATION_IDS=g2029561975647150382
+CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID
 ```
 
 Ids must look like `g` plus digits. A classic group-DM snowflake is rejected at startup so it is not sent to `/2/chat`.
 
-3. The bot must be a member, and the latest conversation key must be wrapped to the public key you just registered. If the account was added **before** registration, it cannot decrypt history. Rotate the key (this wraps every current member whose public key we can fetch, and aborts without posting if any member key is missing):
+3. The bot must be a member, and the latest conversation key must be wrapped to the public key you just registered. If the account was added **before** registration, it cannot decrypt. Rotate so a new key is wrapped for every current member, including that bot:
 
 ```bash
-npm run chat:rotate -- g2029561975647150382 --confirm
+npm run chat:rotate -- gYOUR_GROUP_ID --confirm
 ```
+
+**Rotate aborts if any member has no public key.** The command lists current members, then `GET /2/users/{id}/public_keys` for each one. An empty key list for **any** member stops the command before it posts, so that person is not locked out. Every member must have opened X Chat and registered a public key, or be removed from the group, before rotate can finish — including when you are only trying to wrap keys for a bot that joined before `chat:register`. Rotate does not remove members. Skip this step when the bot was added after its public key was already on the account.
 
 4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup.
 
@@ -225,17 +244,17 @@ Then in a group DM:
 
 **Context modes** (YAML `llm.context_mode`, override with `!set llm_context_mode …`):
 
-| Mode | What is sent to the model | X reads |
+| Mode | What is sent to the model | Reads |
 | --- | --- | --- |
-| `none` | The question plus a short recent window (`none_recent_messages`, default 3) | One small `GET /2/dm_conversations/:id/dm_events` page if that window > 0 |
-| `recent` (default) | Last N messages (`recent_messages`, default 20) | Same endpoint, capped at N |
-| `full` / `conversation` | Paginated history up to `full_max_messages` / `full_max_chars` (~30 day retention) | More pages (`max_pages`, default 5 × up to 100 events) |
+| `none` | The question plus a short recent window (`none_recent_messages`, default 3) | One page if that window > 0. Classic DMs: `GET /2/dm_conversations/:id/dm_events`. `g…` groups: `GET /2/chat/conversations/:id/events`, decrypted, then the same window |
+| `recent` (default) | Last N messages (`recent_messages`, default 20) | Same read as `none`, capped at N |
+| `full` / `conversation` | Paginated history up to `full_max_messages` / `full_max_chars` | More pages (`max_pages`, default 5 × up to 100 events). Classic DM history is about 30 days. Chat uses those same page caps on decrypted events |
 
 `!summarize` and `!analyze` **always** use full-history fetch (still truncated by those caps). Keep `context_mode: recent` unless you explicitly want every `!ask` to pull the thread.
 
 **Cost warnings**
 
-- X DM lookup is typically **pay-per-use**. Full mode and summarize/analyze paginate `GET /2/dm_conversations/:id/dm_events`. That is extra read volume on top of the normal poll loop (`GET /2/dm_events`).
+- X DM and Chat reads are typically **pay-per-use**. Full mode and summarize/analyze paginate history: classic groups use `GET /2/dm_conversations/:id/dm_events`; `g…` groups use decrypted `GET /2/chat/conversations/:id/events` (`RoutedXClient.listConversationDmEvents` → `ChatService.listHistory`). That is extra read volume on top of the poll loop. Polling itself also backs off on 429/402; a tight restart loop still spends credits (see **Rate limits and credits**).
 - LLM tokens scale with the assembled context (`full_max_chars` default 24k characters). Truncation drops oldest messages by default (`truncate: oldest`).
 - Per-user rate limits (`rate_limit_per_user` / `rate_limit_window_ms`) are stored in SQLite (timestamps only — prompts are not persisted or logged).
 - `llm.allow: admins` gates LLM commands to the owner / `ADMIN_IDS` / per-group admins.
@@ -282,7 +301,7 @@ tests/
 
 - No `POST /2/dm_conversations/:id/participants` (or similar) in current public docs.
 - No v2 DM streaming; Account Activity webhooks are a separate, historically enterprise product and are not used here.
-- Delete of another participant's `MessageCreate` is not part of the documented v2 contract.
+- Delete of another participant's classic DM `MessageCreate` is not part of the documented v2 contract. Chat `delete_for_all` is a separate call and still requires a group admin (or the sender) plus a decrypted sequence id.
 - Communities, Spaces, and public posts are unrelated surfaces.
 - Encrypted Chat has no documented kick/remove-member call. Add-member (`POST /2/chat/conversations/{id}/members`) rotates the key; this bot does not call it from `!kick`.
 - The WASM binding's local key file is unencrypted identity material. The public JS API prefers Juicebox so raw keys never enter application JavaScript; this server uses the WASM `importKeys` / `exportKeys` methods that the official JS example uses for a headless bot.
