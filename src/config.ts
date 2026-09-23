@@ -16,9 +16,9 @@ import type {
 
 export const DEFAULT_BOOBS_CONFIG: BoobsConfig = {
   enabled: false,
-  rate_limit_per_user: 1,
-  rate_limit_per_conversation: 4,
-  rate_limit_window_ms: 300_000,
+  rate_limit_per_user: 0,
+  rate_limit_per_conversation: 0,
+  rate_limit_window_ms: 0,
 };
 
 export const DEFAULT_LLM_CONFIG: LlmConfig = {
@@ -107,17 +107,26 @@ export function resolveConversationConfig(
   };
 }
 
+/** `0` is unlimited. Non-finite or negative values fall back to unlimited. */
+function nonNegativeLimit(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return value;
+}
+
 export function normalizeBoobsConfig(raw: Partial<BoobsConfig> | undefined): BoobsConfig {
   const merged: BoobsConfig = { ...DEFAULT_BOOBS_CONFIG, ...raw };
-  if (!Number.isFinite(merged.rate_limit_per_user) || merged.rate_limit_per_user < 1) {
-    merged.rate_limit_per_user = DEFAULT_BOOBS_CONFIG.rate_limit_per_user;
-  }
-  if (!Number.isFinite(merged.rate_limit_per_conversation) || merged.rate_limit_per_conversation < 1) {
-    merged.rate_limit_per_conversation = DEFAULT_BOOBS_CONFIG.rate_limit_per_conversation;
-  }
-  if (!Number.isFinite(merged.rate_limit_window_ms) || merged.rate_limit_window_ms < 1_000) {
-    merged.rate_limit_window_ms = DEFAULT_BOOBS_CONFIG.rate_limit_window_ms;
-  }
+  merged.rate_limit_per_user = nonNegativeLimit(
+    merged.rate_limit_per_user,
+    DEFAULT_BOOBS_CONFIG.rate_limit_per_user,
+  );
+  merged.rate_limit_per_conversation = nonNegativeLimit(
+    merged.rate_limit_per_conversation,
+    DEFAULT_BOOBS_CONFIG.rate_limit_per_conversation,
+  );
+  merged.rate_limit_window_ms = nonNegativeLimit(
+    merged.rate_limit_window_ms,
+    DEFAULT_BOOBS_CONFIG.rate_limit_window_ms,
+  );
   merged.enabled = Boolean(merged.enabled);
   return merged;
 }

@@ -89,11 +89,13 @@ delete:
 # to DuckDuckGo with no API key (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails,
 # keyless Bing HTML (adlt=off) runs next, then Reddit. Neither needs an API key.
 # The command ignores extra text so members cannot change the search. See the README.
+# Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
+# count is enforced only when rate_limit_window_ms is also positive.
 boobs:
   enabled: false
-  rate_limit_per_user: 1
-  rate_limit_per_conversation: 4
-  rate_limit_window_ms: 300000
+  rate_limit_per_user: 0
+  rate_limit_per_conversation: 0
+  rate_limit_window_ms: 0
 
 # LLM group-chat assistant. Full conversation context is opt-in because it
 # paginates GET /2/dm_conversations/:id/dm_events (~30 day retention, pay-per-use
