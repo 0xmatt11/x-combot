@@ -1,9 +1,10 @@
 import { log } from "../log.js";
 import type { Store } from "../store.js";
-import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult } from "../types.js";
+import type { DeleteHint, DeleteResult, DmEvent, OutboundImage, SendMessageResult } from "../types.js";
 import { logDecryptErrors } from "./decrypt-log.js";
 import { isChatGroupId } from "./ids.js";
-import type { ChatCipher, SigningKeyEntry } from "./cipher.js";
+import type { ChatCipher, ConversationKeySet, SigningKeyEntry } from "./cipher.js";
+import { loadWasmModule } from "./wasm-engine.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
 import { chatEventToDm } from "./normalize.js";
 import { newestRawId, nextWatermarkId, normalizeChatPage, rawEventsAfterWatermark } from "./raw.js";
@@ -36,6 +37,8 @@ export class ChatService {
   private readonly tokens = new Map<string, string>();
   /** Key-change blobs whose decrypt did not report an error. Failures are retried. */
   private readonly seenKeyEvents = new Set<string>();
+  /** Latest conversation key per chat, from decryptEvents — required for encryptStream. */
+  private readonly conversationKeys = new Map<string, { version: string; key: Uint8Array }>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
 
@@ -119,6 +122,58 @@ export class ChatService {
       throw new Error(
         `Cannot encrypt a Chat reply in ${conversationId}: ${message}. The bot needs a verified KeyChange (meta.conversation_key_events) wrapped to its registered public key. If this account was added before \`npm run chat:register\`, run \`npm run chat:rotate -- ${conversationId} --confirm\` so a new key is wrapped for every current member.`,
       );
+    }
+    const body = sendMessageBody(payload, this.tokens.get(conversationId));
+    const sent = await this.http.sendChatMessage(conversationId, body);
+    return {
+      dmEventId: sent.messageId || payload.messageId,
+      dmConversationId: conversationId,
+    };
+  }
+
+  /**
+   * Send an inline Chat photo (conversation bubble, not a file/document).
+   * Mirrors xdevplatform/xchat-agent-skeleton: encryptStream, then
+   * POST /2/chat/media/upload/*, then encryptMessage with attachment_type
+   * "media" and media_type omitted so clients treat it as an image.
+   * Throws on failure so the caller can post the https URL as text.
+   * Does not use classic DM `dm_image`.
+   */
+  async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
+    const bytes = image.bytes;
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error("No image bytes to attach to Chat.");
+    }
+    const latest = this.conversationKeys.get(conversationId);
+    if (!latest) {
+      throw new Error(
+        `No conversation key cached for ${conversationId}. The bot must decrypt a KeyChange before sending Chat media.`,
+      );
+    }
+    const inspected = await inspectChatImage(bytes, image.mimeType);
+    const ciphertext = this.cipher.encryptStream(bytes, latest.key);
+    if (ciphertext.byteLength === 0) {
+      throw new Error("Chat media encryption produced empty ciphertext.");
+    }
+    const mediaHashKey = await this.http.uploadChatMedia(conversationId, ciphertext);
+    let payload;
+    try {
+      payload = this.cipher.encryptMessage(conversationId, "18+", {
+        conversationKey: latest.key,
+        conversationKeyVersion: latest.version,
+        attachments: [
+          {
+            mediaHashKey,
+            width: inspected.width,
+            height: inspected.height,
+            filesizeBytes: bytes.byteLength,
+            filename: inspected.filename,
+          },
+        ],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot encrypt a Chat image in ${conversationId}: ${message}`);
     }
     const body = sendMessageBody(payload, this.tokens.get(conversationId));
     const sent = await this.http.sendChatMessage(conversationId, body);
@@ -316,6 +371,7 @@ export class ChatService {
     if (encoded.length === 0) return [];
     const signingKeys = this.currentSigningKeys();
     const result = this.cipher.decryptEvents(encoded, signingKeys.length > 0 ? signingKeys : undefined);
+    this.rememberConversationKeys(conversationId, result.conversationKeys);
     logDecryptErrors(conversationId, result.errors);
     if (membersReady) {
       const failed = failedDecryptBlobs(encoded, result.errors);
@@ -420,6 +476,67 @@ export class ChatService {
     for (const entries of this.signingByUser.values()) flat.push(...entries);
     return flat;
   }
+
+  private rememberConversationKeys(
+    conversationId: string,
+    conversationKeys: ConversationKeySet | undefined,
+  ): void {
+    if (!conversationKeys?.keys) return;
+    const version = pickConversationKeyVersion(conversationKeys.keys, conversationKeys.latestVersion);
+    if (!version) return;
+    const key = conversationKeys.keys[version];
+    if (!key || key.byteLength === 0) return;
+    const existing = this.conversationKeys.get(conversationId);
+    if (existing && compareKeyVersions(version, existing.version) < 0) return;
+    this.conversationKeys.set(conversationId, { version, key: Uint8Array.from(key) });
+  }
+}
+
+async function inspectChatImage(
+  bytes: Uint8Array,
+  fallbackMime: string | undefined,
+): Promise<{ width: number; height: number; filename: string }> {
+  let width = 1024;
+  let height = 1024;
+  let mime = fallbackMime ?? "image/jpeg";
+  try {
+    const wasm = await loadWasmModule();
+    const detected = wasm.detectImageDimensions(bytes);
+    if (detected && detected.width > 0 && detected.height > 0) {
+      width = detected.width;
+      height = detected.height;
+    }
+    const detectedMime = wasm.detectMimeType(bytes);
+    if (detectedMime) mime = detectedMime;
+  } catch {
+    // Dimensions are optional. Upload still proceeds with the caller mime.
+  }
+  return { width, height, filename: `image.${extensionForMime(mime)}` };
+}
+
+function extensionForMime(mime: string): string {
+  const normalized = mime.toLowerCase();
+  if (normalized.includes("png")) return "png";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  return "jpg";
+}
+
+function pickConversationKeyVersion(
+  keys: Record<string, Uint8Array>,
+  latestVersion: string | null,
+): string | undefined {
+  if (latestVersion && keys[latestVersion]) return latestVersion;
+  const versions = Object.keys(keys);
+  if (versions.length === 0) return undefined;
+  return versions.sort((a, b) => compareKeyVersions(a, b)).at(-1);
+}
+
+function compareKeyVersions(a: string, b: string): number {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return a.localeCompare(b);
 }
 
 function selectLoadedKey(

@@ -65,7 +65,7 @@ async function main(): Promise<void> {
       );
     } else {
       log.info(
-        `!boobs enabled (provider=${provider}). Classic group DMs upload a dm_image; encrypted Chat posts the image link as text.`,
+        `!boobs enabled (provider=${provider}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
       );
     }
   }

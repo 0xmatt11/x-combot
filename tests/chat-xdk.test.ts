@@ -4,7 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { generateIdentity, readKeyFile, writeKeyFile } from "../src/chat/identity.js";
-import { createWasmChat, importIdentity, wrapCipher } from "../src/chat/wasm-engine.js";
+import { createWasmChat, importIdentity, loadWasmModule, wrapCipher } from "../src/chat/wasm-engine.js";
+import type { XdkLike } from "../src/chat/wasm-engine.js";
 import { boundSigningEntries } from "../src/chat/signing-keys.js";
 import { addConversationKeysBody, deleteMessagesBody } from "../src/chat/wire.js";
 
@@ -58,6 +59,99 @@ describe("chat-xdk WASM boundary", () => {
     expect(payload.encryptedContent).toBeTruthy();
     expect(payload.encodedEventSignature).toBeTruthy();
     expect(payload.encryptedContent).not.toContain("pong");
+
+    const version = result.conversationKeys?.latestVersion;
+    const key = version ? result.conversationKeys?.keys[version] : undefined;
+    expect(version).toBeTruthy();
+    expect(key?.byteLength).toBe(32);
+    const plain = Uint8Array.from([1, 2, 3, 4, 5]);
+    const streamed = cipher.encryptStream(plain, key!);
+    expect(streamed.byteLength).toBeGreaterThan(plain.byteLength);
+    expect(Buffer.from(streamed).includes(Buffer.from(plain))).toBe(false);
+
+    const withPhoto = cipher.encryptMessage(vectors.event_conversation_id, "18+", {
+      conversationKey: key,
+      conversationKeyVersion: version!,
+      attachments: [
+        {
+          mediaHashKey: "hash-inline",
+          width: 1,
+          height: 1,
+          filesizeBytes: plain.byteLength,
+          filename: "image.jpg",
+        },
+      ],
+    });
+    expect(withPhoto.encryptedContent).toBeTruthy();
+    expect(withPhoto.encodedEventSignature).toBeTruthy();
+    expect(withPhoto.encryptedContent).not.toContain("hash-inline");
+    expect(withPhoto.encryptedContent).not.toContain("media_type");
+  });
+
+  it("passes an inline media attachment without media_type", () => {
+    const seen: unknown[] = [];
+    const inner = {
+      encryptMessage(params: unknown) {
+        seen.push(params);
+        return { messageId: "m", encryptedContent: "e", encodedEventSignature: "s" };
+      },
+      encryptStream(plaintext: Uint8Array) {
+        return plaintext;
+      },
+      getPublicKeys() {
+        return { identity: "", signing: "" };
+      },
+    } as unknown as XdkLike;
+    const cipher = wrapCipher(inner);
+    cipher.encryptMessage("g1", "18+", {
+      conversationKey: new Uint8Array(32).fill(3),
+      conversationKeyVersion: "4",
+      attachments: [
+        {
+          mediaHashKey: "hash-inline",
+          width: 8,
+          height: 9,
+          filesizeBytes: 3,
+          filename: "image.jpg",
+        },
+      ],
+    });
+    expect(seen[0]).toEqual({
+      conversationId: "g1",
+      text: "18+",
+      conversationKey: new Uint8Array(32).fill(3),
+      conversationKeyVersion: "4",
+      attachments: [
+        {
+          attachment_type: "media",
+          media_hash_key: "hash-inline",
+          width: 8,
+          height: 9,
+          filesize_bytes: 3,
+          filename: "image.jpg",
+        },
+      ],
+    });
+    expect(JSON.stringify(seen[0])).not.toContain("media_type");
+  });
+
+  it("reads dimensions from a jpeg without requiring a media_type", async () => {
+    const wasm = await loadWasmModule();
+    const jpeg = Uint8Array.from([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+      0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08,
+      0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0a, 0x0c, 0x14, 0x0d, 0x0c, 0x0b, 0x0b, 0x0c, 0x19, 0x12,
+      0x13, 0x0f, 0x14, 0x1d, 0x1a, 0x1f, 0x1e, 0x1d, 0x1a, 0x1c, 0x1c, 0x20, 0x24, 0x2e, 0x27, 0x20,
+      0x22, 0x2c, 0x23, 0x1c, 0x1c, 0x28, 0x37, 0x29, 0x2c, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1f, 0x27,
+      0x39, 0x3d, 0x38, 0x32, 0x3c, 0x2e, 0x33, 0x34, 0x32, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x01,
+      0x00, 0x01, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xc4, 0x00, 0x14,
+      0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x08, 0xff, 0xc4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02,
+      0x10, 0x03, 0x10, 0x00, 0x00, 0x01, 0x3f, 0xff, 0xd9,
+    ]);
+    expect(wasm.detectMimeType(jpeg)).toBe("image/jpeg");
+    expect(wasm.detectImageDimensions(jpeg)).toEqual({ width: 1, height: 1 });
   });
 
   it("round-trips a generated identity through the key file and signs a delete", async () => {
