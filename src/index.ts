@@ -8,7 +8,10 @@ import { fetchAdultImage } from "./bot/image-fetch.js";
 import { createImageSearch } from "./bot/image-search.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
 import { startActivityStream } from "./chat/activity-stream.js";
-import { ensureChatActivitySubscription } from "./chat/activity-subscribe.js";
+import {
+  ensureChatActivitySubscription,
+  requireActivityAppBearer,
+} from "./chat/activity-subscribe.js";
 import { startActivityWebhook, type ActivityWebhook } from "./chat/activity-webhook.js";
 import { ChatPoller } from "./chat/poller.js";
 import { openChatCipher } from "./chat/identity.js";
@@ -200,10 +203,14 @@ async function startActivityRuntime(options: {
 
   if (options.subscribe) {
     try {
-      await ensureChatActivitySubscription(options.client, options.botUserId);
+      await ensureChatActivitySubscription(
+        options.client,
+        options.botUserId,
+        options.bearerToken,
+      );
     } catch (error) {
       log.error(
-        "Could not ensure the chat.received subscription. The stream or webhook will still start, and the Chat poller remains the catch-up path. Create the subscription with the user token (scope dm.read) if this persists.",
+        "Could not ensure the chat.received subscription. List needs ACTIVITY_BEARER_TOKEN; create needs the user access token (scope dm.read). The Chat poller remains the catch-up path.",
         error,
       );
     }
@@ -211,16 +218,17 @@ async function startActivityRuntime(options: {
 
   let stream: { stop(): void } | undefined;
   if (options.transport !== "webhook") {
-    log.info(
-      options.bearerToken
-        ? "Activity stream will use ACTIVITY_BEARER_TOKEN"
-        : "Activity stream will use the bot user access token",
-    );
-    stream = startActivityStream({
-      nextToken: async () => options.bearerToken ?? (await options.client.getAccessToken()),
-      open: (token, signal) => options.client.openActivityStream(token, signal),
-      onEvent: (body) => intake.handle(body),
-    });
+    try {
+      const streamToken = requireActivityAppBearer(options.bearerToken, "stream");
+      log.info("Activity stream will use ACTIVITY_BEARER_TOKEN");
+      stream = startActivityStream({
+        nextToken: async () => streamToken,
+        open: (token, signal) => options.client.openActivityStream(token, signal),
+        onEvent: (body) => intake.handle(body),
+      });
+    } catch (error) {
+      log.error(error instanceof Error ? error.message : String(error));
+    }
   }
 
   let webhook: ActivityWebhook | undefined;

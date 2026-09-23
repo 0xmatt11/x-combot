@@ -87,7 +87,7 @@ export interface Env {
   activityEnabled?: boolean;
   activityTransport?: "stream" | "webhook" | "both";
   activitySubscribe?: boolean;
-  /** App-only bearer for `GET /2/activity/stream` and `POST /2/webhooks`. Not a user token. */
+  /** App-only bearer for list and stream. Create chat.received uses the user token. */
   activityBearerToken?: string;
   activityWebhookPort?: number;
   activityWebhookPath?: string;

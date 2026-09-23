@@ -15,7 +15,7 @@ export interface ActivitySettings {
   pollIntervalMs: number;
   webhookPort: number;
   webhookPath: string;
-  /** App-only bearer. When set, the Activity stream uses it instead of the user access token. */
+  /** App-only bearer. Required for list and stream. Create chat.received uses the user token. */
   bearerToken?: string;
   /** Public HTTPS URL X will call. Registration is skipped when this is unset. */
   webhookPublicUrl?: string;
