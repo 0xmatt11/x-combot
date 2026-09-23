@@ -19,9 +19,22 @@ export interface DecryptedEvent {
   conversationId?: string | null;
   createdAtMsec?: number | null;
   verified?: boolean;
+  /**
+   * chat-xdk: `"valid"` when the embedded signed original matches the preview.
+   * `"invalid"` (or absent) means the preview sender is untrusted.
+   * The WASM build uses this camelCase name; `reply_preview_validation` is accepted too.
+   */
+  replyPreviewValidation?: string;
+  reply_preview_validation?: string;
   content?: {
     contentType?: string;
+    /** WASM decrypt uses snake_case for this discriminator. */
+    content_type?: string;
     text?: string;
+    /** chat-xdk types this as `unknown`. Shape is read in `trustedReplySenderId`. */
+    replyingToPreview?: unknown;
+    /** WASM decrypt uses snake_case for the preview object. */
+    replying_to_preview?: unknown;
   };
   changeType?: string;
   memberIds?: string[];

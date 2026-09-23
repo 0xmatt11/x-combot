@@ -54,6 +54,22 @@ describe("parseCommand", () => {
     expect(parseCommand("!get topic")).toEqual({ name: "get", key: "topic" });
   });
 
+  it("parses a user command with no args so a reply can supply the target", () => {
+    expect(parseCommand("!warn")).toEqual({ name: "warn" });
+    expect(parseCommand("/warn")).toEqual({ name: "warn" });
+    expect(parseCommand("!kick")).toEqual({ name: "kick" });
+    expect(parseCommand("/kick")).toEqual({ name: "kick" });
+    expect(parseCommand("!warns")).toEqual({ name: "warns" });
+    expect(parseCommand("!unwarn")).toEqual({ name: "unwarn" });
+    expect(parseCommand("!mute")).toEqual({ name: "mute" });
+    expect(parseCommand("/unmute")).toEqual({ name: "unmute" });
+    expect(parseCommand("!admin add")).toEqual({ name: "admin", action: "add" });
+    expect(parseCommand("!admin remove")).toEqual({ name: "admin", action: "remove" });
+    expect(parseCommand("!warn !!!")).toBeUndefined();
+    expect(parseCommand("!del")).toEqual({ name: "del" });
+    expect(parseCommand("!note")).toEqual({ name: "note" });
+  });
+
   it("parses mute, kick, admin, and set", () => {
     expect(parseCommand("!mute @bob 15")).toEqual({
       name: "mute",

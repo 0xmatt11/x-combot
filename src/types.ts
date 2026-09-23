@@ -191,6 +191,14 @@ export interface DmEvent {
   text?: string;
   mentions: Mention[];
   /**
+   * Author of the message this event replies to.
+   *
+   * Set for encrypted X Chat only when chat-xdk validates the reply preview
+   * (`replyPreviewValidation === "valid"`). Classic `GET /2/dm_events` payloads
+   * have no reply-to sender; `referenced_tweets` is a post linked in the text.
+   */
+  replyToSenderId?: string;
+  /**
    * X Chat message sequence id. Required for
    * `POST /2/chat/conversations/:id/messages/delete`. Absent on classic DM events.
    */

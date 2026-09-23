@@ -24,6 +24,7 @@ help: |
     !notacommand — unknown bang commands get a short LLM joke when the LLM is on (quiet if it is off)
 
   Admin commands:
+    Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.
     !warn @user [reason] — add a warning
     !warns @user — show warning count
     !unwarn @user — remove one warning

@@ -28,6 +28,7 @@ export function chatEventToDm(
   if (decrypted.type === "message") {
     const text = messageText(decrypted);
     if (text === undefined) return undefined;
+    const replyToSenderId = trustedReplySenderId(decrypted);
     return {
       id,
       eventType: "MessageCreate",
@@ -39,6 +40,7 @@ export function chatEventToDm(
       text,
       mentions: mentionsIn(text),
       sequenceId,
+      ...(replyToSenderId ? { replyToSenderId } : {}),
     };
   }
 
@@ -76,10 +78,52 @@ export function chatEventToDm(
   return undefined;
 }
 
+/**
+ * Sender of the message this Chat event replies to.
+ *
+ * chat-xdk puts the claim on `content.replying_to_preview.senderId` (the
+ * documented alias is `replyingToPreview`). That claim is usable only when
+ * `replyPreviewValidation` is `"valid"` — the SDK checked it against the
+ * embedded signed original. `"invalid"` and a missing verdict are untrusted:
+ * a forged preview must not choose who gets warned or kicked.
+ *
+ * Numeric sender ids are ignored. Snowflake user ids are not safe JavaScript
+ * numbers, so only the string form is accepted.
+ */
+export function trustedReplySenderId(event: DecryptedEvent): string | undefined {
+  const validation = readString(event, "replyPreviewValidation", "reply_preview_validation");
+  if (validation?.toLowerCase() !== "valid") return undefined;
+  const content = event.content;
+  if (!content) return undefined;
+  const preview = readRecord(content, "replyingToPreview", "replying_to_preview");
+  if (!preview) return undefined;
+  return readString(preview, "senderId", "sender_id");
+}
+
+function readString(value: object, ...keys: string[]): string | undefined {
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const field = record[key];
+    if (typeof field !== "string") continue;
+    const trimmed = field.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function readRecord(value: object, ...keys: string[]): object | undefined {
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const field = record[key];
+    if (field && typeof field === "object") return field;
+  }
+  return undefined;
+}
+
 function messageText(event: DecryptedEvent): string | undefined {
   const content = event.content;
   if (!content || typeof content.text !== "string") return undefined;
-  const kind = content.contentType;
+  const kind = content.contentType ?? content.content_type;
   if (kind && kind !== "text") return undefined;
   return content.text;
 }

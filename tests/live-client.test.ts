@@ -6,6 +6,7 @@ import {
   chatMediaConversationId,
   dmMediaSpec,
   headerBackoffMs,
+  normalizeClassicDmEvent,
   type ApiError,
 } from "../src/x/live-client.js";
 
@@ -74,6 +75,25 @@ describe("headerBackoffMs", () => {
       "x-rate-limit-reset": String(Math.floor(now / 1000) - 10),
     });
     expect(headerBackoffMs(headers, now)).toBe(1_000);
+  });
+});
+
+describe("classic DM events", () => {
+  it("does not treat a referenced post as the author of a reply", () => {
+    const event = normalizeClassicDmEvent(
+      {
+        id: "dm-1",
+        event_type: "MessageCreate",
+        dm_conversation_id: "1578398451921985538",
+        sender_id: "u-owner",
+        text: "/warn",
+        referenced_tweets: [{ id: "1578868150510456833" }],
+      },
+      new Map([["u-owner", { id: "u-owner", username: "owner" }]]),
+    );
+    expect(event.text).toBe("/warn");
+    expect(event.senderId).toBe("u-owner");
+    expect(event.replyToSenderId).toBeUndefined();
   });
 });
 
