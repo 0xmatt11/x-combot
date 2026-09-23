@@ -22,7 +22,9 @@ export function normalizePublicKeys(body: unknown, userId: string): RemotePublic
       "identity_public_key_signature",
       "identityPublicKeySignature",
     );
-    const publicKeyVersion = stringField(record, "public_key_version", "publicKeyVersion");
+    const publicKeyVersion =
+      stringField(record, "public_key_version", "publicKeyVersion") ||
+      stringField(record, "version", "keyVersion");
     if (!publicKey || !signingPublicKey || !identityPublicKeySignature || !publicKeyVersion) {
       continue;
     }
@@ -156,12 +158,24 @@ function unwrapKeyRecords(body: unknown): Record<string, unknown>[] {
   if (!body || typeof body !== "object") return [];
   const root = body as Record<string, unknown>;
   const data = root.data ?? root;
-  if (Array.isArray(data)) return data.filter(isRecord);
-  if (!isRecord(data)) return [];
-  if (Array.isArray(data.public_keys)) return data.public_keys.filter(isRecord);
-  if (Array.isArray(data.keys)) return data.keys.filter(isRecord);
-  if (stringField(data, "public_key", "publicKey")) return [data];
-  return [];
+  const records = (() => {
+    if (Array.isArray(data)) return data.filter(isRecord);
+    if (!isRecord(data)) return [];
+    if (Array.isArray(data.public_keys)) return data.public_keys.filter(isRecord);
+    if (Array.isArray(data.keys)) return data.keys.filter(isRecord);
+    if (stringField(data, "public_key", "publicKey") || isRecord(data.public_key) || isRecord(data.publicKey)) {
+      return [data];
+    }
+    return [];
+  })();
+  return records.map(flattenKeyRecord);
+}
+
+/** Some responses nest key material under `public_key` and put the version beside it. */
+function flattenKeyRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const nested = record.public_key ?? record.publicKey;
+  if (!isRecord(nested)) return record;
+  return { ...nested, ...record, public_key: nested.public_key ?? nested.publicKey };
 }
 
 function stringField(record: Record<string, unknown>, snake: string, camel: string): string {

@@ -87,9 +87,10 @@ export class ChatPoller {
           await this.engine.processEvent(event);
         }
       } finally {
-        // Advance even when a reply throws. The event is already marked processed,
-        // and leaving the cursor behind re-reads the same undecryptable page.
-        if (pulled.newestId) this.store.setWatermark(key, pulled.newestId);
+        // Move only through events that decrypted. A failed decrypt stays at
+        // or before the cursor so the next poll can retry it (keys may verify
+        // later). A reply throw still advances when decrypt itself succeeded.
+        if (pulled.watermarkId) this.store.setWatermark(key, pulled.watermarkId);
       }
     }
     return { sawNew, seeded };

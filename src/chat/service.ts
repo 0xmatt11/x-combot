@@ -6,13 +6,13 @@ import { isChatGroupId } from "./ids.js";
 import type { ChatCipher, SigningKeyEntry } from "./cipher.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
 import { chatEventToDm } from "./normalize.js";
-import { newestRawId, normalizeChatPage, rawEventsAfterWatermark } from "./raw.js";
+import { newestRawId, nextWatermarkId, normalizeChatPage, rawEventsAfterWatermark } from "./raw.js";
+import { boundSigningEntries } from "./signing-keys.js";
 import {
   addConversationKeysBody,
   deleteMessagesBody,
   latestPublicKey,
   sendMessageBody,
-  toSigningEntries,
   type RemotePublicKey,
 } from "./wire.js";
 
@@ -20,17 +20,24 @@ const MAX_CATCHUP_PAGES = 4;
 
 export interface ChatPull {
   newestId?: string;
+  /**
+   * Set when the cursor should move. Absent when every new ciphertext failed
+   * to decrypt — the poller must not skip those events.
+   */
+  watermarkId?: string;
   events: DmEvent[];
-  /** True when the stored cursor was older than every page we were willing to read. */
-  replacedStaleWatermark: boolean;
 }
 
 export class ChatService {
   private readonly signingByUser = new Map<string, SigningKeyEntry[]>();
+  private readonly remoteByUser = new Map<string, RemotePublicKey[]>();
   private readonly membersLoaded = new Set<string>();
+  private readonly bindingWarned = new Set<string>();
   private readonly tokens = new Map<string, string>();
-  /** Key-change blobs already submitted to decryptEvents. Old versions are not retried. */
+  /** Key-change blobs whose decrypt did not report an error. Failures are retried. */
   private readonly seenKeyEvents = new Set<string>();
+  /** After public_keys 429/402, skip further fetches until this time. */
+  private publicKeyBlockedUntil = 0;
 
   constructor(
     private readonly http: ChatHttp,
@@ -40,9 +47,10 @@ export class ChatService {
 
   /**
    * Fetch the newest page (and older pages until the watermark is found).
-   * Ciphertext at or before the watermark is not decrypted again — pre-rotation
-   * history stays on the page X returns, but it is not re-submitted every poll.
-   * Key-change events are still applied so the conversation-key cache stays warm.
+   * Ciphertext at or before the watermark is not decrypted again. Ciphertext
+   * newer than the watermark that fails to decrypt is retried next poll — the
+   * cursor does not move past it. Key-change events are still applied so a
+   * later successful verify can fill the conversation-key cache.
    * Returns moderation events strictly newer than `watermarkId`, oldest first.
    */
   async pullNew(
@@ -50,21 +58,8 @@ export class ChatService {
     watermarkId: string | undefined,
     maxResults: number,
   ): Promise<ChatPull> {
-    const { pages, watermarkFound } = await this.loadPages(
-      conversationId,
-      watermarkId,
-      maxResults,
-    );
+    const pages = await this.loadPages(conversationId, watermarkId, maxResults);
     const newestId = newestRawId(pages[0]);
-    const replacedStaleWatermark = Boolean(
-      watermarkId && watermarkId !== "empty" && !watermarkFound && newestId && newestId !== watermarkId,
-    );
-    if (replacedStaleWatermark) {
-      log.info(
-        `Chat watermark for ${conversationId} was not in the latest pages; advancing to ${newestId} so undecryptable history is not fetched again.`,
-      );
-    }
-
     const newer = rawEventsAfterWatermark(pages, watermarkId);
     const onlyEncoded = new Set<string>();
     for (const raw of newer) {
@@ -73,12 +68,17 @@ export class ChatService {
     const decrypted = await this.decryptPages(conversationId, pages, { onlyEncoded });
     // First sight of a conversation seeds the watermark in the poller and does not replay.
     if (watermarkId === undefined) {
-      return { newestId, events: [], replacedStaleWatermark: false };
+      return { newestId, events: [], watermarkId: newestId ?? "empty" };
     }
 
     const newIds = new Set(newer.map((raw) => raw.id).filter((id): id is string => Boolean(id)));
     const fresh = decrypted.filter((event) => newIds.has(event.id));
-    return { newestId, events: fresh.reverse(), replacedStaleWatermark };
+    const decryptedIds = new Set(fresh.map((event) => event.id));
+    return {
+      newestId,
+      events: fresh.reverse(),
+      watermarkId: nextWatermarkId(newer, decryptedIds, watermarkId),
+    };
   }
 
   /**
@@ -170,29 +170,63 @@ export class ChatService {
 
   /**
    * Rotate the conversation key and wrap it for every member we can see.
-   * Aborts without posting if any member's public key is missing.
+   * The chat-xdk keeps only the highest version per user, so this process's
+   * loaded identity is the only key submitted for the bot. Aborts without
+   * posting when that loaded key is older than the account's latest key,
+   * unless `force` is set.
    */
-  async rotateConversationKey(conversationId: string): Promise<void> {
+  async rotateConversationKey(
+    conversationId: string,
+    options?: { force?: boolean },
+  ): Promise<void> {
     const memberIds = await this.http.getMemberIds(conversationId);
     if (memberIds.length === 0) {
       throw new Error(
         `GET /2/chat/conversations/${conversationId} returned no member ids, so a key rotation would lock people out. Aborting.`,
       );
     }
-    const publicKeys = [];
+    const identity = this.cipher.loadedIdentity();
+    const publicKeys: { userId: string; publicKey: string; keyVersion: string }[] = [];
     for (const userId of memberIds) {
-      const keys = await this.http.getUserPublicKeys(userId);
-      const latest = latestPublicKey(keys);
-      if (!latest) {
+      const keys = await this.loadRemoteKeys(userId);
+      if (identity && userId === identity.userId) {
+        const loaded = selectLoadedKey(keys, identity, (publicKey) =>
+          this.cipher.matchesRegisteredKey(publicKey),
+        );
+        if (!loaded) {
+          throw new Error(
+            `Loaded Chat identity version ${identity.version} is not on this account. Register that key (\`npm run chat:register\`) or unlock the account's current key with CHAT_PIN (Juicebox) before rotating ${conversationId}.`,
+          );
+        }
+        const latest = latestPublicKey(keys);
+        if (
+          latest &&
+          latest.publicKeyVersion !== loaded.publicKeyVersion &&
+          !options?.force
+        ) {
+          throw new Error(
+            `Refusing to rotate ${conversationId}: this process holds public key version ${loaded.publicKeyVersion}, but the account's latest key is ${latest.publicKeyVersion}. chat-xdk wraps only the newest key it is given, so a rotate aimed at the browser/Juicebox key cannot be decrypted by the file this process loaded. Unlock Juicebox with CHAT_PIN so the process matches that newer key, or re-run with --force to wrap version ${loaded.publicKeyVersion} (the newer key will not read messages under the rotated conversation key).`,
+          );
+        }
+        publicKeys.push({
+          userId,
+          publicKey: loaded.publicKey,
+          keyVersion: loaded.publicKeyVersion,
+        });
+        continue;
+      }
+      if (keys.length === 0) {
         throw new Error(
           `No public key for member ${userId}. Aborting rotation so that member is not locked out of ${conversationId}.`,
         );
       }
-      publicKeys.push({
-        userId,
-        publicKey: latest.publicKey,
-        keyVersion: latest.publicKeyVersion,
-      });
+      for (const key of keys) {
+        publicKeys.push({
+          userId,
+          publicKey: key.publicKey,
+          keyVersion: key.publicKeyVersion,
+        });
+      }
     }
     const prepared = this.cipher.prepareConversationKeyChange({
       conversationId,
@@ -202,8 +236,9 @@ export class ChatService {
       conversationId,
       addConversationKeysBody(prepared, this.cipher.signingPublicKey()),
     );
+    const versions = publicKeys.map((key) => `${key.userId}:${key.keyVersion}`).join(", ");
     log.info(
-      `Posted a Chat key rotation for ${conversationId} covering ${publicKeys.length} members (version ${prepared.conversationKeyVersion}).`,
+      `Posted a Chat key rotation for ${conversationId} covering ${publicKeys.length} public key(s) [${versions}] (conversation key ${prepared.conversationKeyVersion}).`,
     );
   }
 
@@ -211,10 +246,9 @@ export class ChatService {
     conversationId: string,
     watermarkId: string | undefined,
     maxResults: number,
-  ): Promise<{ pages: RawChatEventsPage[]; watermarkFound: boolean }> {
+  ): Promise<RawChatEventsPage[]> {
     const pages: RawChatEventsPage[] = [];
     let token: string | undefined;
-    let watermarkFound = watermarkId === undefined || watermarkId === "empty";
     for (let pageIndex = 0; pageIndex < MAX_CATCHUP_PAGES; pageIndex += 1) {
       const page = normalizeChatPage(
         await this.http.getConversationEvents(conversationId, {
@@ -226,11 +260,10 @@ export class ChatService {
       if (watermarkId === undefined) break;
       const ids = (page.data ?? []).map((event) => event.id).filter((id): id is string => Boolean(id));
       const found = watermarkId === "empty" || ids.includes(watermarkId);
-      if (found) watermarkFound = true;
       token = page.meta?.next_token;
       if (found || !token) break;
     }
-    return { pages, watermarkFound };
+    return pages;
   }
 
   private async decryptPages(
@@ -280,10 +313,14 @@ export class ChatService {
     }
 
     if (encoded.length === 0) return [];
-    const result = this.cipher.decryptEvents(encoded);
+    const signingKeys = this.currentSigningKeys();
+    const result = this.cipher.decryptEvents(encoded, signingKeys.length > 0 ? signingKeys : undefined);
     logDecryptErrors(conversationId, result.errors);
     if (membersReady) {
-      for (const keyEvent of freshKeys) this.seenKeyEvents.add(keyEvent);
+      const failed = failedDecryptBlobs(encoded, result.errors);
+      for (const keyEvent of freshKeys) {
+        if (!failed.has(keyEvent)) this.seenKeyEvents.add(keyEvent);
+      }
     }
     const byB64 = new Map<string, (typeof result.messages)[number]["event"]>();
     for (const message of result.messages) {
@@ -303,39 +340,120 @@ export class ChatService {
 
   private async ensureMemberKeys(conversationId: string): Promise<boolean> {
     if (this.membersLoaded.has(conversationId)) return true;
+    let ids: string[];
     try {
-      const ids = await this.http.getMemberIds(conversationId);
-      await this.ensureSigningKeys(ids);
-      this.membersLoaded.add(conversationId);
-      return true;
+      ids = await this.http.getMemberIds(conversationId);
     } catch (error) {
-      log.warn(
-        `Could not list members of ${conversationId} before decrypt`,
-        error,
-      );
+      if (rateLimitWaitMs(error) !== undefined) throw error;
+      log.warn(`Could not list members of ${conversationId} before decrypt`, error);
       return false;
+    }
+    const loaded = await this.ensureSigningKeys(ids);
+    if (!loaded) return false;
+    this.membersLoaded.add(conversationId);
+    return true;
+  }
+
+  private async ensureSigningKeys(userIds: string[]): Promise<boolean> {
+    let ok = true;
+    for (const userId of userIds) {
+      if (!userId || this.remoteByUser.has(userId)) continue;
+      try {
+        await this.loadRemoteKeys(userId);
+      } catch (error) {
+        ok = false;
+        if (rateLimitWaitMs(error) !== undefined) {
+          log.warn(
+            `GET /2/users/${userId}/public_keys rate limited; not caching an empty signing-key list`,
+            error,
+          );
+          throw error;
+        }
+        log.warn(`GET /2/users/${userId}/public_keys failed`, error);
+      }
+    }
+    return ok;
+  }
+
+  private async loadRemoteKeys(userId: string): Promise<RemotePublicKey[]> {
+    const cached = this.remoteByUser.get(userId);
+    if (cached) return cached;
+    const blockedFor = this.publicKeyBlockedUntil - Date.now();
+    if (blockedFor > 0) {
+      throw Object.assign(
+        new Error(`GET /2/users/${userId}/public_keys is in backoff for ${blockedFor}ms`),
+        { status: 429, retryAfterMs: blockedFor },
+      );
+    }
+    try {
+      const keys = await this.http.getUserPublicKeys(userId);
+      this.rememberRemoteKeys(userId, keys);
+      return keys;
+    } catch (error) {
+      const wait = rateLimitWaitMs(error);
+      if (wait !== undefined) this.publicKeyBlockedUntil = Date.now() + wait;
+      throw error;
     }
   }
 
-  private async ensureSigningKeys(userIds: string[]): Promise<void> {
-    let changed = false;
-    for (const userId of userIds) {
-      if (!userId || this.signingByUser.has(userId)) continue;
-      try {
-        const keys = await this.http.getUserPublicKeys(userId);
-        this.signingByUser.set(userId, toSigningEntries(keys));
-        changed = true;
-      } catch (error) {
-        log.warn(`GET /2/users/${userId}/public_keys failed`, error);
-        this.signingByUser.set(userId, []);
-      }
+  private rememberRemoteKeys(userId: string, keys: RemotePublicKey[]): void {
+    this.remoteByUser.set(userId, keys);
+    const { entries, unboundVersions } = boundSigningEntries(keys, (identity, signing, signature) =>
+      this.cipher.verifyKeyBinding(identity, signing, signature),
+    );
+    for (const version of unboundVersions) {
+      const mark = `${userId}:${version}`;
+      if (this.bindingWarned.has(mark)) continue;
+      this.bindingWarned.add(mark);
+      log.warn(
+        `Chat public key version ${version} for user ${userId} failed identity-binding verification. The SDK will not use it for KeyChange signatures until the identity key encoding matches the signature (SPKI bytes, standard base64).`,
+      );
     }
-    if (changed) {
-      const flat: SigningKeyEntry[] = [];
-      for (const entries of this.signingByUser.values()) flat.push(...entries);
-      this.cipher.setSigningKeys(flat);
-    }
+    this.signingByUser.set(userId, entries);
+    const flat = this.currentSigningKeys();
+    this.cipher.setSigningKeys(flat);
   }
+
+  private currentSigningKeys(): SigningKeyEntry[] {
+    const flat: SigningKeyEntry[] = [];
+    for (const entries of this.signingByUser.values()) flat.push(...entries);
+    return flat;
+  }
+}
+
+function selectLoadedKey(
+  keys: RemotePublicKey[],
+  identity: { version: string; publicKey: string },
+  matches: (publicKey: string) => boolean,
+): RemotePublicKey | undefined {
+  const byVersion = keys.find((key) => key.publicKeyVersion === identity.version);
+  if (byVersion) return byVersion;
+  const byMaterial = keys.find((key) => {
+    try {
+      return matches(key.publicKey) || key.publicKey === identity.publicKey;
+    } catch {
+      return key.publicKey === identity.publicKey;
+    }
+  });
+  return byMaterial;
+}
+
+function failedDecryptBlobs(encoded: string[], errors: Record<string, string>): Set<string> {
+  const failed = new Set<string>();
+  for (const key of Object.keys(errors)) {
+    const index = Number(key);
+    if (Number.isInteger(index) && encoded[index]) failed.add(encoded[index]);
+    else if (encoded.includes(key)) failed.add(key);
+  }
+  return failed;
+}
+
+function rateLimitWaitMs(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const status = (error as { status?: number }).status;
+  if (status !== 429 && status !== 402) return undefined;
+  const retry = (error as { retryAfterMs?: number }).retryAfterMs;
+  return typeof retry === "number" && retry > 0 ? retry : 15_000;
 }
 
 export type { RemotePublicKey };

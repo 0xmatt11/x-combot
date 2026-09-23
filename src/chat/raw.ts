@@ -60,6 +60,25 @@ export function rawEventsAfterWatermark(
   return newer;
 }
 
+/**
+ * Cursor to store after a poll. Walk oldest-first and stop at the first
+ * ciphertext that did not decrypt, so a later success cannot skip a failure
+ * permanently. Returns undefined when the cursor does not move.
+ */
+export function nextWatermarkId(
+  newerNewestFirst: RawChatEvent[],
+  decryptedIds: ReadonlySet<string>,
+  current: string,
+): string | undefined {
+  let cursor = current;
+  for (const raw of [...newerNewestFirst].reverse()) {
+    if (!raw.id) continue;
+    if (raw.encoded_event && !decryptedIds.has(raw.id)) break;
+    cursor = raw.id;
+  }
+  return cursor !== current ? cursor : undefined;
+}
+
 function firstString(...values: Array<string | undefined>): string | undefined {
   for (const value of values) {
     if (value) return value;

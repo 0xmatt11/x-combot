@@ -4,7 +4,7 @@ import { parseChatConversationIds } from "../src/chat/ids.js";
 import { chatEventToDm } from "../src/chat/normalize.js";
 import { ChatPoller } from "../src/chat/poller.js";
 import { ChatService } from "../src/chat/service.js";
-import type { ChatCipher, DecryptedEvent } from "../src/chat/cipher.js";
+import type { ChatCipher, DecryptedEvent, LoadedChatIdentity, PublicKeyMaterial } from "../src/chat/cipher.js";
 import type { ChatHttp, RawChatEventsPage } from "../src/chat/http.js";
 import {
   memberIdsFromConversation,
@@ -45,9 +45,26 @@ class FakeCipher implements ChatCipher {
   readonly texts: string[] = [];
   readonly deleted: string[][] = [];
   readonly batches: string[][] = [];
+  readonly wrapped: PublicKeyMaterial[] = [];
   readonly events = new Map<string, DecryptedEvent>();
+  identity: LoadedChatIdentity | undefined;
+  signingKeySets = 0;
 
-  setSigningKeys(): void {}
+  setSigningKeys(): void {
+    this.signingKeySets += 1;
+  }
+
+  verifyKeyBinding(): boolean {
+    return true;
+  }
+
+  matchesRegisteredKey(publicKey: string): boolean {
+    return publicKey === this.identity?.publicKey;
+  }
+
+  loadedIdentity(): LoadedChatIdentity | undefined {
+    return this.identity;
+  }
 
   decryptEvents(eventsB64: string[]) {
     this.batches.push([...eventsB64]);
@@ -82,11 +99,16 @@ class FakeCipher implements ChatCipher {
     };
   }
 
-  prepareConversationKeyChange(params: { conversationId: string }) {
+  prepareConversationKeyChange(params: { conversationId: string; publicKeys: PublicKeyMaterial[] }) {
+    this.wrapped.push(...params.publicKeys);
     return {
       conversationId: params.conversationId,
       conversationKeyVersion: "100",
-      participantKeys: [],
+      participantKeys: params.publicKeys.map((key) => ({
+        userId: key.userId,
+        encryptedKey: "enc",
+        publicKeyVersion: key.keyVersion,
+      })),
       actionSignatures: [],
     };
   }
@@ -102,6 +124,11 @@ class FakeHttp implements ChatHttp {
   deletes: Record<string, unknown>[] = [];
   failNext: unknown;
   gets = 0;
+  keyGets: string[] = [];
+  keyError: unknown;
+  keysByUser = new Map<string, ReturnType<FakeHttp["defaultKeys"]>>();
+  postedKeys: unknown[] = [];
+  memberIds = ["alice-1"];
 
   async getConversationEvents(): Promise<RawChatEventsPage> {
     this.gets += 1;
@@ -114,19 +141,29 @@ class FakeHttp implements ChatHttp {
   }
 
   async getMemberIds(): Promise<string[]> {
-    return ["alice-1"];
+    return this.memberIds;
   }
 
-  async getUserPublicKeys() {
+  defaultKeys(userId: string) {
     return [
       {
-        userId: "alice-1",
+        userId,
         publicKeyVersion: "1",
         publicKey: "identity",
         signingPublicKey: "signing",
         identityPublicKeySignature: "bind",
       },
     ];
+  }
+
+  async getUserPublicKeys(userId: string) {
+    this.keyGets.push(userId);
+    if (this.keyError) {
+      const error = this.keyError;
+      this.keyError = undefined;
+      throw error;
+    }
+    return this.keysByUser.get(userId) ?? this.defaultKeys(userId);
   }
 
   async sendChatMessage(_conversationId: string, body: Record<string, string>) {
@@ -139,7 +176,9 @@ class FakeHttp implements ChatHttp {
     return { deleted: true };
   }
 
-  async addConversationKeys(): Promise<void> {}
+  async addConversationKeys(_conversationId: string, body: Record<string, unknown>): Promise<void> {
+    this.postedKeys.push(body);
+  }
 
   async addUserPublicKey(): Promise<{ version?: string }> {
     return { version: "1" };
@@ -187,6 +226,27 @@ describe("Chat ids and wire shapes", () => {
     expect(body.version).toBe("9");
     expect(body.public_key.public_key).toBe("ID");
     expect(body.generate_version).toBe(true);
+  });
+
+  it("accepts a version field and a nested public_key object", () => {
+    const keys = normalizePublicKeys(
+      {
+        data: [
+          {
+            version: "1790180984855",
+            public_key: {
+              public_key: "ID",
+              signing_public_key: "SIGN",
+              identity_public_key_signature: "BIND",
+            },
+          },
+        ],
+      },
+      "bot",
+    );
+    expect(keys[0]?.publicKeyVersion).toBe("1790180984855");
+    expect(keys[0]?.publicKey).toBe("ID");
+    expect(keys[0]?.signingPublicKey).toBe("SIGN");
   });
 
   it("reads member ids from a conversation payload", () => {
@@ -304,7 +364,7 @@ describe("Chat transport into the moderation engine", () => {
     expect(helpBatch).not.toContain("b64-old");
   });
 
-  it("does not decrypt pre-watermark or undecryptable history on the next poll", async () => {
+  it("does not advance the watermark when decrypt fails", async () => {
     const { http, cipher, poller, store } = setup();
     http.pages.push({
       data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }],
@@ -322,8 +382,8 @@ describe("Chat transport into the moderation engine", () => {
       meta: { conversation_key_events: ["key-old"] },
     });
     await poller.pollOnce();
-    expect(cipher.batches[1]).toEqual(["b64-dead"]);
-    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-dead");
+    expect(cipher.batches[1]).toEqual(["key-old", "b64-dead"]);
+    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-1");
     expect(cipher.texts).toEqual([]);
 
     http.pages.push({
@@ -334,17 +394,27 @@ describe("Chat transport into the moderation engine", () => {
       ],
     });
     await poller.pollOnce();
-    expect(cipher.batches[2]).toEqual(["b64-help"]);
+    expect(cipher.batches[2]).toEqual(["b64-help", "b64-dead"]);
     expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-1");
 
+    cipher.events.set("b64-dead", {
+      type: "message",
+      sequenceId: "40",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "now-open" },
+    });
+    cipher.events.set("key-old", { type: "keyChange" });
     http.pages.push({
       data: [
         { id: "evt-2", sender_id: "alice-1", encoded_event: "b64-help" },
         { id: "evt-dead", sender_id: "alice-1", encoded_event: "b64-dead" },
       ],
+      meta: { conversation_key_events: ["key-old"] },
     });
     await poller.pollOnce();
-    expect(cipher.batches).toHaveLength(3);
+    expect(cipher.batches[3]?.[0]).toBe("key-old");
+    expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-2");
   });
 
   it("advances a watermark that has fallen off the latest pages", async () => {
@@ -454,5 +524,67 @@ describe("Chat transport into the moderation engine", () => {
     expect(http.gets).toBe(5);
     poller.stop();
     vi.useRealTimers();
+  });
+
+  it("does not cache an empty signing-key list when public_keys returns 429", async () => {
+    const { http, cipher, service } = setup();
+    http.keyError = Object.assign(new Error("Rate limited"), { status: 429, retryAfterMs: 40 });
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await expect(service.pullNew(GROUP, undefined, 10)).rejects.toThrow(/Rate limited/);
+    expect(cipher.signingKeySets).toBe(0);
+    expect(http.keyGets).toEqual(["alice-1"]);
+
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await expect(service.pullNew(GROUP, undefined, 10)).rejects.toThrow(/backoff/);
+    expect(http.keyGets).toEqual(["alice-1"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await service.pullNew(GROUP, undefined, 10);
+    expect(cipher.signingKeySets).toBe(1);
+    expect(http.keyGets).toEqual(["alice-1", "alice-1"]);
+  });
+
+  it("wraps the loaded identity and refuses a newer account key without --force", async () => {
+    const { http, cipher, service } = setup();
+    cipher.identity = { userId: "bot-1", version: "1790180984855", publicKey: "FILE_SPKI" };
+    http.memberIds = ["bot-1", "alice-1"];
+    http.keysByUser.set("bot-1", [
+      {
+        userId: "bot-1",
+        publicKeyVersion: "1790180984855",
+        publicKey: "FILE_SPKI",
+        signingPublicKey: "file-sign",
+        identityPublicKeySignature: "bind-file",
+      },
+      {
+        userId: "bot-1",
+        publicKeyVersion: "1790182715573",
+        publicKey: "BROWSER_SPKI",
+        signingPublicKey: "browser-sign",
+        identityPublicKeySignature: "bind-browser",
+      },
+    ]);
+    http.keysByUser.set("alice-1", [
+      {
+        userId: "alice-1",
+        publicKeyVersion: "7",
+        publicKey: "ALICE",
+        signingPublicKey: "alice-sign",
+        identityPublicKeySignature: "bind-alice",
+      },
+    ]);
+
+    await expect(service.rotateConversationKey(GROUP)).rejects.toThrow(/1790180984855/);
+    expect(http.postedKeys).toHaveLength(0);
+    expect(cipher.wrapped).toHaveLength(0);
+
+    await service.rotateConversationKey(GROUP, { force: true });
+    expect(cipher.wrapped.map((key) => `${key.userId}:${key.keyVersion}`)).toEqual([
+      "bot-1:1790180984855",
+      "alice-1:7",
+    ]);
+    expect(cipher.wrapped.some((key) => key.keyVersion === "1790182715573")).toBe(false);
+    expect(http.postedKeys).toHaveLength(1);
   });
 });

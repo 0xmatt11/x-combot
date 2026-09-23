@@ -6,6 +6,7 @@ import type {
   ActionSignature,
   ChatCipher,
   DecryptEventsResult,
+  LoadedChatIdentity,
   PreparedKeyChange,
   PublicKeyMaterial,
   SendPayload,
@@ -24,6 +25,12 @@ export interface XdkLike {
   setCacheKeys(enabled: boolean): void;
   setSigningKeys(keys: SigningKeyEntry[]): void;
   getPublicKeys(): { identity: string; signing: string };
+  verifyKeyBinding(
+    identityPublicKeyB64: string,
+    signingPublicKeyB64: string,
+    identityPublicKeySignatureB64: string,
+  ): boolean;
+  matchesRegisteredKey(publicKeyB64: string): boolean;
   decryptEvents(events: string[], signingKeys?: SigningKeyEntry[]): DecryptEventsResult;
   encryptMessage(params: { conversationId: string; text: string }): SendPayload & {
     encodedEventSignature?: string;
@@ -90,7 +97,7 @@ export async function createWasmChat(): Promise<XdkLike> {
   return new wasm.Chat();
 }
 
-export function wrapCipher(inner: XdkLike): ChatCipher {
+export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatCipher {
   let signing = "";
   const refreshSigning = () => {
     signing = inner.getPublicKeys().signing;
@@ -99,12 +106,28 @@ export function wrapCipher(inner: XdkLike): ChatCipher {
     setSigningKeys(keys) {
       inner.setSigningKeys(keys);
     },
-    decryptEvents(eventsB64) {
-      const result = inner.decryptEvents(eventsB64);
+    decryptEvents(eventsB64, signingKeys) {
+      const result = inner.decryptEvents(
+        eventsB64,
+        signingKeys && signingKeys.length > 0 ? signingKeys : undefined,
+      );
       return {
         messages: result.messages ?? [],
         errors: result.errors ?? {},
       };
+    },
+    verifyKeyBinding(identityPublicKey, signingPublicKey, identityPublicKeySignature) {
+      return inner.verifyKeyBinding(
+        identityPublicKey,
+        signingPublicKey,
+        identityPublicKeySignature,
+      );
+    },
+    matchesRegisteredKey(publicKey) {
+      return inner.matchesRegisteredKey(publicKey);
+    },
+    loadedIdentity() {
+      return identity;
     },
     encryptMessage(conversationId, text) {
       const payload = inner.encryptMessage({ conversationId, text });

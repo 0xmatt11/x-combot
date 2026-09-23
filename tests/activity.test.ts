@@ -12,7 +12,7 @@ import {
 import { readActivityBody } from "../src/chat/activity-stream.js";
 import { ensureChatActivitySubscription } from "../src/chat/activity-subscribe.js";
 import { startActivityWebhook } from "../src/chat/activity-webhook.js";
-import type { ChatCipher, DecryptedEvent } from "../src/chat/cipher.js";
+import type { ChatCipher, DecryptedEvent, LoadedChatIdentity } from "../src/chat/cipher.js";
 import { DECRYPT_WARN_INTERVAL_MS, logDecryptErrors, resetDecryptWarningWindow } from "../src/chat/decrypt-log.js";
 import type { ChatHttp, RawChatEventsPage } from "../src/chat/http.js";
 import { ChatService } from "../src/chat/service.js";
@@ -50,6 +50,18 @@ class FakeCipher implements ChatCipher {
   readonly events = new Map<string, DecryptedEvent>();
 
   setSigningKeys(): void {}
+
+  verifyKeyBinding(): boolean {
+    return true;
+  }
+
+  matchesRegisteredKey(): boolean {
+    return false;
+  }
+
+  loadedIdentity(): LoadedChatIdentity | undefined {
+    return undefined;
+  }
 
   decryptEvents(eventsB64: string[]) {
     this.batches.push([...eventsB64]);
