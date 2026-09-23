@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ADULT_CHEST_QUERY,
@@ -13,6 +14,7 @@ import { fetchAdultImage } from "../src/bot/image-fetch.js";
 import {
   createImageSearch,
   ImageSearchError,
+  parseRedditGateway,
   parseRedditListing,
   serpApiImageSearchUrl,
   type ImageSearch,
@@ -136,6 +138,135 @@ describe("image search parsers", () => {
       "https://cdn.example/teen/pic.jpg",
     ]);
     expect(pickAdultChestImage(parsed)?.url).toBe(SAFE_URL);
+  });
+
+  it("parses a gateway.reddit.com desktop listing", () => {
+    const fixture = JSON.parse(
+      readFileSync(new URL("./fixtures/reddit-gateway.json", import.meta.url), "utf8"),
+    ) as unknown;
+    const parsed = parseRedditGateway(fixture);
+    expect(parsed.map((row) => row.url)).toEqual([
+      SAFE_URL,
+      "https://preview.redd.it/only-preview.png",
+      "https://i.imgur.com/adult.png",
+      "https://i.redd.it/from-media.jpg",
+      "https://i.redd.it/teen-title.jpg",
+      "https://i.redd.it/snake.jpg",
+    ]);
+    expect(parsed.every((row) => row.adult)).toBe(true);
+    expect(pickAdultChestImage(parsed)?.url).toBe(SAFE_URL);
+    expect(pickAdultChestImage(parsed.map((row) => ({ ...row, title: "teen" })))).toBeUndefined();
+  });
+
+  it("reads the gateway listing when public hot.json is blocked", async () => {
+    const fixture = JSON.parse(
+      readFileSync(new URL("./fixtures/reddit-gateway.json", import.meta.url), "utf8"),
+    ) as unknown;
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "reddit",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.includes("gateway.reddit.com")) {
+          return new Response(JSON.stringify(fixture), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("blocked", { status: 403 });
+      },
+    });
+    const hits = await search.searchAdultChestImages();
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toMatch(
+      /^https:\/\/gateway\.reddit\.com\/desktopapi\/v1\/subreddits\/(boobs|cleavage|BiggerThanYouThought)\?sort=hot&allow_over18=1$/,
+    );
+    expect(urls[0]).not.toMatch(/teen|lolita|schoolgirl|query/i);
+    expect(hits.some((hit) => hit.url === SAFE_URL)).toBe(true);
+    expect(pickAdultChestImage(hits)?.url).toBe(SAFE_URL);
+  });
+
+  it("falls back to hot.json when the gateway listing fails", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "reddit",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.includes("hot.json")) {
+          return new Response(
+            JSON.stringify({
+              data: { children: [{ data: { over_18: true, title: "close-up", url: SAFE_URL } }] },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("blocked", { status: 403 });
+      },
+    });
+    const hits = await search.searchAdultChestImages();
+    expect(urls[0]).toContain("gateway.reddit.com");
+    expect(urls[1]).toContain("hot.json");
+    expect(hits.map((hit) => hit.url)).toEqual([SAFE_URL]);
+  });
+
+  it("does not fail the command when hot.json is 403", async () => {
+    const seen: string[] = [];
+    let gateways = 0;
+    const search = createImageSearch({
+      provider: "reddit",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        if (href.includes("hot.json")) {
+          seen.push("hot");
+          return new Response("blocked", { status: 403 });
+        }
+        gateways += 1;
+        seen.push(`gateway-${gateways}`);
+        if (gateways === 1) return new Response("blocked", { status: 403 });
+        return new Response(
+          JSON.stringify({
+            postIds: ["t3_ok"],
+            posts: {
+              t3_ok: {
+                isNSFW: true,
+                postHint: "image",
+                title: "close-up",
+                url: SAFE_URL,
+                media: { type: "image", content: SAFE_URL },
+              },
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await expect(search.searchAdultChestImages()).resolves.toEqual([
+      expect.objectContaining({ url: SAFE_URL, adult: true }),
+    ]);
+    expect(seen).toEqual(["gateway-1", "hot", "gateway-2"]);
+  });
+
+  it("says Reddit blocked the host when every listing path fails", async () => {
+    const search = createImageSearch({
+      provider: "reddit",
+      random: () => 0,
+      fetchImpl: async () => new Response("blocked", { status: 403 }),
+    });
+    await expect(search.searchAdultChestImages()).rejects.toBeInstanceOf(ImageSearchError);
+    try {
+      await search.searchAdultChestImages();
+    } catch (error) {
+      expect(error).toBeInstanceOf(ImageSearchError);
+      const failure = error as ImageSearchError;
+      expect(failure.message).toMatch(/reddit listings unavailable/);
+      expect(failure.userMessage).toMatch(/unavailable/);
+      expect(failure.userMessage).toMatch(/blocked/i);
+    }
   });
 
   it("does not put the SerpAPI key in a failure the bot would log", async () => {

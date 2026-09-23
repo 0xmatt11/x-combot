@@ -128,7 +128,7 @@ BOOBS_ENABLED=true
 
 The command is exact. `!boobs`, `!BOOBS`, and `/boobs` run it. `!boobs anything` is refused and is **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. This is a text filter, not a vision model.
 
-**Search.** Default provider is Reddit's public `hot.json` for adult chest subreddits (`over_18` posts only). No API key.
+**Search.** Default provider is Reddit. No API key. It requests the desktop listing at `gateway.reddit.com` for fixed adult chest subreddits (`sort=hot`, `allow_over18=1`) and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud and datacenter IPs, and a block on that path alone does not fail the command.
 
 ```bash
 # optional; reddit is the default
