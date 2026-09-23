@@ -278,9 +278,10 @@ Two delivery mechanisms, both optional, both in this process. The Chat poller st
 ACTIVITY_ENABLED=true
 ACTIVITY_TRANSPORT=stream
 ACTIVITY_SUBSCRIBE=true
+ACTIVITY_BEARER_TOKEN=your-app-only-bearer
 ```
 
-On startup the bot lists `GET /2/activity/subscriptions` and, if needed, `POST /2/activity/subscriptions` with the **user** access token:
+On startup the bot lists `GET /2/activity/subscriptions` with the **app-only** bearer (`ACTIVITY_BEARER_TOKEN`). That call returns 403 with the user access token. If `chat.received` for this bot is missing, it creates the subscription with `POST /2/activity/subscriptions` using the **user** access token (scope `dm.read`). The app-only bearer cannot create `chat.received` (`OauthAccessTokenRequired`).
 
 ```json
 {
@@ -290,7 +291,7 @@ On startup the bot lists `GET /2/activity/subscriptions` and, if needed, `POST /
 }
 ```
 
-It then holds `GET /2/activity/stream`. By default that request uses the same user access token. Set `ACTIVITY_BEARER_TOKEN` to the app-only bearer from the developer portal if the user-token stream is rejected; that is what the official xchat-bot example uses for the stream. Payloads are decrypted with the same `decryptEvents` path as the poller (`encoded_event` plus any `conversation_key_change_event`). Only ids in `CHAT_CONVERSATION_IDS` are moderated. `chat.sent` is ignored. The stream does not replay history.
+`ACTIVITY_BEARER_TOKEN` is required for list and for the stream. If it is unset, those calls are not attempted. It then holds `GET /2/activity/stream` with that same app-only bearer. The user access token is forbidden on the stream. Payloads are decrypted with the same `decryptEvents` path as the poller (`encoded_event` plus any `conversation_key_change_event`). Only ids in `CHAT_CONVERSATION_IDS` are moderated. `chat.sent` is ignored. The stream does not replay history.
 
 **Webhook**
 

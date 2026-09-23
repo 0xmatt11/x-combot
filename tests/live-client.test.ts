@@ -279,3 +279,102 @@ describe("DM image attach", () => {
     expect(calls.some((call) => call.url.includes("should-not-be-logged"))).toBe(false);
   });
 });
+
+describe("Activity subscription auth", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function freshClient(): LiveXClient {
+    return new LiveXClient({
+      clientId: "cid",
+      tokens: {
+        accessToken: "user-access-token",
+        refreshToken: "user-refresh-token",
+        expiresAtMs: Date.now() + 60 * 60 * 1000,
+      },
+    });
+  }
+
+  function authHeader(init: RequestInit | undefined): string | undefined {
+    const headers = init?.headers;
+    if (!headers || typeof headers !== "object" || headers instanceof Headers) return undefined;
+    return (headers as Record<string, string>).Authorization;
+  }
+
+  it("lists subscriptions with the app-only bearer and does not refresh the user token", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const expired = new LiveXClient({
+      tokens: {
+        accessToken: "user-access-token",
+        refreshToken: "user-refresh-token",
+        expiresAtMs: Date.now() - 60_000,
+      },
+    });
+
+    await expired.listActivitySubscriptions("app-only-bearer");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(new URL(String(url)).pathname).toBe("/2/activity/subscriptions");
+    expect(new URL(String(url)).searchParams.get("max_results")).toBe("1000");
+    expect(init.method ?? "GET").toBe("GET");
+    expect(authHeader(init)).toBe("Bearer app-only-bearer");
+  });
+
+  it("does not fall back to the user token when the app bearer is rejected", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ title: "Unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await capture(freshClient().listActivitySubscriptions("app-only-bearer"));
+    expect(error.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toContain("/2/activity/subscriptions");
+    expect(authHeader((fetchMock.mock.calls[0] as [URL, RequestInit])[1])).toBe(
+      "Bearer app-only-bearer",
+    );
+  });
+
+  it("refuses to list subscriptions when the app bearer is missing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const error = await capture(freshClient().listActivitySubscriptions("  "));
+    expect(error.message).toMatch(/ACTIVITY_BEARER_TOKEN is required for GET \/2\/activity\/subscriptions/);
+    expect(error.message).toMatch(/403/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("creates chat.received with the user access token", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: { id: "sub-1" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const body = {
+      event_type: "chat.received",
+      filter: { user_id: "bot-1" },
+    };
+
+    await freshClient().createActivitySubscription(body);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(new URL(String(url)).pathname).toBe("/2/activity/subscriptions");
+    expect(init.method).toBe("POST");
+    expect(authHeader(init)).toBe("Bearer user-access-token");
+    expect(JSON.parse(String(init.body))).toEqual(body);
+  });
+});

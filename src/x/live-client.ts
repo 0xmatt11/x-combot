@@ -250,12 +250,27 @@ export class LiveXClient implements XClient {
     return this.tokens.accessToken;
   }
 
-  async listActivitySubscriptions(): Promise<unknown> {
+  /**
+   * `GET /2/activity/subscriptions` requires the app-only bearer.
+   * The user access token returns 403, so this does not refresh or send it.
+   */
+  async listActivitySubscriptions(appBearer?: string): Promise<unknown> {
+    const token = appBearer?.trim();
+    if (!token) {
+      throw new Error(
+        "ACTIVITY_BEARER_TOKEN is required for GET /2/activity/subscriptions. The user access token returns 403 on list. Create chat.received still uses the user access token (scope dm.read).",
+      );
+    }
     return this.request("/2/activity/subscriptions", {
       search: { max_results: "1000" },
+      bearer: token,
     });
   }
 
+  /**
+   * `POST /2/activity/subscriptions` for `chat.received` requires the user
+   * access token (scope dm.read). The app-only bearer returns OauthAccessTokenRequired.
+   */
   async createActivitySubscription(body: Record<string, unknown>): Promise<unknown> {
     return this.request("/2/activity/subscriptions", { method: "POST", json: body });
   }
@@ -380,16 +395,21 @@ export class LiveXClient implements XClient {
       /** Recreated on auth retry. Fetch sets the multipart boundary. */
       form?: () => FormData;
       retryAuth?: boolean;
+      /** App-only bearer. Skips user-token refresh; a 401 is not retried as the user. */
+      bearer?: string;
     } = {},
   ): Promise<T> {
-    await this.ensureFreshToken();
+    const appBearer = options.bearer?.trim();
+    if (!appBearer) {
+      await this.ensureFreshToken();
+    }
     const url = new URL(pathname, API_BASE);
     for (const [key, value] of Object.entries(options.search ?? {})) {
       url.searchParams.set(key, value);
     }
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.tokens.accessToken}`,
+      Authorization: `Bearer ${appBearer || this.tokens.accessToken}`,
     };
     const init: RequestInit = {
       method: options.method ?? "GET",
@@ -403,7 +423,7 @@ export class LiveXClient implements XClient {
     }
 
     const response = await fetch(url, init);
-    if (response.status === 401 && options.retryAuth !== false) {
+    if (response.status === 401 && !appBearer && options.retryAuth !== false) {
       await this.refreshAccessToken();
       return this.request<T>(pathname, { ...options, retryAuth: false });
     }

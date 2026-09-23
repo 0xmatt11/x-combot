@@ -10,7 +10,10 @@ import {
   takeActivityLines,
 } from "../src/chat/activity.js";
 import { readActivityBody } from "../src/chat/activity-stream.js";
-import { ensureChatActivitySubscription } from "../src/chat/activity-subscribe.js";
+import {
+  ensureChatActivitySubscription,
+  requireActivityAppBearer,
+} from "../src/chat/activity-subscribe.js";
 import { startActivityWebhook } from "../src/chat/activity-webhook.js";
 import type { ChatCipher, DecryptedEvent, LoadedChatIdentity } from "../src/chat/cipher.js";
 import { DECRYPT_WARN_INTERVAL_MS, logDecryptErrors, resetDecryptWarningWindow } from "../src/chat/decrypt-log.js";
@@ -281,10 +284,14 @@ describe("Activity webhook", () => {
 });
 
 describe("Activity subscription", () => {
-  it("creates a group chat.received subscription when none exists", async () => {
+  const appBearer = "app-only-bearer";
+
+  it("lists with the app bearer and creates chat.received on the user client", async () => {
     const created: Record<string, unknown>[] = [];
+    const listed: string[] = [];
     const client = {
-      async listActivitySubscriptions() {
+      async listActivitySubscriptions(bearer: string) {
+        listed.push(bearer);
         return { data: [] };
       },
       async createActivitySubscription(body: Record<string, unknown>) {
@@ -292,7 +299,8 @@ describe("Activity subscription", () => {
         return { data: {} };
       },
     };
-    await ensureChatActivitySubscription(client, "bot-1");
+    await ensureChatActivitySubscription(client, "bot-1", appBearer);
+    expect(listed).toEqual([appBearer]);
     expect(created).toEqual([chatReceivedSubscriptionBody("bot-1", true)]);
     expect(hasChatReceivedSubscription({
       data: [{ event_type: "chat.received", filter: { user_id: "bot-1" } }],
@@ -301,8 +309,10 @@ describe("Activity subscription", () => {
 
   it("does not create a duplicate and retries without the group qualifier on 400", async () => {
     const created: Record<string, unknown>[] = [];
+    const listed: string[] = [];
     await ensureChatActivitySubscription({
-      async listActivitySubscriptions() {
+      async listActivitySubscriptions(bearer: string) {
+        listed.push(bearer);
         return {
           data: [{ event_type: "chat.received", filter: { user_id: "bot-1" } }],
         };
@@ -311,11 +321,13 @@ describe("Activity subscription", () => {
         created.push(body);
         return {};
       },
-    }, "bot-1");
+    }, "bot-1", appBearer);
+    expect(listed).toEqual([appBearer]);
     expect(created).toHaveLength(0);
 
     await ensureChatActivitySubscription({
-      async listActivitySubscriptions() {
+      async listActivitySubscriptions(bearer: string) {
+        listed.push(bearer);
         return { data: [] };
       },
       async createActivitySubscription(body: Record<string, unknown>) {
@@ -327,9 +339,36 @@ describe("Activity subscription", () => {
         }
         return {};
       },
-    }, "bot-1");
+    }, "bot-1", `  ${appBearer}  `);
+    expect(listed).toEqual([appBearer, appBearer]);
     expect(created[0]).toEqual(chatReceivedSubscriptionBody("bot-1", true));
     expect(created[1]).toEqual(chatReceivedSubscriptionBody("bot-1", false));
+  });
+
+  it("fails list and stream clearly when the app bearer is missing", async () => {
+    const calls: string[] = [];
+    const client = {
+      async listActivitySubscriptions(bearer: string) {
+        calls.push(`list:${bearer}`);
+        return { data: [] };
+      },
+      async createActivitySubscription() {
+        calls.push("create");
+        return {};
+      },
+    };
+    await expect(ensureChatActivitySubscription(client, "bot-1")).rejects.toThrow(
+      /ACTIVITY_BEARER_TOKEN is required for GET \/2\/activity\/subscriptions/,
+    );
+    await expect(ensureChatActivitySubscription(client, "bot-1", "   ")).rejects.toThrow(
+      /user access token is forbidden/,
+    );
+    expect(() => requireActivityAppBearer(undefined, "stream")).toThrow(
+      /ACTIVITY_BEARER_TOKEN is required for GET \/2\/activity\/stream/,
+    );
+    expect(() => requireActivityAppBearer("", "list")).toThrow(/dm\.read/);
+    expect(requireActivityAppBearer(` ${appBearer} `, "stream")).toBe(appBearer);
+    expect(calls).toEqual([]);
   });
 });
 
