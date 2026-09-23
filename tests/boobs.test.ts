@@ -12,10 +12,12 @@ import {
 import { ModerationEngine } from "../src/bot/engine.js";
 import { fetchAdultImage } from "../src/bot/image-fetch.js";
 import {
+  bingHtmlImageSearchUrl,
   createImageSearch,
   duckDuckGoImageScriptUrl,
   extractDuckDuckGoVqd,
   ImageSearchError,
+  parseBingHtmlImages,
   parseDuckDuckGoImages,
   parseRedditGateway,
   parseRedditListing,
@@ -466,7 +468,10 @@ describe("image search parsers", () => {
     const hits = await search.searchAdultChestImages();
     expect(hits.map((hit) => hit.url)).toEqual([SAFE_URL]);
     expect(urls[0]).toContain("duckduckgo.com");
-    expect(urls.some((href) => href.includes("gateway.reddit.com"))).toBe(true);
+    const bingAt = urls.findIndex((href) => href.includes("www.bing.com/images/async"));
+    const redditAt = urls.findIndex((href) => href.includes("gateway.reddit.com"));
+    expect(bingAt).toBeGreaterThan(0);
+    expect(redditAt).toBeGreaterThan(bingAt);
     expect(urls.some((href) => href.includes("/i.js?"))).toBe(false);
   });
 
@@ -514,6 +519,7 @@ describe("image search parsers", () => {
       const failure = error as ImageSearchError;
       expect(failure.userMessage).toBe("Image search is unavailable right now.");
       expect(failure.message).toMatch(/duckduckgo failed/);
+      expect(failure.message).toMatch(/bing html fallback failed/);
       expect(failure.message).toMatch(/reddit fallback failed/);
     }
   });
@@ -533,6 +539,141 @@ describe("image search parsers", () => {
     });
     expect(urls).toHaveLength(1);
     expect(urls[0]).toContain("duckduckgo.com");
+    expect(urls.some((href) => href.includes("bing.com"))).toBe(false);
+  });
+
+  it("parses Bing HTML async results for direct image URLs", () => {
+    const html = `
+      <div class="imgpt">
+        <a class="iusc" m="{&quot;t&quot;:&quot;adult close-up chest crop&quot;,&quot;murl&quot;:&quot;https://cdn.example/adult-close-up.jpg&quot;,&quot;turl&quot;:&quot;https://tse.mm.bing.net/th?id=thumb&quot;,&quot;purl&quot;:&quot;https://example.com/page&quot;}" href="/images/search?view=detailV2"></a>
+      </div>
+      <div class="imgpt">
+        <a m="{&quot;murl&quot;:&quot;https://cdn.example/a.jpg?x=1&amp;y=2&quot;,&quot;t&quot;:&quot;close-up &amp; crop&quot;}" class="iusc"></a>
+      </div>
+      <a class="iusc" m='{"murl":"https://cdn.example/single.jpg","t":"chest crop"}'></a>
+      <a class="iusc" m="{&quot;turl&quot;:&quot;https://tse.mm.bing.net/th?id=only-thumb&quot;,&quot;t&quot;:&quot;thumb only&quot;}"></a>
+      <a class="iusc" m="{&quot;murl&quot;:&quot;http://cdn.example/plain.jpg&quot;,&quot;t&quot;:&quot;not https&quot;}"></a>
+      <a class="iusc" m="{&quot;murl&quot;:&quot;https://cdn.example/adult-close-up.jpg&quot;,&quot;t&quot;:&quot;duplicate&quot;}"></a>
+      <a class="other" m="{&quot;murl&quot;:&quot;https://cdn.example/not-iusc.jpg&quot;}"></a>
+    `;
+    expect(parseBingHtmlImages(html)).toEqual([
+      {
+        url: "https://cdn.example/adult-close-up.jpg",
+        title: "adult close-up chest crop",
+        snippet: "https://example.com/page",
+        adult: true,
+      },
+      {
+        url: "https://cdn.example/a.jpg?x=1&y=2",
+        title: "close-up & crop",
+        snippet: undefined,
+        adult: true,
+      },
+      {
+        url: "https://cdn.example/single.jpg",
+        title: "chest crop",
+        snippet: undefined,
+        adult: true,
+      },
+    ]);
+    const page = new URL(bingHtmlImageSearchUrl());
+    expect(page.origin + page.pathname).toBe("https://www.bing.com/images/async");
+    expect(page.searchParams.get("adlt")).toBe("off");
+    expect(page.searchParams.get("async")).toBe("1");
+    expect(page.searchParams.get("q")).toBe(ADULT_CHEST_QUERY);
+    expect(page.search).not.toMatch(/teen|lolita|schoolgirl/i);
+    expect(page.search).not.toContain("Ocp-Apim-Subscription-Key");
+  });
+
+  it("uses keyless Bing HTML when DuckDuckGo fails and does not call Reddit", async () => {
+    const urls: string[] = [];
+    let cookie = "";
+    let apiKeyHeader = "";
+    const search = createImageSearch({
+      provider: "duckduckgo",
+      apiKey: "should-not-be-sent",
+      fetchImpl: async (url, init) => {
+        const href = String(url);
+        urls.push(href);
+        const headers = new Headers(init?.headers);
+        if (href.includes("www.bing.com/images/async")) {
+          cookie = headers.get("cookie") ?? "";
+          apiKeyHeader = headers.get("Ocp-Apim-Subscription-Key") ?? "";
+          return new Response(
+            `<a class="iusc" m="{&quot;murl&quot;:&quot;https://cdn.example/bing-direct.jpg&quot;,&quot;turl&quot;:&quot;https://tse.mm.bing.net/th?id=thumb&quot;,&quot;t&quot;:&quot;adult close-up chest&quot;,&quot;purl&quot;:&quot;https://example.com/gallery&quot;}"></a>`,
+            { status: 200, headers: { "content-type": "text/html" } },
+          );
+        }
+        if (href.includes("duckduckgo.com")) return new Response("blocked", { status: 403 });
+        if (href.includes("reddit.com")) return new Response("should not run", { status: 500 });
+        return new Response("unexpected", { status: 500 });
+      },
+    });
+    const hits = await search.searchAdultChestImages();
+    expect(hits).toEqual([
+      {
+        url: "https://cdn.example/bing-direct.jpg",
+        title: "adult close-up chest",
+        snippet: "https://example.com/gallery",
+        adult: true,
+      },
+    ]);
+    expect(hits.every((hit) => !hit.url.includes("bing.net"))).toBe(true);
+    expect(urls.some((href) => href.includes("duckduckgo.com"))).toBe(true);
+    expect(urls.some((href) => href.includes("www.bing.com/images/async"))).toBe(true);
+    expect(urls.some((href) => href.includes("reddit.com"))).toBe(false);
+    expect(urls.some((href) => href.includes("api.bing.microsoft.com"))).toBe(false);
+    expect(urls.some((href) => href.includes("should-not-be-sent"))).toBe(false);
+    expect(apiKeyHeader).toBe("");
+    expect(cookie).toContain("ADLT=OFF");
+    const bing = new URL(urls.find((href) => href.includes("images/async"))!);
+    expect(bing.searchParams.get("adlt")).toBe("off");
+    expect(bing.searchParams.get("q")).toBe(ADULT_CHEST_QUERY);
+  });
+
+  it("falls through Bing HTML to Reddit when async HTML has no direct images", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "ddgs",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.includes("/i.js?")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+        if (href.includes("duckduckgo.com")) {
+          return new Response('vqd="4-emptytoken123456"', { status: 200 });
+        }
+        if (href.includes("www.bing.com/images/async")) {
+          return new Response(
+            `<a class="iusc" m="{&quot;turl&quot;:&quot;https://tse.mm.bing.net/th?id=only&quot;}"></a>`,
+            { status: 200 },
+          );
+        }
+        if (href.includes("gateway.reddit.com")) {
+          return new Response(
+            JSON.stringify({
+              postIds: ["t3_ok"],
+              posts: { t3_ok: { isNSFW: true, title: "close-up chest", url: SAFE_URL } },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("blocked", { status: 403 });
+      },
+    });
+    await expect(search.searchAdultChestImages()).resolves.toEqual([
+      expect.objectContaining({ url: SAFE_URL, adult: true }),
+    ]);
+    const ddgAt = urls.findIndex((href) => href.includes("duckduckgo.com"));
+    const scriptAt = urls.findIndex((href) => href.includes("/i.js?"));
+    const bingAt = urls.findIndex((href) => href.includes("www.bing.com/images/async"));
+    const redditAt = urls.findIndex((href) => href.includes("gateway.reddit.com"));
+    expect(ddgAt).toBeGreaterThanOrEqual(0);
+    expect(scriptAt).toBeGreaterThan(ddgAt);
+    expect(bingAt).toBeGreaterThan(scriptAt);
+    expect(redditAt).toBeGreaterThan(bingAt);
   });
 });
 
