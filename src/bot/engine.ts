@@ -745,7 +745,11 @@ export class ModerationEngine {
         await this.handleAdultImage(event, command.name, command.extra, settings, actions, nowMs);
         return;
       case "dice":
-        await this.reply(conversationId, diceReply(command.notation), actions);
+        await this.reply(
+          conversationId,
+          diceReply(command.notation, displayName(event.sender, senderId)),
+          actions,
+        );
         return;
       default:
         break;

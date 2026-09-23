@@ -60,23 +60,32 @@ export function rollDice(spec: DiceSpec, rng: Rng = Math.random): DiceRoll {
   return { spec, rolls, total: subtotal + spec.modifier };
 }
 
-export function formatDiceRoll(roll: DiceRoll): string {
+/**
+ * `roller` is the same label other announcements use (`@handle`, display
+ * name, or user id). A blank label becomes "someone".
+ */
+export function formatDiceRoll(roll: DiceRoll, roller: string): string {
   const { spec, rolls, total } = roll;
+  const who = roller.trim() || "someone";
   const only = rolls[0];
   if (rolls.length === 1 && spec.modifier === 0 && only !== undefined) {
-    return `🎲 You rolled ${article(only)} ${only}`;
+    return `🎲 ${who} rolled ${article(only)} ${only}`;
   }
   const shown = rolls.join(", ");
   const mod =
     spec.modifier === 0 ? "" : spec.modifier > 0 ? ` +${spec.modifier}` : ` ${spec.modifier}`;
-  return `🎲 You rolled ${shown}${mod} (total ${total})`;
+  return `🎲 ${who} rolled ${shown}${mod} (total ${total})`;
 }
 
 /** Parse, roll, and format. Invalid notation returns the short usage line. */
-export function diceReply(notation: string | undefined | null, rng: Rng = Math.random): string {
+export function diceReply(
+  notation: string | undefined | null,
+  roller: string,
+  rng: Rng = Math.random,
+): string {
   const parsed = parseDiceNotation(notation);
   if (!parsed.ok) return parsed.help;
-  return formatDiceRoll(rollDice(parsed.spec, rng));
+  return formatDiceRoll(rollDice(parsed.spec, rng), roller);
 }
 
 function invalid(): DiceParseResult {

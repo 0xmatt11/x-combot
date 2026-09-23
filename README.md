@@ -202,7 +202,7 @@ The same giver can change the same target only once per `xp.level_grant_cooldown
 
 Anyone in the group can play. There is no admin gate. Games start with `!dice`.
 
-`!dice` rolls **1d6** and replies like `🎲 You rolled a 4`. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice and 100 sides so the reply stays short. Anything else gets a one-line usage reply. `/dice` works the same way.
+`!dice` rolls **1d6** and replies like `🎲 @handle rolled a 4`, using the same `@handle` / display name / id as other announcements. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice and 100 sides so the reply stays short. Anything else gets a one-line usage reply. `/dice` works the same way.
 
 ## Adult image command
 

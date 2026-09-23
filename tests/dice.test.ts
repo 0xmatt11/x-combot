@@ -131,25 +131,32 @@ describe("rollDice", () => {
     expect(high.total).toBe(MAX_DICE * MAX_SIDES);
   });
 
-  it("formats a single die and a modified pool", () => {
+  it("attributes a single die and a modified pool to the roller", () => {
     expect(
-      formatDiceRoll({
-        spec: { count: 1, sides: 6, modifier: 0 },
-        rolls: [4],
-        total: 4,
-      }),
-    ).toBe("🎲 You rolled a 4");
+      formatDiceRoll(
+        {
+          spec: { count: 1, sides: 6, modifier: 0 },
+          rolls: [4],
+          total: 4,
+        },
+        "@alice",
+      ),
+    ).toBe("🎲 @alice rolled a 4");
     expect(
-      formatDiceRoll({
-        spec: { count: 1, sides: 20, modifier: 0 },
-        rolls: [8],
-        total: 8,
-      }),
-    ).toBe("🎲 You rolled an 8");
-    expect(
-      diceReply("2d6+2", () => 0),
-    ).toBe("🎲 You rolled 1, 1 +2 (total 4)");
-    expect(diceReply("nope")).toBe(DICE_HELP);
+      formatDiceRoll(
+        {
+          spec: { count: 1, sides: 20, modifier: 0 },
+          rolls: [8],
+          total: 8,
+        },
+        "@alice",
+      ),
+    ).toBe("🎲 @alice rolled an 8");
+    expect(diceReply("2d6+2", "@alice", () => 0)).toBe("🎲 @alice rolled 1, 1 +2 (total 4)");
+    expect(diceReply("2d20", "Ada", () => 0)).toBe("🎲 Ada rolled 1, 1 (total 2)");
+    expect(diceReply("d6", "42", () => 0)).toBe("🎲 42 rolled a 1");
+    expect(diceReply("", "  ", () => 0)).toBe("🎲 someone rolled a 1");
+    expect(diceReply("nope", "@alice")).toBe(DICE_HELP);
   });
 });
 
@@ -181,7 +188,7 @@ describe("!dice command", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const { engine, client } = setup();
     await engine.processEvent(message({ id: "d1", senderId: alice.id, text: "!dice" }));
-    expect(client.sent.map((row) => row.text)).toEqual(["🎲 You rolled a 4"]);
+    expect(client.sent.map((row) => row.text)).toEqual(["🎲 @alice rolled a 4"]);
   });
 
   it("accepts /dice notation and answers invalid args with help", async () => {
@@ -190,10 +197,29 @@ describe("!dice command", () => {
     await engine.processEvent(message({ id: "d2", senderId: alice.id, text: "/dice d20" }));
     await engine.processEvent(message({ id: "d3", senderId: alice.id, text: "!dice 99d6" }));
     expect(client.sent.map((row) => row.text)).toEqual([
-      "🎲 You rolled a 1",
+      "🎲 @alice rolled a 1",
       DICE_HELP,
     ]);
     expect(client.sent.some((row) => /admins/i.test(row.text))).toBe(false);
+  });
+
+  it("falls back to a display name, then the user id, when there is no @handle", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { engine, client } = setup();
+    const named: XUser = { id: "u-ada", name: "Ada" };
+    const idOnly: XUser = { id: "99" };
+    client.addUser(named);
+    client.addUser(idOnly);
+    await engine.processEvent(
+      message({ id: "d4", senderId: named.id, sender: named, text: "!dice" }),
+    );
+    await engine.processEvent(
+      message({ id: "d5", senderId: idOnly.id, sender: idOnly, text: "/dice" }),
+    );
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "🎲 Ada rolled a 4",
+      "🎲 99 rolled a 4",
+    ]);
   });
 
   it("lists !dice under games in the default help text", () => {
