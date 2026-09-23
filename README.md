@@ -84,7 +84,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 8. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
 10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
-11. **Adult image** — `!boobs` posts one random 18+ chest close-up. Off unless enabled. Rate-limited. Extra text is rejected so the search query cannot be changed.
+11. **Adult image** — `!boobs` posts one random 18+ chest close-up. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed.
 
 ## Commands
 
@@ -124,7 +124,7 @@ Posts one random **adult (18+)** close-up of a woman's chest into the same group
 BOOBS_ENABLED=true
 ```
 
-`BOOBS_ENABLED` overrides `boobs.enabled` in `config/default.yaml`. `BOOBS_ENABLED=false` forces it off even when the YAML says true. Defaults: 1 use per user and 4 per conversation per 5 minutes (`boobs.rate_limit_*`). Timestamps are stored in SQLite (`boobs_rate`). Image URLs are not logged (only the host), and API keys are not written to the repo.
+`BOOBS_ENABLED` overrides `boobs.enabled` in `config/default.yaml`. `BOOBS_ENABLED=false` forces it off even when the YAML says true. `!boobs` has no rate limit by default: `boobs.rate_limit_per_user`, `boobs.rate_limit_per_conversation`, and `boobs.rate_limit_window_ms` are `0` (unlimited). A positive count is enforced only together with a positive window; those timestamps go in SQLite (`boobs_rate`) and are not written while the command is unlimited. Image URLs are not logged (only the host), and API keys are not written to the repo.
 
 The command is exact. `!boobs`, `!BOOBS`, and `/boobs` run it. `!boobs anything` is refused and is **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. This is a text filter, not a vision model.
 
@@ -419,8 +419,8 @@ npm test
 ## Configuration
 
 - `.env` — credentials and IDs (see `.env.example`), including Activity and `DM_POLL`.
-- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, `!boobs` enablement and rate limits.
-- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts), `!boobs` rate-limit timestamps (not image URLs).
+- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, `!boobs` enablement. `!boobs` rate limits default to unlimited (`0`).
+- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts). Optional `!boobs` rate-limit timestamps (not image URLs) are stored only when a positive cap and window are configured.
 
 Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.
 

@@ -24,7 +24,7 @@ import {
   serpApiImageSearchUrl,
   type ImageSearch,
 } from "../src/bot/image-search.js";
-import { loadDefaults } from "../src/config.js";
+import { loadDefaults, normalizeBoobsConfig } from "../src/config.js";
 import { loadEnv } from "../src/env.js";
 import { Store } from "../src/store.js";
 import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
@@ -47,9 +47,9 @@ const defaults: DefaultsConfig = {
   delete: { attempt_on_filter: false, attempt_on_flood: false, attempt_on_mute: false },
   boobs: {
     enabled: true,
-    rate_limit_per_user: 1,
-    rate_limit_per_conversation: 2,
-    rate_limit_window_ms: 60_000,
+    rate_limit_per_user: 0,
+    rate_limit_per_conversation: 0,
+    rate_limit_window_ms: 0,
   },
 };
 
@@ -735,6 +735,7 @@ describe("!boobs engine", () => {
     fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
     perUser?: number;
     perConversation?: number;
+    windowMs?: number;
   }): {
     engine: ModerationEngine;
     client: MockXClient;
@@ -756,17 +757,17 @@ describe("!boobs engine", () => {
         ? {
             boobs: {
               enabled: false,
-              rate_limit_per_user: 1,
-              rate_limit_per_conversation: 2,
-              rate_limit_window_ms: 60_000,
+              rate_limit_per_user: 0,
+              rate_limit_per_conversation: 0,
+              rate_limit_window_ms: 0,
             },
           }
         : {
             boobs: {
               enabled: true,
-              rate_limit_per_user: options?.perUser ?? 1,
-              rate_limit_per_conversation: options?.perConversation ?? 2,
-              rate_limit_window_ms: 60_000,
+              rate_limit_per_user: options?.perUser ?? 0,
+              rate_limit_per_conversation: options?.perConversation ?? 0,
+              rate_limit_window_ms: options?.windowMs ?? 0,
             },
           },
     );
@@ -821,8 +822,29 @@ describe("!boobs engine", () => {
     expect(unsafe.client.sent[0]?.text).not.toContain("schoolgirl");
   });
 
-  it("rate-limits per user and per conversation without another search", async () => {
-    const { engine, client, search } = setup({ perUser: 1, perConversation: 1 });
+  it("allows every !boobs call when rate limits are 0", async () => {
+    const { engine, client, search } = setup();
+    const now = 5_000_000;
+    await engine.processEvent(message({ id: "r1", senderId: alice.id, text: "!boobs" }), now);
+    await engine.processEvent(message({ id: "r2", senderId: alice.id, text: "!boobs" }), now + 1);
+    await engine.processEvent(message({ id: "r3", senderId: bob.id, text: "!boobs" }), now + 2);
+    expect(search.calls).toBe(3);
+    expect(client.images).toHaveLength(3);
+    expect(client.sent.some((row) => /Slow down/.test(row.text))).toBe(false);
+  });
+
+  it("does not rate-limit when the window is 0 even if counts are positive", async () => {
+    const { engine, client, search } = setup({ perUser: 1, perConversation: 1, windowMs: 0 });
+    const now = 5_000_000;
+    await engine.processEvent(message({ id: "w1", senderId: alice.id, text: "!boobs" }), now);
+    await engine.processEvent(message({ id: "w2", senderId: alice.id, text: "!boobs" }), now + 1);
+    expect(search.calls).toBe(2);
+    expect(client.images).toHaveLength(2);
+    expect(client.sent.some((row) => /Slow down/.test(row.text))).toBe(false);
+  });
+
+  it("rate-limits only when a positive cap and window are both set", async () => {
+    const { engine, client, search } = setup({ perUser: 1, perConversation: 1, windowMs: 60_000 });
     const now = 5_000_000;
     await engine.processEvent(message({ id: "r1", senderId: alice.id, text: "!boobs" }), now);
     await engine.processEvent(message({ id: "r2", senderId: alice.id, text: "!boobs" }), now + 1);
@@ -832,10 +854,50 @@ describe("!boobs engine", () => {
     expect(client.sent.some((row) => /Slow down/.test(row.text))).toBe(true);
   });
 
+  it("treats omitted and zero boobs rate limits as unlimited", () => {
+    expect(normalizeBoobsConfig(undefined)).toMatchObject({
+      enabled: false,
+      rate_limit_per_user: 0,
+      rate_limit_per_conversation: 0,
+      rate_limit_window_ms: 0,
+    });
+    expect(normalizeBoobsConfig({ enabled: true, rate_limit_per_user: 0 })).toMatchObject({
+      enabled: true,
+      rate_limit_per_user: 0,
+      rate_limit_per_conversation: 0,
+      rate_limit_window_ms: 0,
+    });
+    expect(
+      normalizeBoobsConfig({
+        rate_limit_per_user: -1,
+        rate_limit_per_conversation: Number.NaN,
+        rate_limit_window_ms: -5,
+      }),
+    ).toMatchObject({
+      rate_limit_per_user: 0,
+      rate_limit_per_conversation: 0,
+      rate_limit_window_ms: 0,
+    });
+    expect(
+      normalizeBoobsConfig({
+        rate_limit_per_user: 2,
+        rate_limit_per_conversation: 3,
+        rate_limit_window_ms: 10_000,
+      }),
+    ).toMatchObject({
+      rate_limit_per_user: 2,
+      rate_limit_per_conversation: 3,
+      rate_limit_window_ms: 10_000,
+    });
+  });
+
   it("mentions !boobs in the default !help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!boobs/);
     expect(loaded.boobs?.enabled).toBe(false);
+    expect(loaded.boobs?.rate_limit_per_user).toBe(0);
+    expect(loaded.boobs?.rate_limit_per_conversation).toBe(0);
+    expect(loaded.boobs?.rate_limit_window_ms).toBe(0);
   });
 });
 

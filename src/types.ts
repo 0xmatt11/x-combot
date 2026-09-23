@@ -36,8 +36,15 @@ export interface LlmConfig {
 export interface BoobsConfig {
   /** Off unless set. `BOOBS_ENABLED` overrides this at startup. */
   enabled: boolean;
+  /** Uses allowed per user inside the window. `0` means unlimited. */
   rate_limit_per_user: number;
+  /** Uses allowed per conversation inside the window. `0` means unlimited. */
   rate_limit_per_conversation: number;
+  /**
+   * Window for the limits above. `0` means no window, so a positive count
+   * is not enforced. A call is refused only when this window is positive
+   * and at least one count is positive.
+   */
   rate_limit_window_ms: number;
 }
 

@@ -767,23 +767,22 @@ export class ModerationEngine {
       return;
     }
 
-    const { userUses, conversationUses } = this.store.recordBoobsUse(
-      conversationId,
-      senderId,
-      nowMs,
-      settings.boobsRateLimitWindowMs,
-    );
-    if (
-      userUses > settings.boobsRateLimitPerUser ||
-      conversationUses > settings.boobsRateLimitPerConversation
-    ) {
-      const minutes = Math.max(1, Math.round(settings.boobsRateLimitWindowMs / 60_000));
-      await this.reply(
+    if (boobsRateLimitActive(settings)) {
+      const { userUses, conversationUses } = this.store.recordBoobsUse(
         conversationId,
-        `Slow down — !boobs is limited to ${settings.boobsRateLimitPerUser} per user and ${settings.boobsRateLimitPerConversation} per conversation every ${minutes} min.`,
-        actions,
+        senderId,
+        nowMs,
+        settings.boobsRateLimitWindowMs,
       );
-      return;
+      const overUser =
+        settings.boobsRateLimitPerUser > 0 && userUses > settings.boobsRateLimitPerUser;
+      const overConversation =
+        settings.boobsRateLimitPerConversation > 0 &&
+        conversationUses > settings.boobsRateLimitPerConversation;
+      if (overUser || overConversation) {
+        await this.reply(conversationId, boobsRateLimitMessage(settings), actions);
+        return;
+      }
     }
 
     const search = this.deps.imageSearch;
@@ -961,6 +960,24 @@ export class ModerationEngine {
       }
     }
   }
+}
+
+/** A cap applies only when some count is positive and the window is positive. `0` is unlimited. */
+function boobsRateLimitActive(settings: ResolvedConversationConfig): boolean {
+  const hasCap = settings.boobsRateLimitPerUser > 0 || settings.boobsRateLimitPerConversation > 0;
+  return hasCap && settings.boobsRateLimitWindowMs > 0;
+}
+
+function boobsRateLimitMessage(settings: ResolvedConversationConfig): string {
+  const minutes = Math.max(1, Math.round(settings.boobsRateLimitWindowMs / 60_000));
+  const parts: string[] = [];
+  if (settings.boobsRateLimitPerUser > 0) {
+    parts.push(`${settings.boobsRateLimitPerUser} per user`);
+  }
+  if (settings.boobsRateLimitPerConversation > 0) {
+    parts.push(`${settings.boobsRateLimitPerConversation} per conversation`);
+  }
+  return `Slow down — !boobs is limited to ${parts.join(" and ")} every ${minutes} min.`;
 }
 
 function parseSetting(key: string, value: string): ConversationSettings | undefined {
