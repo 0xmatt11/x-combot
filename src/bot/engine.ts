@@ -31,7 +31,7 @@ import {
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import { matchFilters } from "./filters.js";
-import { diceReply } from "./games/index.js";
+import { diceReply, diceRollerLabel } from "./games/index.js";
 import {
   isAdmin,
   isLlmCommandName,
@@ -747,7 +747,7 @@ export class ModerationEngine {
       case "dice":
         await this.reply(
           conversationId,
-          diceReply(command.notation, displayName(event.sender, senderId)),
+          diceReply(command.notation, diceRollerLabel(event.sender)),
           actions,
         );
         return;

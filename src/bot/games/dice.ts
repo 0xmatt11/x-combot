@@ -61,9 +61,18 @@ export function rollDice(spec: DiceSpec, rng: Rng = Math.random): DiceRoll {
 }
 
 /**
- * `roller` is the same label other announcements use (`@handle`, display
- * name, or user id). A blank label becomes "someone".
+ * `@handle` when a username is known, otherwise the display name.
+ * A missing name becomes "someone". The numeric API user id is never used.
  */
+export function diceRollerLabel(user: { username?: string; name?: string } | undefined): string {
+  const username = user?.username?.trim();
+  if (username) return username.startsWith("@") ? username : `@${username}`;
+  const name = user?.name?.trim();
+  if (name) return name;
+  return "someone";
+}
+
+/** A blank label becomes "someone". */
 export function formatDiceRoll(roll: DiceRoll, roller: string): string {
   const { spec, rolls, total } = roll;
   const who = roller.trim() || "someone";

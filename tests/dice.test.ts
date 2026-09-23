@@ -6,6 +6,7 @@ import {
   MAX_MODIFIER,
   MAX_SIDES,
   diceReply,
+  diceRollerLabel,
   formatDiceRoll,
   parseDiceNotation,
   rollDice,
@@ -154,9 +155,17 @@ describe("rollDice", () => {
     ).toBe("🎲 @alice rolled an 8");
     expect(diceReply("2d6+2", "@alice", () => 0)).toBe("🎲 @alice rolled 1, 1 +2 (total 4)");
     expect(diceReply("2d20", "Ada", () => 0)).toBe("🎲 Ada rolled 1, 1 (total 2)");
-    expect(diceReply("d6", "42", () => 0)).toBe("🎲 42 rolled a 1");
     expect(diceReply("", "  ", () => 0)).toBe("🎲 someone rolled a 1");
     expect(diceReply("nope", "@alice")).toBe(DICE_HELP);
+  });
+
+  it("uses @handle or display name and never a raw user id", () => {
+    expect(diceRollerLabel({ username: "alice", name: "Alice" })).toBe("@alice");
+    expect(diceRollerLabel({ username: "@bob" })).toBe("@bob");
+    expect(diceRollerLabel({ name: "Ada" })).toBe("Ada");
+    expect(diceRollerLabel({ name: "  " })).toBe("someone");
+    expect(diceRollerLabel({})).toBe("someone");
+    expect(diceRollerLabel(undefined)).toBe("someone");
   });
 });
 
@@ -203,7 +212,7 @@ describe("!dice command", () => {
     expect(client.sent.some((row) => /admins/i.test(row.text))).toBe(false);
   });
 
-  it("falls back to a display name, then the user id, when there is no @handle", async () => {
+  it("uses a display name, or someone, and never the numeric user id", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const { engine, client } = setup();
     const named: XUser = { id: "u-ada", name: "Ada" };
@@ -218,8 +227,9 @@ describe("!dice command", () => {
     );
     expect(client.sent.map((row) => row.text)).toEqual([
       "🎲 Ada rolled a 4",
-      "🎲 99 rolled a 4",
+      "🎲 someone rolled a 4",
     ]);
+    expect(client.sent.some((row) => row.text.includes("99"))).toBe(false);
   });
 
   it("lists !dice under games in the default help text", () => {
