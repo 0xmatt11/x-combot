@@ -93,6 +93,14 @@ describe("adult filter", () => {
     expect(containsBannedAgeTerm("18 year old adult")).toBeUndefined();
     expect(containsBannedAgeTerm(ADULT_CHEST_QUERY)).toBeUndefined();
     expect(containsBannedAgeTerm(ADULT_BOOTY_QUERY)).toBeUndefined();
+    expect(ADULT_CHEST_QUERY).not.toMatch(/18\s*\+|porn|nsfw|xxx/i);
+    expect(ADULT_BOOTY_QUERY).not.toMatch(/18\s*\+|porn|nsfw|xxx/i);
+    expect(ADULT_CHEST_QUERY).toMatch(/cleavage/i);
+    expect(ADULT_CHEST_QUERY).toMatch(/chest/i);
+    expect(ADULT_BOOTY_QUERY).toMatch(/butt/i);
+    expect(ADULT_BOOTY_QUERY).toMatch(/from behind/i);
+    expect(ADULT_BOOTY_QUERY).toMatch(/booty/i);
+    expect(ADULT_BOOTY_QUERY).not.toMatch(/\bass\b/i);
     expect(ADULT_BOOTY_QUERY).not.toMatch(/breast|chest|boob/i);
     for (const sub of ADULT_SUBREDDITS) {
       expect(containsBannedAgeTerm(sub)).toBeUndefined();
@@ -122,7 +130,12 @@ describe("adult filter", () => {
     expect(isSafeAdultImage(close)).toBe(true);
     expect(pickAdultChestImage([teen])).toBeUndefined();
     expect(pickAdultChestImage([teen, full, close], () => 0)?.url).toBe(SAFE_URL);
-    expect(pickAdultChestImage([full], () => 0)?.url).toBe("https://i.redd.it/full.jpg");
+    expect(pickAdultChestImage([full], () => 0)).toBeUndefined();
+    const chestFull = candidate({
+      url: "https://i.redd.it/full.jpg",
+      title: "full body breasts portrait",
+    });
+    expect(pickAdultChestImage([chestFull], () => 0)?.url).toBe("https://i.redd.it/full.jpg");
     const standing = candidate({
       url: "https://i.redd.it/standing.jpg",
       title: "woman standing",
@@ -135,6 +148,51 @@ describe("adult filter", () => {
     expect(pickAdultBootyImage([teen], () => 0)).toBeUndefined();
   });
 
+  it("rejects genital wording and keeps mild chest or butt phrasing", () => {
+    const chestUrl = "https://cdn.example/cleavage.jpg";
+    const bootyUrl = "https://cdn.example/booty.jpg";
+    expect(
+      pickAdultChestImage(
+        [
+          candidate({ url: "https://cdn.example/pussy.jpg", title: "pussy close-up breasts" }),
+          candidate({ url: "https://cdn.example/vagina.jpg", title: "vagina and cleavage" }),
+          candidate({ url: "https://cdn.example/labia.jpg", title: "labia spread breasts" }),
+          candidate({ url: "https://cdn.example/crotch.jpg", title: "crotch cleavage" }),
+          candidate({ url: "https://cdn.example/spread.jpg", title: "nude spread breasts" }),
+          candidate({ url: "https://cdn.example/penis.jpg", title: "penis and chest" }),
+          candidate({ url: chestUrl, title: "classic cleavage close-up" }),
+        ],
+        () => 0,
+      )?.url,
+    ).toBe(chestUrl);
+    expect(pickAdultChestImage([candidate({ url: chestUrl, title: "cocktail dress cleavage" })], () => 0)?.url).toBe(
+      chestUrl,
+    );
+    expect(
+      pickAdultBootyImage([candidate({ url: bootyUrl, title: "analysis of a butt from behind" })], () => 0)?.url,
+    ).toBe(bootyUrl);
+    expect(pickAdultBootyImage([candidate({ url: bootyUrl, title: "peacock butt" })], () => 0)?.url).toBe(bootyUrl);
+    expect(
+      pickAdultChestImage([candidate({ url: "https://cdn.example/pu55y.jpg", title: "pu55y breasts" })], () => 0),
+    ).toBeUndefined();
+  });
+
+  it("keeps chest and booty pools separate and drops chairs and other off-topic hits", () => {
+    const chestUrl = "https://cdn.example/cleavage.jpg";
+    const bootyUrl = "https://cdn.example/from-behind.jpg";
+    const chairUrl = "https://cdn.example/chair.jpg";
+    const chest = candidate({ url: chestUrl, title: "cleavage close-up" });
+    const booty = candidate({ url: bootyUrl, title: "butt from behind" });
+    const chair = candidate({ url: chairUrl, title: "dining chair" });
+    const assChair = candidate({ url: "https://cdn.example/ass-chair.jpg", title: "nice ass chair" });
+    const drawers = candidate({ url: "https://cdn.example/drawers.jpg", title: "antique chest of drawers" });
+    expect(pickAdultChestImage([booty, chair, drawers, chest], () => 0)?.url).toBe(chestUrl);
+    expect(pickAdultBootyImage([chest, chair, drawers, booty], () => 0)?.url).toBe(bootyUrl);
+    expect(pickAdultChestImage([booty, chair, drawers], () => 0)).toBeUndefined();
+    expect(pickAdultBootyImage([chest, chair, assChair, drawers], () => 0)).toBeUndefined();
+    expect(pickAdultBootyImage([candidate({ url: chairUrl, title: "office chair" })], () => 0)).toBeUndefined();
+  });
+
   it("redacts api keys before a log line", () => {
     expect(redactSecrets("failed ?api_key=super-secret-key&x=1")).not.toContain("super-secret-key");
   });
@@ -145,7 +203,7 @@ describe("image search parsers", () => {
     const parsed = parseRedditListing({
       data: {
         children: [
-          { data: { over_18: true, post_hint: "image", title: "close-up", url: SAFE_URL } },
+          { data: { over_18: true, post_hint: "image", title: "close-up chest", url: SAFE_URL } },
           { data: { over_18: false, title: "not adult", url: "https://i.redd.it/sfw.jpg" } },
           { data: { over_18: true, is_video: true, title: "clip", url: "https://v.redd.it/x" } },
           {
@@ -313,8 +371,9 @@ describe("image search parsers", () => {
       expect(String(error)).not.toContain("super-secret-key");
     }
     const url = serpApiImageSearchUrl("test-key");
-    expect(url).toContain("adult");
+    expect(url).toContain("cleavage");
     expect(url).toContain("close-up");
+    expect(url).not.toMatch(/18\s*\+|porn|nsfw/i);
     expect(url).toContain("safe=off");
     expect(url.toLowerCase()).not.toContain("teen");
     expect(url.toLowerCase()).not.toContain("lolita");
@@ -694,6 +753,43 @@ describe("image search parsers", () => {
     expect(bingAt).toBeGreaterThan(scriptAt);
     expect(redditAt).toBeGreaterThan(bingAt);
   });
+
+  it("skips DuckDuckGo chairs and genital hits and uses the next on-topic provider", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "duckduckgo",
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.startsWith("https://duckduckgo.com/i.js?")) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                { image: "https://cdn.example/chair.jpg", title: "office chair" },
+                { image: "https://cdn.example/pussy.jpg", title: "pussy close-up" },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        if (href.includes("duckduckgo.com")) {
+          return new Response('vqd="4-offtopictoken123"', { status: 200 });
+        }
+        if (href.includes("www.bing.com/images/async")) {
+          return new Response(
+            `<a class="iusc" m="{&quot;murl&quot;:&quot;https://cdn.example/cleavage.jpg&quot;,&quot;t&quot;:&quot;cleavage close-up&quot;}"></a>`,
+            { status: 200 },
+          );
+        }
+        return new Response("should not run", { status: 500 });
+      },
+    });
+    const hits = await search.searchAdultChestImages();
+    expect(hits.map((hit) => hit.url)).toEqual(["https://cdn.example/cleavage.jpg"]);
+    expect(urls.some((href) => href.includes("www.bing.com/images/async"))).toBe(true);
+    expect(urls.some((href) => href.includes("reddit.com"))).toBe(false);
+    expect(pickAdultChestImage(hits)?.url).toBe("https://cdn.example/cleavage.jpg");
+  });
 });
 
 describe("!ass / !booty image search", () => {
@@ -780,6 +876,19 @@ describe("BOOBS_SEARCH_PROVIDER", () => {
     process.env.BOOBS_SEARCH_PROVIDER = "nope";
     expect(() => loadEnv(true)).toThrow(/duckduckgo, reddit, serpapi, or bing/);
   });
+
+  it("reads BOOBS_VISION and leaves it unset by default", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    delete process.env.BOOBS_VISION;
+    expect(loadEnv(true).boobsVision).toBeUndefined();
+    process.env.BOOBS_VISION = "true";
+    expect(loadEnv(true).boobsVision).toBe(true);
+    process.env.BOOBS_VISION = "false";
+    expect(loadEnv(true).boobsVision).toBe(false);
+    process.env.BOOBS_VISION = "maybe";
+    expect(() => loadEnv(true)).toThrow(/BOOBS_VISION/);
+    delete process.env.BOOBS_VISION;
+  });
 });
 
 describe("fetchAdultImage", () => {
@@ -815,6 +924,13 @@ describe("!boobs engine", () => {
     perUser?: number;
     perConversation?: number;
     windowMs?: number;
+    vision?: boolean;
+    judge?: {
+      judgeAdultImage: (
+        topic: "chest" | "booty",
+        image: { bytes: Uint8Array; mimeType: string },
+      ) => Promise<"match" | "reject" | "error">;
+    };
   }): {
     engine: ModerationEngine;
     client: MockXClient;
@@ -843,6 +959,7 @@ describe("!boobs engine", () => {
         ? {
             boobs: {
               enabled: false,
+              vision: false,
               rate_limit_per_user: 0,
               rate_limit_per_conversation: 0,
               rate_limit_window_ms: 0,
@@ -851,6 +968,7 @@ describe("!boobs engine", () => {
         : {
             boobs: {
               enabled: true,
+              vision: options?.vision ?? false,
               rate_limit_per_user: options?.perUser ?? 0,
               rate_limit_per_conversation: options?.perConversation ?? 0,
               rate_limit_window_ms: options?.windowMs ?? 0,
@@ -862,6 +980,7 @@ describe("!boobs engine", () => {
       fetchImage:
         options?.fetchImage ??
         (async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/jpeg" })),
+      adultVision: options?.judge,
     });
     return { engine, client, search };
   }
@@ -908,7 +1027,7 @@ describe("!boobs engine", () => {
     await unsafe.engine.processEvent(message({ id: "u1", senderId: alice.id, text: "!boobs" }));
     expect(unsafe.search.calls).toBe(1);
     expect(unsafe.client.images).toHaveLength(0);
-    expect(unsafe.client.sent[0]?.text).toMatch(/No safe adult image/);
+    expect(unsafe.client.sent[0]?.text).toMatch(/No matching image came back/);
     expect(unsafe.client.sent[0]?.text).not.toContain("schoolgirl");
   });
 
@@ -944,13 +1063,70 @@ describe("!boobs engine", () => {
     expect(client.sent.some((row) => /Slow down/.test(row.text))).toBe(true);
   });
 
+  it("ignores a vision judge when the flag is off and uses it when the flag is on", async () => {
+    let calls = 0;
+    const off = setup({
+      judge: {
+        async judgeAdultImage() {
+          calls += 1;
+          return "reject";
+        },
+      },
+    });
+    await off.engine.processEvent(message({ id: "v-off", senderId: alice.id, text: "!boobs" }));
+    expect(calls).toBe(0);
+    expect(off.client.images).toHaveLength(1);
+
+    const rejected = setup({
+      vision: true,
+      hits: [
+        candidate({ url: "https://cdn.example/nope.jpg", title: "cleavage close-up" }),
+        candidate({ url: "https://cdn.example/yes.jpg", title: "breasts close-up" }),
+      ],
+      fetchImage: async (url) => ({
+        bytes: Uint8Array.from([url.endsWith("yes.jpg") ? 1 : 2]),
+        mimeType: "image/jpeg",
+      }),
+      judge: {
+        async judgeAdultImage(_topic, image) {
+          calls += 1;
+          return image.bytes[0] === 1 ? "match" : "reject";
+        },
+      },
+    });
+    await rejected.engine.processEvent(message({ id: "v-on", senderId: alice.id, text: "!boobs" }));
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(calls).toBeLessThanOrEqual(2);
+    expect(rejected.client.images.map((row) => row.url)).toEqual(["https://cdn.example/yes.jpg"]);
+    expect(rejected.client.sent).toHaveLength(0);
+
+    const missed = setup({
+      vision: true,
+      judge: {
+        async judgeAdultImage() {
+          throw new Error("vision timeout");
+        },
+      },
+    });
+    await missed.engine.processEvent(message({ id: "v-miss", senderId: alice.id, text: "!boobs" }));
+    expect(missed.client.images).toHaveLength(0);
+    expect(missed.client.sent[0]?.text).toMatch(/No matching image came back/);
+
+    const unconfigured = setup({ vision: true });
+    await unconfigured.engine.processEvent(message({ id: "v-none", senderId: alice.id, text: "!boobs" }));
+    expect(unconfigured.client.images).toHaveLength(0);
+    expect(unconfigured.client.sent[0]?.text).toMatch(/Image check is unavailable/);
+  });
+
   it("treats omitted and zero boobs rate limits as unlimited", () => {
     expect(normalizeBoobsConfig(undefined)).toMatchObject({
       enabled: false,
+      vision: false,
       rate_limit_per_user: 0,
       rate_limit_per_conversation: 0,
       rate_limit_window_ms: 0,
     });
+    expect(normalizeBoobsConfig({ vision: true }).vision).toBe(true);
     expect(normalizeBoobsConfig({ enabled: true, rate_limit_per_user: 0 })).toMatchObject({
       enabled: true,
       rate_limit_per_user: 0,
@@ -990,6 +1166,7 @@ describe("!boobs engine", () => {
     expect(loaded.boobs?.rate_limit_per_user).toBe(0);
     expect(loaded.boobs?.rate_limit_per_conversation).toBe(0);
     expect(loaded.boobs?.rate_limit_window_ms).toBe(0);
+    expect(loaded.boobs?.vision).toBe(false);
   });
 });
 

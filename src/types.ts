@@ -36,6 +36,12 @@ export interface LlmConfig {
 export interface BoobsConfig {
   /** Off unless set. `BOOBS_ENABLED` overrides this at startup. */
   enabled: boolean;
+  /**
+   * When true, download text-filtered candidates and ask the configured LLM
+   * whether the image matches the command and shows no genitalia.
+   * `BOOBS_VISION` overrides this at startup. Default off.
+   */
+  vision?: boolean;
   /** Uses allowed per user inside the window. `0` means unlimited. */
   rate_limit_per_user: number;
   /** Uses allowed per conversation inside the window. `0` means unlimited. */
@@ -143,6 +149,7 @@ export interface ResolvedConversationConfig {
   llmWakePrefixes: string[];
   llmSystemPrompt: string;
   boobsEnabled: boolean;
+  boobsVision: boolean;
   boobsRateLimitPerUser: number;
   boobsRateLimitPerConversation: number;
   boobsRateLimitWindowMs: number;

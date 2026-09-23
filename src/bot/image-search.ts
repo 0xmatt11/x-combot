@@ -5,22 +5,26 @@ import {
   ADULT_SUBREDDITS,
   containsBannedAgeTerm,
   isDirectImageUrl,
-  isSafeAdultImage,
+  isEligibleAdultImage,
   type AdultImageCandidate,
+  type AdultTopicId,
 } from "./adult-filter.js";
 
 /** Fixed query plus the Reddit boards for one adult-image command. Never caller text. */
 interface AdultTopic {
+  id: AdultTopicId;
   query: string;
   subreddits: readonly string[];
 }
 
 const CHEST_TOPIC: AdultTopic = {
+  id: "chest",
   query: ADULT_CHEST_QUERY,
   subreddits: ADULT_SUBREDDITS,
 };
 
 const BOOTY_TOPIC: AdultTopic = {
+  id: "booty",
   query: ADULT_BOOTY_QUERY,
   subreddits: ADULT_BOOTY_SUBREDDITS,
 };
@@ -84,7 +88,7 @@ export function createImageSearch(options: {
     return bind((topic) => searchDuckDuckGoCascade(fetchImpl, random, fallback, topic));
   }
   if (provider === "reddit") {
-    return bind((topic) => searchReddit(fetchImpl, random, topic.subreddits));
+    return bind((topic) => searchReddit(fetchImpl, random, topic.subreddits, topic.id));
   }
   if (provider === "serpapi" || provider === "bing") {
     const apiKey = options.apiKey?.trim();
@@ -232,6 +236,7 @@ async function searchReddit(
   fetchImpl: typeof fetch,
   random: () => number,
   subreddits: readonly string[] = ADULT_SUBREDDITS,
+  topic: AdultTopicId = "chest",
 ): Promise<AdultImageCandidate[]> {
   const order = shuffle([...subreddits], random);
   const found: AdultImageCandidate[] = [];
@@ -241,15 +246,15 @@ async function searchReddit(
     const gateway = await fetchRedditJson(fetchImpl, redditGatewayListingUrl(sub));
     if (gateway.ok) {
       anyOk = true;
-      found.push(...parseRedditPayload(gateway.body));
+      found.push(...tagSubreddit(parseRedditPayload(gateway.body), sub));
     } else {
       const hot = await fetchRedditJson(fetchImpl, redditHotJsonUrl(sub));
       if (hot.ok) {
         anyOk = true;
-        found.push(...parseRedditPayload(hot.body));
+        found.push(...tagSubreddit(parseRedditPayload(hot.body), sub));
       }
     }
-    if (found.some(isSafeAdultImage)) break;
+    if (found.some((candidate) => isEligibleAdultImage(candidate, topic))) break;
   }
   if (!anyOk) {
     throw new ImageSearchError(
@@ -425,6 +430,14 @@ function httpsUrl(value: unknown): string | undefined {
   return trimmed;
 }
 
+function topicHit(candidates: AdultImageCandidate[], topic: AdultTopicId): boolean {
+  return candidates.some((candidate) => isEligibleAdultImage(candidate, topic));
+}
+
+/**
+ * DuckDuckGo, then keyless Bing HTML, then Reddit.
+ * A provider that returns only off-topic or genital hits does not stop the cascade.
+ */
 async function searchDuckDuckGoCascade(
   fetchImpl: typeof fetch,
   random: () => number,
@@ -432,8 +445,11 @@ async function searchDuckDuckGoCascade(
   topic: AdultTopic = CHEST_TOPIC,
 ): Promise<AdultImageCandidate[]> {
   let ddgError: unknown;
+  let weak: AdultImageCandidate[] | undefined;
   try {
-    return await searchDuckDuckGo(fetchImpl, topic.query);
+    const hits = await searchDuckDuckGo(fetchImpl, topic.query);
+    if (topicHit(hits, topic.id) || !fallback) return hits;
+    weak = hits;
   } catch (error) {
     ddgError = error;
     if (!fallback) {
@@ -444,14 +460,18 @@ async function searchDuckDuckGoCascade(
 
   let bingError: unknown;
   try {
-    return await searchBingHtml(fetchImpl, topic.query);
+    const hits = await searchBingHtml(fetchImpl, topic.query);
+    if (topicHit(hits, topic.id)) return hits;
+    if (hits.length > 0) weak = hits;
   } catch (error) {
     bingError = error;
   }
 
   try {
-    return await searchReddit(fetchImpl, random, topic.subreddits);
+    const hits = await searchReddit(fetchImpl, random, topic.subreddits, topic.id);
+    if (topicHit(hits, topic.id) || hits.length > 0) return hits;
   } catch (redditError) {
+    if (weak && weak.length > 0) return weak;
     const ddgDetail = ddgError instanceof Error ? ddgError.message : "duckduckgo failed";
     const bingDetail = bingError instanceof Error ? bingError.message : "bing html failed";
     const redditDetail = redditError instanceof Error ? redditError.message : "reddit failed";
@@ -460,6 +480,18 @@ async function searchDuckDuckGoCascade(
       "Image search is unavailable right now.",
     );
   }
+  if (weak && weak.length > 0) return weak;
+  throw new ImageSearchError(
+    "no on-topic image from duckduckgo, bing html, or reddit",
+    "Image search is unavailable right now.",
+  );
+}
+
+function tagSubreddit(candidates: AdultImageCandidate[], subreddit: string): AdultImageCandidate[] {
+  return candidates.map((candidate) => {
+    const snippet = candidate.snippet?.trim();
+    return { ...candidate, snippet: snippet ? `${snippet} ${subreddit}` : subreddit };
+  });
 }
 
 /**

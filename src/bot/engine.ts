@@ -15,13 +15,14 @@ import type { LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
+  ADULT_IMAGE_RETRY_MESSAGE,
+  ADULT_VISION_UNAVAILABLE_MESSAGE,
   containsBannedAgeTerm,
   imageHost,
-  pickAdultBootyImage,
-  pickAdultChestImage,
   redactSecrets,
   type AdultImageCandidate,
 } from "./adult-filter.js";
+import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import { matchFilters } from "./filters.js";
 import {
@@ -65,7 +66,9 @@ export interface EngineActions {
 
 export interface EngineDeps {
   imageSearch?: ImageSearch;
-  fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
+  fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
+  /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
+  adultVision?: AdultVisionJudge;
 }
 
 export class ModerationEngine {
@@ -792,12 +795,25 @@ export class ModerationEngine {
       return;
     }
 
-    const picked = booty ? pickAdultBootyImage(candidates) : pickAdultChestImage(candidates);
-    if (!picked) {
-      await this.reply(conversationId, "No safe adult image came back. Try again later.", actions);
+    const selection = await selectAdultImage({
+      candidates,
+      topic: booty ? "booty" : "chest",
+      vision: settings.boobsVision,
+      judge: this.deps.adultVision,
+      fetchImage: this.deps.fetchImage,
+    });
+    if (!selection.image) {
+      if (selection.unavailable) {
+        log.warn(`${label} vision is on but no vision model is configured conversation=${conversationId}`);
+      }
+      await this.reply(
+        conversationId,
+        selection.unavailable ? ADULT_VISION_UNAVAILABLE_MESSAGE : ADULT_IMAGE_RETRY_MESSAGE,
+        actions,
+      );
       return;
     }
-    await this.deliverAdultImage(conversationId, picked, actions, label);
+    await this.deliverAdultImage(conversationId, selection.image, actions, label, selection.fetched);
   }
 
   private async deliverAdultImage(
@@ -805,10 +821,11 @@ export class ModerationEngine {
     image: AdultImageCandidate,
     actions: EngineActions,
     label: string,
+    alreadyFetched?: AdultVisionImage,
   ): Promise<void> {
     const host = imageHost(image.url);
-    let fetched: { bytes: Uint8Array; mimeType: string } | undefined;
-    if (this.deps.fetchImage) {
+    let fetched = alreadyFetched;
+    if (!fetched && this.deps.fetchImage) {
       try {
         fetched = await this.deps.fetchImage(image.url);
       } catch {
@@ -1046,5 +1063,6 @@ function formatSettings(settings: ResolvedConversationConfig): string {
     `llm_context_mode: ${settings.llmContextMode}`,
     `llm_recent_messages: ${settings.llmRecentMessages}`,
     `boobs_enabled: ${settings.boobsEnabled}`,
+    `boobs_vision: ${settings.boobsVision}`,
   ].join("\n");
 }
