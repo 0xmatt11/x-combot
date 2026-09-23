@@ -86,8 +86,9 @@ delete:
 
 # Adult chest image (`!boobs`). Off by default so a moderation deploy does not
 # post NSFW. Set enabled: true or BOOBS_ENABLED=true (env wins). Search defaults
-# to DuckDuckGo with no API key (BOOBS_SEARCH_PROVIDER). The command
-# ignores extra text so members cannot change the search. See the README.
+# to DuckDuckGo with no API key (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails,
+# keyless Bing HTML (adlt=off) runs next, then Reddit. Neither needs an API key.
+# The command ignores extra text so members cannot change the search. See the README.
 boobs:
   enabled: false
   rate_limit_per_user: 1

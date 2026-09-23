@@ -42,8 +42,9 @@ export function createImageSearch(options: {
   provider?: string;
   apiKey?: string;
   /**
-   * When DuckDuckGo fails, try Reddit. Defaults to true for the DuckDuckGo provider.
-   * Set false to surface the DuckDuckGo error instead.
+   * When DuckDuckGo fails or returns nothing, try keyless Bing HTML and then Reddit.
+   * Defaults to true for the DuckDuckGo provider.
+   * Set false to surface the DuckDuckGo error and skip both fallbacks.
    */
   fallbackToReddit?: boolean;
   fetchImpl?: typeof fetch;
@@ -57,7 +58,7 @@ export function createImageSearch(options: {
   if (provider === "duckduckgo") {
     const fallback = options.fallbackToReddit !== false;
     return {
-      searchAdultChestImages: () => searchDuckDuckGoOrReddit(fetchImpl, random, fallback),
+      searchAdultChestImages: () => searchDuckDuckGoCascade(fetchImpl, random, fallback),
     };
   }
   if (provider === "reddit") {
@@ -140,6 +141,21 @@ export function duckDuckGoImageScriptUrl(vqd: string): string {
     ct: "AT",
   });
   return `https://duckduckgo.com/i.js?${params.toString()}`;
+}
+
+/**
+ * Keyless Bing images HTML (`ddgs` Bing images backend). Not the Azure Image Search API.
+ * `adlt=off` allows adult results. The query is always `ADULT_CHEST_QUERY`.
+ */
+export function bingHtmlImageSearchUrl(): string {
+  const params = new URLSearchParams({
+    q: ADULT_CHEST_QUERY,
+    adlt: "off",
+    async: "1",
+    first: "1",
+    count: "35",
+  });
+  return `https://www.bing.com/images/async?${params.toString()}`;
 }
 
 const VQD_TOKEN = /^[A-Za-z0-9._-]{8,256}$/;
@@ -388,29 +404,133 @@ function httpsUrl(value: unknown): string | undefined {
   return trimmed;
 }
 
-async function searchDuckDuckGoOrReddit(
+async function searchDuckDuckGoCascade(
   fetchImpl: typeof fetch,
   random: () => number,
-  fallbackToReddit: boolean,
+  fallback: boolean,
 ): Promise<AdultImageCandidate[]> {
+  let ddgError: unknown;
   try {
     return await searchDuckDuckGo(fetchImpl);
   } catch (error) {
-    if (!fallbackToReddit) {
+    ddgError = error;
+    if (!fallback) {
       if (error instanceof ImageSearchError) throw error;
       throw new ImageSearchError("duckduckgo request failed", "Image search is unavailable right now.");
     }
-    try {
-      return await searchReddit(fetchImpl, random);
-    } catch (redditError) {
-      const ddgDetail = error instanceof Error ? error.message : "duckduckgo failed";
-      const redditDetail = redditError instanceof Error ? redditError.message : "reddit failed";
-      throw new ImageSearchError(
-        `duckduckgo failed (${ddgDetail}); reddit fallback failed (${redditDetail})`,
-        "Image search is unavailable right now.",
-      );
-    }
   }
+
+  let bingError: unknown;
+  try {
+    return await searchBingHtml(fetchImpl);
+  } catch (error) {
+    bingError = error;
+  }
+
+  try {
+    return await searchReddit(fetchImpl, random);
+  } catch (redditError) {
+    const ddgDetail = ddgError instanceof Error ? ddgError.message : "duckduckgo failed";
+    const bingDetail = bingError instanceof Error ? bingError.message : "bing html failed";
+    const redditDetail = redditError instanceof Error ? redditError.message : "reddit failed";
+    throw new ImageSearchError(
+      `duckduckgo failed (${ddgDetail}); bing html fallback failed (${bingDetail}); reddit fallback failed (${redditDetail})`,
+      "Image search is unavailable right now.",
+    );
+  }
+}
+
+/**
+ * Direct `murl` values from Bing's async HTML (`a.iusc` `m` JSON).
+ * Thumbnails (`turl`) are ignored. No API key is involved.
+ */
+export function parseBingHtmlImages(html: string): AdultImageCandidate[] {
+  const out: AdultImageCandidate[] = [];
+  const seen = new Set<string>();
+  for (const tag of html.match(/<a\b[^>]*>/gi) ?? []) {
+    if (!tagHasClass(tag, "iusc")) continue;
+    const raw = readHtmlAttr(tag, "m") ?? readHtmlAttr(tag, "data-m");
+    if (!raw || !raw.includes("murl")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decodeHtmlAttr(raw));
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const record = parsed as Record<string, unknown>;
+    const url = httpsUrl(record.murl);
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const title = stringField(record, "t");
+    const page = httpsUrl(record.purl);
+    out.push({ url, title, snippet: page, adult: true });
+  }
+  return out;
+}
+
+async function searchBingHtml(fetchImpl: typeof fetch): Promise<AdultImageCandidate[]> {
+  const url = bingHtmlImageSearchUrl();
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: "https://www.bing.com/",
+        "User-Agent": DDG_USER_AGENT,
+        Cookie: "SRCHHPGUSR=ADLT=OFF",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new ImageSearchError("bing html request failed", "Image search is unavailable right now.");
+  }
+  if (!response.ok) {
+    throw new ImageSearchError(
+      `bing html HTTP ${response.status}`,
+      "Image search is unavailable right now.",
+    );
+  }
+  let html: string;
+  try {
+    html = await response.text();
+  } catch {
+    throw new ImageSearchError("bing html response was not text", "Image search is unavailable right now.");
+  }
+  const parsed = parseBingHtmlImages(html);
+  if (parsed.length === 0) {
+    throw new ImageSearchError("bing html returned no images", "Image search is unavailable right now.");
+  }
+  return parsed;
+}
+
+function tagHasClass(tag: string, className: string): boolean {
+  const value = readHtmlAttr(tag, "class");
+  if (!value) return false;
+  return value.split(/\s+/).includes(className);
+}
+
+function readHtmlAttr(tag: string, name: string): string | undefined {
+  const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, "i"));
+  const value = match?.[2];
+  return value && value.length > 0 ? value : undefined;
+}
+
+function decodeHtmlAttr(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, body: string) => {
+    const named: Record<string, string> = { quot: '"', amp: "&", lt: "<", gt: ">", apos: "'" };
+    const key = body.toLowerCase();
+    const namedChar = named[key];
+    if (namedChar) return namedChar;
+    if (body[0] === "#") {
+      const hex = body[1] === "x";
+      const code = hex ? Number.parseInt(body.slice(2), 16) : Number.parseInt(body.slice(1), 10);
+      if (Number.isFinite(code) && code > 0 && code < 0x110000) return String.fromCodePoint(code);
+    }
+    return entity;
+  });
 }
 
 async function searchDuckDuckGo(fetchImpl: typeof fetch): Promise<AdultImageCandidate[]> {
