@@ -1,0 +1,66 @@
+import type { ChatService } from "../chat/service.js";
+import { isChatGroupId } from "../chat/ids.js";
+import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
+import type { XClient } from "./client.js";
+
+/**
+ * One XClient for the moderation engine. Classic group DMs stay on `/2/dm_*`.
+ * Encrypted `g…` conversations send, delete, and load history through Chat.
+ */
+export class RoutedXClient implements XClient {
+  constructor(
+    private readonly dm: XClient,
+    private readonly chat: ChatService | undefined,
+  ) {}
+
+  getMe(): Promise<XUser> {
+    return this.dm.getMe();
+  }
+
+  getUserByUsername(username: string): Promise<XUser | undefined> {
+    return this.dm.getUserByUsername(username);
+  }
+
+  getUserById(id: string): Promise<XUser | undefined> {
+    return this.dm.getUserById(id);
+  }
+
+  listDmEvents(params: {
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<{ events: DmEvent[]; nextToken?: string }> {
+    return this.dm.listDmEvents(params);
+  }
+
+  listConversationDmEvents(params: {
+    conversationId: string;
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<{ events: DmEvent[]; nextToken?: string }> {
+    if (this.chat && isChatGroupId(params.conversationId)) {
+      return this.chat.listHistory(params);
+    }
+    return this.dm.listConversationDmEvents(params);
+  }
+
+  sendMessage(conversationId: string, text: string): Promise<SendMessageResult> {
+    if (this.chat && isChatGroupId(conversationId)) {
+      return this.chat.sendText(conversationId, text);
+    }
+    return this.dm.sendMessage(conversationId, text);
+  }
+
+  sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult> {
+    return this.dm.sendDirectMessage(participantId, text);
+  }
+
+  deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult> {
+    if (
+      this.chat &&
+      (isChatGroupId(hint?.conversationId) || this.chat.knows(eventId))
+    ) {
+      return this.chat.deleteEvent(eventId, hint);
+    }
+    return this.dm.deleteEvent(eventId, hint);
+  }
+}

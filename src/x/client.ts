@@ -1,4 +1,4 @@
-import type { DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
+import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
 
 export interface XClient {
   getMe(): Promise<XUser>;
@@ -18,7 +18,7 @@ export interface XClient {
     text: string,
   ): Promise<SendMessageResult>;
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult>;
-  deleteEvent(eventId: string): Promise<DeleteResult>;
+  deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult>;
 }
 
 export const DM_EVENT_FIELDS = [

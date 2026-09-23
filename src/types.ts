@@ -148,6 +148,17 @@ export interface DmEvent {
   participants: XUser[];
   text?: string;
   mentions: Mention[];
+  /**
+   * X Chat message sequence id. Required for
+   * `POST /2/chat/conversations/:id/messages/delete`. Absent on classic DM events.
+   */
+  sequenceId?: string;
+}
+
+/** Extra context for delete. Classic DM ignores it; Chat uses the sequence id. */
+export interface DeleteHint {
+  conversationId?: string;
+  sequenceId?: string;
 }
 
 export interface SendMessageResult {

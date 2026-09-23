@@ -9,6 +9,7 @@ import type {
   ResolvedConversationConfig,
   XUser,
 } from "../types.js";
+import { isChatGroupId } from "../chat/ids.js";
 import { displayName, isGroupConversation, type XClient } from "../x/client.js";
 import type { LlmClient } from "../llm/client.js";
 import { buildLlmMessages, selectContextTurns, splitReply } from "../llm/context.js";
@@ -131,7 +132,7 @@ export class ModerationEngine {
       if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
         actions.muted = true;
         if (settings.attemptDeleteOnMute) {
-          await this.tryDelete(event.id, actions);
+          await this.tryDelete(event.id, actions, event);
         }
         return actions;
       }
@@ -142,7 +143,7 @@ export class ModerationEngine {
     if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
       actions.muted = true;
       if (settings.attemptDeleteOnMute) {
-        await this.tryDelete(event.id, actions);
+        await this.tryDelete(event.id, actions, event);
       }
       return actions;
     }
@@ -151,7 +152,7 @@ export class ModerationEngine {
       const filterHit = matchFilters(event.text, settings.filters);
       if (filterHit) {
         if (settings.attemptDeleteOnFilter) {
-          await this.tryDelete(event.id, actions);
+          await this.tryDelete(event.id, actions, event);
         }
         await this.reply(
           event.conversationId,
@@ -185,7 +186,7 @@ export class ModerationEngine {
       );
       if (count > settings.floodMaxMessages) {
         if (settings.attemptDeleteOnFlood) {
-          await this.tryDelete(event.id, actions);
+          await this.tryDelete(event.id, actions, event);
         }
         this.store.mute(
           event.conversationId,
@@ -527,9 +528,15 @@ export class ModerationEngine {
           );
           return;
         }
-        const result = await this.tryDelete(targetId, actions);
+        const result = await this.tryDelete(targetId, actions, { conversationId });
         if (result) {
           await this.reply(conversationId, `Deleted event ${targetId}.`, actions);
+        } else if (isChatGroupId(conversationId)) {
+          await this.reply(
+            conversationId,
+            `Could not delete event ${targetId}. X Chat delete-for-all (POST /2/chat/conversations/:id/messages/delete) works for messages this account sent, and for other people's messages only when this account is a group admin. The bot also needs the message sequence id from a poll it decrypted.`,
+            actions,
+          );
         } else {
           await this.reply(
             conversationId,
@@ -690,14 +697,20 @@ export class ModerationEngine {
     return undefined;
   }
 
-  private async tryDelete(eventId: string, actions: EngineActions): Promise<boolean> {
-    const result = await this.client.deleteEvent(eventId);
+  private async tryDelete(
+    eventId: string,
+    actions: EngineActions,
+    hint?: { conversationId?: string; sequenceId?: string },
+  ): Promise<boolean> {
+    const result = await this.client.deleteEvent(eventId, hint);
     if (result.deleted) {
       actions.deletes.push(eventId);
       return true;
     }
+    const where =
+      hint?.conversationId && isChatGroupId(hint.conversationId) ? "Chat message" : "DM event";
     log.warn(
-      `Could not delete DM event ${eventId}. ${result.error ?? "X only deletes events owned by the bot user."}`,
+      `Could not delete ${where} ${eventId}. ${result.error ?? "X refused the delete."}`,
     );
     return false;
   }
