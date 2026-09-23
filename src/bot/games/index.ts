@@ -8,6 +8,7 @@ export {
   MAX_MODIFIER,
   MAX_SIDES,
   diceReply,
+  diceRollerLabel,
   formatDiceRoll,
   parseDiceNotation,
   rollDice,
