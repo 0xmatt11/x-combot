@@ -30,13 +30,18 @@ export class Poller {
 
   async tick(): Promise<void> {
     if (this.stopped) return;
+    let delayMs = this.intervalMs;
     try {
       await this.pollOnce();
     } catch (error) {
       log.error("Poll failed", error);
+      delayMs = nextPollDelayMs(this.intervalMs, error);
     } finally {
       if (!this.stopped) {
-        this.timer = setTimeout(() => void this.tick(), this.intervalMs);
+        if (delayMs > this.intervalMs) {
+          log.warn(`Next DM poll in ${delayMs}ms (API backoff)`);
+        }
+        this.timer = setTimeout(() => void this.tick(), delayMs);
       }
     }
   }
@@ -71,6 +76,23 @@ export class Poller {
       this.store.setWatermark(WATERMARK_KEY, newest.id);
     }
   }
+}
+
+/**
+ * Successful polls stay on `intervalMs`. A failure that carries `retryAfterMs`
+ * (429 reset / Retry-After, or the 402 credits backoff) waits at least that long.
+ */
+export function nextPollDelayMs(intervalMs: number, error: unknown): number {
+  const retryAfterMs = readRetryAfterMs(error);
+  if (retryAfterMs === undefined) return intervalMs;
+  return Math.max(intervalMs, retryAfterMs);
+}
+
+function readRetryAfterMs(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const value = (error as { retryAfterMs?: unknown }).retryAfterMs;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  return value;
 }
 
 export function collectNewEvents(eventsNewestFirst: DmEvent[], watermarkId: string): DmEvent[] {
