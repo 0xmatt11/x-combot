@@ -2,6 +2,7 @@ import {
   ADULT_CHEST_QUERY,
   ADULT_SUBREDDITS,
   containsBannedAgeTerm,
+  isDirectImageUrl,
   isSafeAdultImage,
   type AdultImageCandidate,
 } from "./adult-filter.js";
@@ -72,6 +73,23 @@ export function serpApiImageSearchUrl(apiKey: string): string {
   return `https://serpapi.com/search.json?${params.toString()}`;
 }
 
+/**
+ * Desktop listing that still answers from many datacenter IPs.
+ * `www.reddit.com/.../hot.json` is often HTTP 403 there; it is only a fallback.
+ * The subreddit name is one of ADULT_SUBREDDITS — never caller text.
+ */
+export function redditGatewayListingUrl(subreddit: string): string {
+  const params = new URLSearchParams({
+    sort: "hot",
+    allow_over18: "1",
+  });
+  return `https://gateway.reddit.com/desktopapi/v1/subreddits/${encodeURIComponent(subreddit)}?${params.toString()}`;
+}
+
+export function redditHotJsonUrl(subreddit: string): string {
+  return `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/hot.json?limit=40&raw_json=1`;
+}
+
 async function searchReddit(
   fetchImpl: typeof fetch,
   random: () => number,
@@ -81,34 +99,52 @@ async function searchReddit(
   let anyOk = false;
   for (const sub of order) {
     if (containsBannedAgeTerm(sub)) continue;
-    const url = `https://www.reddit.com/r/${encodeURIComponent(sub)}/hot.json?limit=40&raw_json=1`;
-    let response: Response;
-    try {
-      response = await fetchImpl(url, {
-        headers: { Accept: "application/json", "User-Agent": USER_AGENT },
-        signal: AbortSignal.timeout(15_000),
-      });
-    } catch {
-      continue;
+    const gateway = await fetchRedditJson(fetchImpl, redditGatewayListingUrl(sub));
+    if (gateway.ok) {
+      anyOk = true;
+      found.push(...parseRedditPayload(gateway.body));
+    } else {
+      const hot = await fetchRedditJson(fetchImpl, redditHotJsonUrl(sub));
+      if (hot.ok) {
+        anyOk = true;
+        found.push(...parseRedditPayload(hot.body));
+      }
     }
-    if (!response.ok) continue;
-    anyOk = true;
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      continue;
-    }
-    found.push(...parseRedditListing(body));
     if (found.some(isSafeAdultImage)) break;
   }
   if (!anyOk) {
     throw new ImageSearchError(
       "reddit listings unavailable",
-      "Image search is unavailable right now.",
+      "Image search is unavailable right now. Reddit blocked listing requests from this host.",
     );
   }
   return found;
+}
+
+async function fetchRedditJson(
+  fetchImpl: typeof fetch,
+  url: string,
+): Promise<{ ok: true; body: unknown } | { ok: false }> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    return { ok: false };
+  }
+  if (!response.ok) return { ok: false };
+  try {
+    return { ok: true, body: await response.json() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function parseRedditPayload(body: unknown): AdultImageCandidate[] {
+  if (isRedditGatewayPayload(body)) return parseRedditGateway(body);
+  return parseRedditListing(body);
 }
 
 export function parseRedditListing(body: unknown): AdultImageCandidate[] {
@@ -127,6 +163,127 @@ export function parseRedditListing(body: unknown): AdultImageCandidate[] {
     out.push({ url, title, adult: true });
   }
   return out;
+}
+
+/**
+ * `gateway.reddit.com` desktop payload: `{ postIds, posts }`.
+ * Image bytes live on `source.url`, `url`, or `media.content` (`type: "image"`).
+ * NSFW is camelCase `isNSFW` here; `over_18` / `over18` / `nsfw` are accepted too.
+ */
+export function parseRedditGateway(body: unknown): AdultImageCandidate[] {
+  const map = gatewayPosts(body);
+  if (!map) return [];
+  const out: AdultImageCandidate[] = [];
+  for (const data of map) {
+    if (!isExplicitlyNsfw(data)) continue;
+    if (isSkippedRedditPost(data)) continue;
+    const url = directGatewayImage(data);
+    if (!url) continue;
+    const title = typeof data.title === "string" ? data.title : undefined;
+    out.push({ url, title, adult: true });
+  }
+  return out;
+}
+
+function isRedditGatewayPayload(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const posts = (body as Record<string, unknown>).posts;
+  return Boolean(posts) && typeof posts === "object" && !Array.isArray(posts);
+}
+
+function gatewayPosts(body: unknown): Record<string, unknown>[] {
+  if (!isRedditGatewayPayload(body)) return [];
+  const record = body as Record<string, unknown>;
+  const posts = record.posts as Record<string, unknown>;
+  const ids = Array.isArray(record.postIds)
+    ? record.postIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    : Object.keys(posts);
+  const out: Record<string, unknown>[] = [];
+  for (const id of ids) {
+    const post = posts[id];
+    if (!post || typeof post !== "object" || Array.isArray(post)) continue;
+    out.push(post as Record<string, unknown>);
+  }
+  return out;
+}
+
+function isExplicitlyNsfw(data: Record<string, unknown>): boolean {
+  return (
+    data.over_18 === true ||
+    data.over18 === true ||
+    data.isNSFW === true ||
+    data.isNsfw === true ||
+    data.nsfw === true
+  );
+}
+
+function isSkippedRedditPost(data: Record<string, unknown>): boolean {
+  if (data.stickied === true || data.isStickied === true || data.is_stickied === true) return true;
+  if (data.isSponsored === true || data.is_sponsored === true || data.promoted === true) return true;
+  if (data.is_self === true || data.isSelf === true) return true;
+  if (data.is_video === true || data.isVideo === true) return true;
+  if (data.is_gallery === true || data.isGallery === true) return true;
+  const hint = (stringField(data, "postHint") ?? stringField(data, "post_hint") ?? "").toLowerCase();
+  if (hint === "self" || hint.includes("video")) return true;
+  const media = recordField(data, "media");
+  const mediaType = (media ? stringField(media, "type") : undefined)?.toLowerCase();
+  if (mediaType === "gallery" || (mediaType !== undefined && mediaType.includes("video"))) return true;
+  const domain = stringField(data, "domain");
+  if (domain && /(^|\.)v\.redd\.it$/i.test(domain)) return true;
+  return false;
+}
+
+function directGatewayImage(data: Record<string, unknown>): string | undefined {
+  const candidates: unknown[] = [data.url, data.url_overridden_by_dest];
+  const source = recordField(data, "source");
+  if (source) candidates.push(source.url);
+  const media = recordField(data, "media");
+  if (media) {
+    candidates.push(media.content, media.url);
+    const resolutions = media.resolutions;
+    if (Array.isArray(resolutions)) {
+      for (let i = resolutions.length - 1; i >= 0; i -= 1) {
+        const row = resolutions[i];
+        if (row && typeof row === "object" && !Array.isArray(row)) {
+          candidates.push((row as Record<string, unknown>).url);
+        }
+      }
+    }
+  }
+  const preview = recordField(data, "preview");
+  if (preview) {
+    candidates.push(preview.url);
+    const images = preview.images;
+    if (Array.isArray(images) && images[0] && typeof images[0] === "object") {
+      const previewSource = recordField(images[0], "source");
+      if (previewSource) candidates.push(previewSource.url);
+    }
+  }
+  const outbound = recordField(data, "outboundLink") ?? recordField(data, "outbound_link");
+  if (outbound) candidates.push(outbound.url);
+
+  const urls: string[] = [];
+  for (const candidate of candidates) {
+    const url = httpsUrl(candidate);
+    if (!url || !isDirectImageUrl(url) || urls.includes(url)) continue;
+    urls.push(url);
+  }
+  const original = urls.find((url) => {
+    try {
+      return /^(i\.redd\.it|i\.imgur\.com)$/i.test(new URL(url).hostname);
+    } catch {
+      return false;
+    }
+  });
+  return original ?? urls[0];
+}
+
+function httpsUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let trimmed = value.trim().replace(/&amp;/g, "&");
+  if (trimmed.startsWith("//")) trimmed = `https:${trimmed}`;
+  if (!/^https:\/\//i.test(trimmed)) return undefined;
+  return trimmed;
 }
 
 async function searchSerpApi(fetchImpl: typeof fetch, apiKey: string): Promise<AdultImageCandidate[]> {

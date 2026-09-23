@@ -1,0 +1,172 @@
+{
+  "postIds": [
+    "t3_image",
+    "t3_preview",
+    "t3_imgur",
+    "t3_permalink",
+    "t3_sfw",
+    "t3_video",
+    "t3_gallery",
+    "t3_stickied",
+    "t3_self",
+    "t3_sponsored",
+    "t3_teen",
+    "t3_over18",
+    "t3_missing"
+  ],
+  "posts": {
+    "t3_image": {
+      "id": "t3_image",
+      "title": "close-up chest crop",
+      "permalink": "/r/boobs/comments/image/close_up/",
+      "isNSFW": true,
+      "isStickied": false,
+      "isSponsored": false,
+      "postHint": "image",
+      "domain": "i.redd.it",
+      "url": "https://i.redd.it/adult-close-up.jpg",
+      "media": {
+        "type": "image",
+        "content": "https://preview.redd.it/adult-close-up.jpg?width=640&amp;format=pjpg&amp;auto=webp&amp;s=abc",
+        "width": 640,
+        "height": 480
+      },
+      "source": {
+        "url": "https://i.redd.it/adult-close-up.jpg",
+        "width": 2000,
+        "height": 1500
+      }
+    },
+    "t3_preview": {
+      "id": "t3_preview",
+      "title": "preview only",
+      "isNSFW": true,
+      "postHint": "image",
+      "media": {
+        "type": "image",
+        "content": "https://preview.redd.it/only-preview.png"
+      }
+    },
+    "t3_imgur": {
+      "id": "t3_imgur",
+      "title": "imgur host",
+      "over18": true,
+      "postHint": "image",
+      "domain": "i.imgur.com",
+      "url": "https://i.imgur.com/adult.png",
+      "media": {
+        "type": "image",
+        "content": "https://i.imgur.com/adult.png"
+      }
+    },
+    "t3_permalink": {
+      "id": "t3_permalink",
+      "title": "comments page plus media",
+      "isNsfw": true,
+      "postHint": "image",
+      "url": "https://www.reddit.com/r/boobs/comments/abc/title/",
+      "media": {
+        "type": "image",
+        "content": "https://i.redd.it/from-media.jpg"
+      }
+    },
+    "t3_sfw": {
+      "id": "t3_sfw",
+      "title": "not marked",
+      "isNSFW": false,
+      "postHint": "image",
+      "url": "https://i.redd.it/sfw.jpg",
+      "media": {
+        "type": "image",
+        "content": "https://i.redd.it/sfw.jpg"
+      }
+    },
+    "t3_video": {
+      "id": "t3_video",
+      "title": "clip",
+      "isNSFW": true,
+      "isVideo": true,
+      "postHint": "hosted:video",
+      "domain": "v.redd.it",
+      "url": "https://v.redd.it/clip",
+      "media": {
+        "type": "video",
+        "dashUrl": "https://v.redd.it/clip/DASHPlaylist.mpd",
+        "content": "https://preview.redd.it/video-still.jpg"
+      }
+    },
+    "t3_gallery": {
+      "id": "t3_gallery",
+      "title": "album",
+      "isNSFW": true,
+      "isGallery": true,
+      "media": {
+        "type": "gallery"
+      },
+      "url": "https://www.reddit.com/gallery/abc"
+    },
+    "t3_stickied": {
+      "id": "t3_stickied",
+      "title": "mod post",
+      "isNSFW": true,
+      "isStickied": true,
+      "url": "https://i.redd.it/sticky.jpg",
+      "media": {
+        "type": "image",
+        "content": "https://i.redd.it/sticky.jpg"
+      }
+    },
+    "t3_self": {
+      "id": "t3_self",
+      "title": "text post",
+      "isNSFW": true,
+      "isSelf": true,
+      "postHint": "self",
+      "url": "https://www.reddit.com/r/boobs/comments/self/text/"
+    },
+    "t3_sponsored": {
+      "id": "t3_sponsored",
+      "title": "ad",
+      "isNSFW": true,
+      "isSponsored": true,
+      "postHint": "image",
+      "url": "https://i.redd.it/ad.jpg",
+      "media": {
+        "type": "image",
+        "content": "https://i.redd.it/ad.jpg"
+      }
+    },
+    "t3_teen": {
+      "id": "t3_teen",
+      "title": "teen",
+      "isNSFW": true,
+      "postHint": "image",
+      "url": "https://i.redd.it/teen-title.jpg",
+      "media": {
+        "type": "image",
+        "content": "https://i.redd.it/teen-title.jpg"
+      }
+    },
+    "t3_over18": {
+      "id": "t3_over18",
+      "title": "snake case flag",
+      "over_18": true,
+      "postHint": "image",
+      "url": "https://i.redd.it/snake.jpg",
+      "media": {
+        "type": "image",
+        "content": "//preview.redd.it/snake-preview.jpg"
+      }
+    },
+    "t3_not_listed": {
+      "id": "t3_not_listed",
+      "title": "omitted because it is not in postIds",
+      "isNSFW": true,
+      "url": "https://i.redd.it/not-listed.jpg",
+      "media": {
+        "type": "image",
+        "content": "https://i.redd.it/not-listed.jpg"
+      }
+    }
+  }
+}
