@@ -699,18 +699,71 @@ describe("!boobs engine", () => {
 });
 
 describe("RoutedXClient image delivery", () => {
-  it("refuses native attach on encrypted Chat ids and uploads classic group DMs", async () => {
+  const chatGroupId = "g2029561975647150382";
+
+  it("routes encrypted Chat ids through ChatService.sendImage and classic DMs through DM upload", async () => {
     const dm = new MockXClient();
-    const routed = new RoutedXClient(dm, undefined);
     const image = {
       url: SAFE_URL,
       bytes: Uint8Array.from([1, 2]),
       mimeType: "image/jpeg",
     };
-    await expect(routed.sendImage("g2029561975647150382", image)).rejects.toThrow(/text-only/);
+    const routedNoChat = new RoutedXClient(dm, undefined);
+    await expect(routedNoChat.sendImage(chatGroupId, image)).rejects.toThrow(
+      /Chat configured|encryptStream|media\/upload/,
+    );
     expect(dm.images).toHaveLength(0);
+
+    const chatImages: typeof image[] = [];
+    const chat = {
+      sendImage: async (conversationId: string, img: typeof image) => {
+        chatImages.push(img);
+        return { dmEventId: "chat-img-1", dmConversationId: conversationId };
+      },
+    } as unknown as import("../src/chat/service.js").ChatService;
+    const routed = new RoutedXClient(dm, chat);
+    const sent = await routed.sendImage(chatGroupId, image);
+    expect(sent.dmConversationId).toBe(chatGroupId);
+    expect(chatImages).toHaveLength(1);
+    expect(dm.images).toHaveLength(0);
+
     await routed.sendImage(groupId, image);
     expect(dm.images).toHaveLength(1);
     expect(dm.images[0]?.url).toBe(SAFE_URL);
+  });
+
+  it("posts the https URL when Chat media upload fails and does not use dm_image", async () => {
+    const dm = new MockXClient();
+    const texts: string[] = [];
+    const chat = {
+      sendImage: async () => {
+        throw new Error("Chat media upload failed");
+      },
+      sendText: async (conversationId: string, text: string) => {
+        texts.push(text);
+        return { dmEventId: "text-1", dmConversationId: conversationId };
+      },
+    } as unknown as import("../src/chat/service.js").ChatService;
+    const store = new Store(":memory:");
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(dm, chat),
+      runtime(),
+      undefined,
+      {
+        imageSearch: {
+          async searchAdultChestImages() {
+            return [candidate({ url: SAFE_URL })];
+          },
+        },
+        fetchImage: async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/jpeg" }),
+      },
+    );
+    await engine.processEvent(
+      message({ id: "chat-boobs", senderId: alice.id, text: "!boobs", conversationId: chatGroupId }),
+    );
+    store.close();
+    expect(dm.images).toHaveLength(0);
+    expect(texts).toEqual([SAFE_URL]);
   });
 });

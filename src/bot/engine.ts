@@ -839,9 +839,10 @@ export class ModerationEngine {
         actions.replies.push("18+");
         log.info(`!boobs posted native image conversation=${conversationId} host=${host}`);
         return;
-      } catch {
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
         log.warn(
-          `!boobs native attach failed; posting the image link as text. conversation=${conversationId} host=${host}`,
+          `!boobs native attach failed; posting the image link as text. conversation=${conversationId} host=${host} (${detail})`,
         );
       }
     }

@@ -3,6 +3,7 @@ import {
   CHAT_MESSAGE_EVENT_FIELDS,
   CREDITS_DEPLETED_BACKOFF_MS,
   LiveXClient,
+  chatMediaConversationId,
   dmMediaSpec,
   headerBackoffMs,
   type ApiError,
@@ -280,6 +281,76 @@ describe("DM image attach", () => {
   });
 });
 
+describe("Chat media upload", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("leaves g… ids unchanged and rewrites 1:1 hyphens to colons", () => {
+    expect(chatMediaConversationId("g2029561975647150382")).toBe("g2029561975647150382");
+    expect(chatMediaConversationId("111-222")).toBe("111:222");
+  });
+
+  it("uploads ciphertext via /2/chat/media/upload and does not call dm_image", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        const path = new URL(String(url)).pathname;
+        if (path === "/2/chat/media/upload/initialize") {
+          return new Response(
+            JSON.stringify({ data: { session_id: "sess-1", media_hash_key: "hash-inline" } }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }),
+    );
+
+    const ciphertext = new Uint8Array(3 * 1024 * 1024 + 8);
+    ciphertext[0] = 9;
+    ciphertext[ciphertext.length - 1] = 4;
+    const live = new LiveXClient({
+      tokens: {
+        accessToken: "test-access-token",
+        expiresAtMs: Date.now() + 60 * 60 * 1000,
+      },
+    });
+    const hash = await live.uploadChatMedia("g2029561975647150382", ciphertext);
+
+    expect(hash).toBe("hash-inline");
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      "/2/chat/media/upload/initialize",
+      "/2/chat/media/upload/sess-1/append",
+      "/2/chat/media/upload/sess-1/append",
+      "/2/chat/media/upload/sess-1/finalize",
+    ]);
+    expect(calls.some((call) => call.url.includes("/2/media/upload"))).toBe(false);
+    const initBody = JSON.parse(String(calls[0]?.init.body));
+    expect(initBody).toEqual({
+      conversation_id: "g2029561975647150382",
+      total_bytes: ciphertext.byteLength,
+    });
+    expect(initBody.media_category).toBeUndefined();
+    expect(initBody.media_type).toBeUndefined();
+    const first = JSON.parse(String(calls[1]?.init.body));
+    const second = JSON.parse(String(calls[2]?.init.body));
+    expect(first.segment_index).toBe(0);
+    expect(second.segment_index).toBe(1);
+    expect(first.media_hash_key).toBe("hash-inline");
+    expect(first.conversation_id).toBe("g2029561975647150382");
+    expect(Buffer.from(first.media, "base64").length).toBe(3 * 1024 * 1024);
+    expect(Buffer.from(second.media, "base64").length).toBe(8);
+    const fin = JSON.parse(String(calls[3]?.init.body));
+    expect(fin).toEqual({
+      conversation_id: "g2029561975647150382",
+      media_hash_key: "hash-inline",
+      num_parts: "2",
+    });
+  });
+});
+
 describe("Activity subscription auth", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -321,7 +392,7 @@ describe("Activity subscription auth", () => {
     await expired.listActivitySubscriptions("app-only-bearer");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
     expect(new URL(String(url)).pathname).toBe("/2/activity/subscriptions");
     expect(new URL(String(url)).searchParams.get("max_results")).toBe("1000");
     expect(init.method ?? "GET").toBe("GET");
@@ -341,7 +412,7 @@ describe("Activity subscription auth", () => {
     expect(error.status).toBe(401);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String((fetchMock.mock.calls[0] as unknown[])[0])).toContain("/2/activity/subscriptions");
-    expect(authHeader((fetchMock.mock.calls[0] as [URL, RequestInit])[1])).toBe(
+    expect(authHeader((fetchMock.mock.calls[0] as unknown as [URL, RequestInit])[1])).toBe(
       "Bearer app-only-bearer",
     );
   });
@@ -371,7 +442,7 @@ describe("Activity subscription auth", () => {
     await freshClient().createActivitySubscription(body);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
     expect(new URL(String(url)).pathname).toBe("/2/activity/subscriptions");
     expect(init.method).toBe("POST");
     expect(authHeader(init)).toBe("Bearer user-access-token");

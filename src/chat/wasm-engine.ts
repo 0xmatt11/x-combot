@@ -6,6 +6,7 @@ import type {
   ActionSignature,
   ChatCipher,
   DecryptEventsResult,
+  EncryptMessageOptions,
   LoadedChatIdentity,
   PreparedKeyChange,
   PublicKeyMaterial,
@@ -38,9 +39,19 @@ export interface XdkLike {
     text: string;
     conversationKey?: Uint8Array;
     conversationKeyVersion?: string;
+    attachments?: Array<{
+      attachment_type: "media";
+      media_hash_key: string;
+      width: number;
+      height: number;
+      filesize_bytes: number;
+      filename: string;
+      media_type?: number;
+    }>;
   }): SendPayload & {
     encodedEventSignature?: string;
   };
+  encryptStream(plaintext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
   prepareMessageDelete(params: {
     conversationId: string;
     sequenceIds: string[];
@@ -71,6 +82,8 @@ let wasmReady: Promise<XdkModule> | undefined;
 interface XdkModule {
   Chat: new () => XdkLike;
   default: (options: { module_or_path: Buffer }) => Promise<unknown>;
+  detectImageDimensions(bytes: Uint8Array): { width: number; height: number } | null;
+  detectMimeType(bytes: Uint8Array): string | undefined;
 }
 
 export function packageRoot(): string {
@@ -122,6 +135,7 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
       return {
         messages: result.messages ?? [],
         errors: result.errors ?? {},
+        conversationKeys: normalizeConversationKeys(result.conversationKeys ?? result),
       };
     },
     verifyKeyBinding(identityPublicKey, signingPublicKey, identityPublicKeySignature) {
@@ -137,8 +151,37 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
     loadedIdentity() {
       return identity;
     },
-    encryptMessage(conversationId, text) {
-      const payload = inner.encryptMessage({ conversationId, text });
+    encryptMessage(conversationId, text, options?: EncryptMessageOptions) {
+      const attachments = options?.attachments?.map((item) => {
+        const descriptor: {
+          attachment_type: "media";
+          media_hash_key: string;
+          width: number;
+          height: number;
+          filesize_bytes: number;
+          filename: string;
+          media_type?: number;
+        } = {
+          attachment_type: "media",
+          media_hash_key: item.mediaHashKey,
+          width: item.width,
+          height: item.height,
+          filesize_bytes: item.filesizeBytes,
+          filename: item.filename,
+        };
+        // Omitted media_type defaults to image (inline photo, not a file).
+        if (item.mediaType !== undefined) descriptor.media_type = item.mediaType;
+        return descriptor;
+      });
+      const payload = inner.encryptMessage({
+        conversationId,
+        text,
+        ...(options?.conversationKey ? { conversationKey: options.conversationKey } : {}),
+        ...(options?.conversationKeyVersion
+          ? { conversationKeyVersion: options.conversationKeyVersion }
+          : {}),
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      });
       const encoded =
         payload.encodedEventSignature ??
         (payload as { encoded_event_signature?: string }).encoded_event_signature ??
@@ -148,6 +191,9 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
         encryptedContent: payload.encryptedContent,
         encodedEventSignature: encoded,
       };
+    },
+    encryptStream(plaintext, conversationKey) {
+      return inner.encryptStream(plaintext, conversationKey);
     },
     prepareMessageDelete(conversationId, sequenceIds, deleteForAll) {
       return inner.prepareMessageDelete({ conversationId, sequenceIds, deleteForAll });
@@ -175,6 +221,37 @@ export function importIdentity(chat: XdkLike, privateKeysB64: string, version: s
   } finally {
     bytes.fill(0);
   }
+}
+
+function normalizeConversationKeys(raw: unknown): DecryptEventsResult["conversationKeys"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as Record<string, unknown>;
+  const nested = record.conversationKeys;
+  const source = (nested && typeof nested === "object" ? nested : record) as Record<string, unknown>;
+  const keysRaw = source.keys;
+  const entries =
+    keysRaw instanceof Map
+      ? [...keysRaw.entries()]
+      : keysRaw && typeof keysRaw === "object"
+        ? Object.entries(keysRaw as Record<string, unknown>)
+        : [];
+  const keys: Record<string, Uint8Array> = {};
+  for (const [version, value] of entries) {
+    if (typeof version !== "string" || !version) continue;
+    if (value instanceof Uint8Array) keys[version] = value;
+    else if (Array.isArray(value) && value.every((byte) => typeof byte === "number")) {
+      keys[version] = Uint8Array.from(value);
+    }
+  }
+  if (Object.keys(keys).length === 0) return undefined;
+  const latestRaw = source.latestVersion ?? source.latest_version;
+  const latestVersion =
+    typeof latestRaw === "string" && latestRaw
+      ? latestRaw
+      : typeof latestRaw === "number" && Number.isFinite(latestRaw)
+        ? String(latestRaw)
+        : null;
+  return { keys, latestVersion };
 }
 
 export function exportIdentity(chat: XdkLike): string {

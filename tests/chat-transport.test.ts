@@ -4,7 +4,14 @@ import { parseChatConversationIds } from "../src/chat/ids.js";
 import { chatEventToDm } from "../src/chat/normalize.js";
 import { ChatPoller } from "../src/chat/poller.js";
 import { ChatService } from "../src/chat/service.js";
-import type { ChatCipher, DecryptedEvent, LoadedChatIdentity, PublicKeyMaterial } from "../src/chat/cipher.js";
+import type {
+  ChatCipher,
+  ChatMediaAttachment,
+  DecryptedEvent,
+  EncryptMessageOptions,
+  LoadedChatIdentity,
+  PublicKeyMaterial,
+} from "../src/chat/cipher.js";
 import type { ChatHttp, RawChatEventsPage } from "../src/chat/http.js";
 import {
   memberIdsFromConversation,
@@ -47,6 +54,7 @@ class FakeCipher implements ChatCipher {
   readonly batches: string[][] = [];
   readonly wrapped: PublicKeyMaterial[] = [];
   readonly events = new Map<string, DecryptedEvent>();
+  conversationKeys: { keys: Record<string, Uint8Array>; latestVersion: string | null } | undefined;
   identity: LoadedChatIdentity | undefined;
   signingKeySets = 0;
 
@@ -75,16 +83,20 @@ class FakeCipher implements ChatCipher {
       if (event) messages.push({ event, originalB64: b64 });
       else errors[b64] = "Conversation key version 1790176607769 is not in available versions";
     }
-    return { messages, errors };
+    return { messages, errors, conversationKeys: this.conversationKeys };
   }
 
-  encryptMessage(_conversationId: string, text: string) {
+  encryptMessage(_conversationId: string, text: string, _options?: EncryptMessageOptions) {
     this.texts.push(text);
     return {
       messageId: `mid-${this.texts.length}`,
       encryptedContent: `enc:${text}`,
       encodedEventSignature: "sig",
     };
+  }
+
+  encryptStream(plaintext: Uint8Array, _conversationKey: Uint8Array) {
+    return plaintext;
   }
 
   prepareMessageDelete(_conversationId: string, sequenceIds: string[]) {
@@ -182,6 +194,10 @@ class FakeHttp implements ChatHttp {
 
   async addUserPublicKey(): Promise<{ version?: string }> {
     return { version: "1" };
+  }
+
+  async uploadChatMedia(_conversationId: string, ciphertext: Uint8Array) {
+    return `media-hash-${ciphertext.byteLength}`;
   }
 }
 
@@ -586,5 +602,119 @@ describe("Chat transport into the moderation engine", () => {
     ]);
     expect(cipher.wrapped.some((key) => key.keyVersion === "1790182715573")).toBe(false);
     expect(http.postedKeys).toHaveLength(1);
+  });
+});
+
+describe("ChatService.sendImage", () => {
+  function page(encoded: string): RawChatEventsPage {
+    return { data: [{ id: encoded, encoded_event: encoded, sender_id: "alice-1" }] };
+  }
+
+  it("encrypts bytes, uploads chat media, and omits media_type on the inline attachment", async () => {
+    const cipher = new FakeCipher();
+    const key = new Uint8Array(32).fill(7);
+    cipher.events.set("blob-99", { type: "message", id: "e1", content: { text: "hi" } });
+    cipher.conversationKeys = { keys: { "99": key }, latestVersion: "99" };
+    const http = new FakeHttp();
+    http.pages.push(page("blob-99"));
+    const uploads: Uint8Array[] = [];
+    http.uploadChatMedia = async (_id, ciphertext) => {
+      uploads.push(Uint8Array.from(ciphertext));
+      return "hash-inline";
+    };
+    const encrypted: { conversationId: string; text: string; options?: EncryptMessageOptions }[] = [];
+    const streamed: Uint8Array[] = [];
+    cipher.encryptStream = (plaintext, conversationKey) => {
+      streamed.push(Uint8Array.from(conversationKey));
+      return plaintext;
+    };
+    cipher.encryptMessage = (conversationId, text, options) => {
+      encrypted.push({ conversationId, text, options });
+      return {
+        messageId: "mid-img",
+        encryptedContent: "enc:18+",
+        encodedEventSignature: "sig",
+      };
+    };
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    await service.listHistory({ conversationId: "g1" });
+
+    const bytes = Uint8Array.from([1, 2, 3, 4]);
+    const result = await service.sendImage("g1", {
+      url: "https://cdn.example/a.jpg",
+      bytes,
+      mimeType: "image/png",
+    });
+    store.close();
+
+    expect(uploads).toHaveLength(1);
+    expect(Array.from(uploads[0]!)).toEqual(Array.from(bytes));
+    expect(Array.from(streamed[0]!)).toEqual(Array.from(key));
+    expect(encrypted).toHaveLength(1);
+    expect(encrypted[0]).toMatchObject({ conversationId: "g1", text: "18+" });
+    const attachment = encrypted[0]?.options?.attachments?.[0] as ChatMediaAttachment;
+    expect(attachment.mediaHashKey).toBe("hash-inline");
+    expect(attachment.filename).toBe("image.png");
+    expect(attachment.filesizeBytes).toBe(4);
+    expect(attachment.width).toBe(1024);
+    expect(attachment.height).toBe(1024);
+    expect(attachment.mediaType).toBeUndefined();
+    expect(encrypted[0]?.options?.conversationKeyVersion).toBe("99");
+    expect(http.sends).toHaveLength(1);
+    expect(http.sends[0]?.encoded_message_create_event).toBe("enc:18+");
+    expect(result).toEqual({ dmEventId: "mid-img", dmConversationId: "g1" });
+    expect(JSON.stringify(encrypted[0]?.options?.attachments)).not.toContain("media_type");
+    expect(JSON.stringify(encrypted[0]?.options?.attachments)).not.toContain("mediaType");
+  });
+
+  it("does not replace a newer conversation key with an older decrypt", async () => {
+    const cipher = new FakeCipher();
+    cipher.events.set("new", { type: "message", id: "new" });
+    cipher.events.set("old", { type: "message", id: "old" });
+    const older = new Uint8Array(32).fill(1);
+    const newer = new Uint8Array(32).fill(2);
+    const http = new FakeHttp();
+    http.pages.push(page("new"), page("old"));
+    const versions: string[] = [];
+    cipher.encryptMessage = (_conversationId, _text, options) => {
+      versions.push(options?.conversationKeyVersion ?? "");
+      return { messageId: "m", encryptedContent: "e", encodedEventSignature: "s" };
+    };
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    cipher.conversationKeys = { keys: { "2": newer }, latestVersion: "2" };
+    await service.listHistory({ conversationId: "g1" });
+    cipher.conversationKeys = { keys: { "1": older }, latestVersion: "1" };
+    await service.listHistory({ conversationId: "g1" });
+    await service.sendImage("g1", {
+      url: "https://cdn.example/a.jpg",
+      bytes: Uint8Array.from([9]),
+      mimeType: "image/jpeg",
+    });
+    store.close();
+    expect(versions).toEqual(["2"]);
+  });
+
+  it("throws before upload when no conversation key is cached", async () => {
+    const cipher = new FakeCipher();
+    const http = new FakeHttp();
+    let uploads = 0;
+    http.uploadChatMedia = async () => {
+      uploads += 1;
+      return "should-not-upload";
+    };
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    await expect(
+      service.sendImage("g1", {
+        url: "https://cdn.example/a.jpg",
+        bytes: Uint8Array.from([1]),
+        mimeType: "image/jpeg",
+      }),
+    ).rejects.toThrow(/conversation key/);
+    store.close();
+    expect(uploads).toBe(0);
+    expect(http.sends).toHaveLength(0);
   });
 });

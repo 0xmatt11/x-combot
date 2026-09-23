@@ -87,6 +87,10 @@ class FakeCipher implements ChatCipher {
     };
   }
 
+  encryptStream(plaintext: Uint8Array, _conversationKey: Uint8Array) {
+    return plaintext;
+  }
+
   prepareMessageDelete() {
     return {
       messageId: "del",
@@ -130,6 +134,10 @@ class FakeHttp implements ChatHttp {
   async addConversationKeys(): Promise<void> {}
   async addUserPublicKey() {
     return { version: "1" };
+  }
+
+  async uploadChatMedia(_conversationId: string, ciphertext: Uint8Array) {
+    return `media-hash-${ciphertext.byteLength}`;
   }
 }
 

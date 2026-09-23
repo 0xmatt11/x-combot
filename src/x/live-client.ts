@@ -354,6 +354,55 @@ export class LiveXClient implements XClient {
     return { version: payload.data?.public_key_version };
   }
 
+  /**
+   * Encrypted Chat media upload for an inline photo.
+   * `ciphertext` must already be `encryptStream`'d with the conversation key.
+   * `POST /2/chat/media/upload/initialize|/{id}/append|/{id}/finalize`.
+   * Requires `media.write`. Returns `media_hash_key` for encryptMessage.
+   * This is not classic DM `dm_image` (`POST /2/media/upload`).
+   */
+  async uploadChatMedia(conversationId: string, ciphertext: Uint8Array): Promise<string> {
+    if (ciphertext.byteLength === 0) {
+      throw new Error("Chat media upload received empty ciphertext.");
+    }
+    const conversation = chatMediaConversationId(conversationId);
+    const initialized = await this.request<{
+      data?: { session_id?: string; media_hash_key?: string };
+    }>("/2/chat/media/upload/initialize", {
+      method: "POST",
+      json: { conversation_id: conversation, total_bytes: ciphertext.byteLength },
+    });
+    const sessionId = initialized.data?.session_id;
+    const mediaHashKey = initialized.data?.media_hash_key;
+    if (!sessionId || !mediaHashKey) {
+      throw new Error("Chat media initialize returned no session_id/media_hash_key.");
+    }
+    const chunkSize = 3 * 1024 * 1024;
+    let parts = 0;
+    for (let offset = 0, segment = 0; offset < ciphertext.byteLength; offset += chunkSize, segment += 1) {
+      const piece = ciphertext.subarray(offset, offset + chunkSize);
+      await this.request(`/2/chat/media/upload/${encodeURIComponent(sessionId)}/append`, {
+        method: "POST",
+        json: {
+          conversation_id: conversation,
+          media_hash_key: mediaHashKey,
+          segment_index: segment,
+          media: Buffer.from(piece).toString("base64"),
+        },
+      });
+      parts += 1;
+    }
+    await this.request(`/2/chat/media/upload/${encodeURIComponent(sessionId)}/finalize`, {
+      method: "POST",
+      json: {
+        conversation_id: conversation,
+        media_hash_key: mediaHashKey,
+        num_parts: String(Math.max(parts, 1)),
+      },
+    });
+    return mediaHashKey;
+  }
+
   async sendChatMessage(
     conversationId: string,
     body: Record<string, string>,
@@ -643,6 +692,15 @@ export function loadTokensFromDisk(tokenPath: string): TokenSet | undefined {
     expiresAtMs: raw.expires_at_ms,
     botUserId: raw.bot_user_id,
   };
+}
+
+/**
+ * Media upload wants the canonical conversation id.
+ * Group ids stay `g…`. 1:1 ids stored with `-` are sent with `:`.
+ */
+export function chatMediaConversationId(conversationId: string): string {
+  if (conversationId.startsWith("g")) return conversationId;
+  return conversationId.replaceAll("-", ":");
 }
 
 export function dmMediaSpec(mime: string | undefined): {
