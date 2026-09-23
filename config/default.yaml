@@ -16,8 +16,8 @@ help: |
   Public commands:
     !help — this message
     !rules — group rules
-    !boobs — random adult (18+) chest close-up (off unless enabled)
-    !ass / !booty — random adult (18+) butt close-up (same switch as !boobs)
+    !boobs — random chest / cleavage photo (off unless enabled)
+    !ass / !booty — random butt photo (same switch as !boobs)
     !ask <question> — ask the LLM (or @botname …)
     !summarize [focus] — summarize the group thread (loads history)
     !analyze [prompt] — answer about the whole conversation
@@ -88,13 +88,16 @@ delete:
 # Adult images (`!boobs`, and `!ass` / `!booty`). Off by default so a moderation
 # deploy does not post NSFW. One switch covers all three: enabled: true or
 # BOOBS_ENABLED=true (env wins). Search defaults to DuckDuckGo with no API key
-# (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails,
+# (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are off-topic,
 # keyless Bing HTML (adlt=off) runs next, then Reddit. Neither needs an API key.
 # The command ignores extra text so members cannot change the search. See the README.
 # Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
 # count is enforced only when rate_limit_window_ms is also positive.
+# vision: optional download + LLM check (chest/butt subject, no genitalia).
+# Off by default. BOOBS_VISION=true overrides this. Needs the configured LLM.
 boobs:
   enabled: false
+  vision: false
   rate_limit_per_user: 0
   rate_limit_per_conversation: 0
   rate_limit_window_ms: 0

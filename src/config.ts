@@ -16,6 +16,7 @@ import type {
 
 export const DEFAULT_BOOBS_CONFIG: BoobsConfig = {
   enabled: false,
+  vision: false,
   rate_limit_per_user: 0,
   rate_limit_per_conversation: 0,
   rate_limit_window_ms: 0,
@@ -101,6 +102,7 @@ export function resolveConversationConfig(
     llmWakePrefixes: llm.wake_prefixes,
     llmSystemPrompt: llm.system_prompt,
     boobsEnabled: boobs.enabled,
+    boobsVision: boobs.vision === true,
     boobsRateLimitPerUser: boobs.rate_limit_per_user,
     boobsRateLimitPerConversation: boobs.rate_limit_per_conversation,
     boobsRateLimitWindowMs: boobs.rate_limit_window_ms,
@@ -128,6 +130,7 @@ export function normalizeBoobsConfig(raw: Partial<BoobsConfig> | undefined): Boo
     DEFAULT_BOOBS_CONFIG.rate_limit_window_ms,
   );
   merged.enabled = Boolean(merged.enabled);
+  merged.vision = Boolean(merged.vision);
   return merged;
 }
 

@@ -4,6 +4,7 @@ import { log } from "./log.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
 import { createImageSearch } from "./bot/image-search.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
@@ -53,8 +54,12 @@ async function main(): Promise<void> {
   const me = await client.getMe();
   log.info(`Authenticated as @${me.username ?? "unknown"} (${me.id})`);
 
-  if (env.boobsEnabled !== undefined) {
-    defaults.boobs = normalizeBoobsConfig({ ...defaults.boobs, enabled: env.boobsEnabled });
+  if (env.boobsEnabled !== undefined || env.boobsVision !== undefined) {
+    defaults.boobs = normalizeBoobsConfig({
+      ...defaults.boobs,
+      ...(env.boobsEnabled !== undefined ? { enabled: env.boobsEnabled } : {}),
+      ...(env.boobsVision !== undefined ? { vision: env.boobsVision } : {}),
+    });
   }
   const provider = env.boobsSearchProvider ?? "duckduckgo";
   if (defaults.boobs?.enabled) {
@@ -65,12 +70,17 @@ async function main(): Promise<void> {
       );
     } else {
       log.info(
-        `Adult image commands enabled (!boobs, !ass, !booty, provider=${provider}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
+        `Adult image commands enabled (!boobs, !ass, !booty, provider=${provider}, vision=${defaults.boobs.vision === true ? "on" : "off"}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
       );
     }
   }
 
   const llmClient = buildLlmClient(env, defaults);
+  if (defaults.boobs?.vision === true && !llmClient?.completeVision) {
+    log.warn(
+      "BOOBS_VISION is on but no vision-capable LLM is configured. !boobs, !ass, and !booty will ask the user to retry until one is set.",
+    );
+  }
   const botUserId = env.botUserId ?? me.id;
   const chatService = await openChatService(env, client, store, botUserId);
   const xClient: XClient = chatService ? new RoutedXClient(client, chatService) : client;
@@ -92,6 +102,11 @@ async function main(): Promise<void> {
         apiKey: env.boobsSearchApiKey,
       }),
       fetchImage: fetchAdultImage,
+      adultVision: llmClient?.completeVision
+        ? createAdultVisionJudge({
+            completeVision: (prompt, image) => llmClient.completeVision!(prompt, image),
+          })
+        : undefined,
     },
   );
 

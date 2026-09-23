@@ -98,6 +98,8 @@ export interface Env {
   activityWebhookUrl?: string;
   /** Overrides `boobs.enabled` in YAML when set. */
   boobsEnabled?: boolean;
+  /** Overrides `boobs.vision` in YAML when set. Default off. */
+  boobsVision?: boolean;
   /** `duckduckgo` (default, no key; aliases `ddg` / `ddgs`), `reddit`, `serpapi`, or `bing`. */
   boobsSearchProvider?: "duckduckgo" | "reddit" | "serpapi" | "bing";
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
@@ -145,6 +147,7 @@ export function loadEnv(requireOwner = true): Env {
     activityWebhookPath: optional("ACTIVITY_WEBHOOK_PATH"),
     activityWebhookUrl: optional("ACTIVITY_WEBHOOK_URL"),
     boobsEnabled: optionalBool("BOOBS_ENABLED"),
+    boobsVision: optionalBool("BOOBS_VISION"),
     boobsSearchProvider: optionalBoobsProvider("BOOBS_SEARCH_PROVIDER"),
     boobsSearchApiKey: optional("BOOBS_SEARCH_API_KEY"),
   };
