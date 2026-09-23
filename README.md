@@ -69,7 +69,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 - **Activity is the realtime path.** `chat.received` (X Activity API) wakes the bot on new Chat messages. The Chat poller keeps running as a slower catch-up when Activity is enabled. Sends, public-key reads, key rotation, and that fallback poll can still return 429/402.
 - **Group DMs ≠ Communities ≠ encrypted Chat.** Communities are unused. Chat is a separate encrypted inbox; see above.
 - **Admin notify DMs are classic 1:1.** `!kick` and filter alerts still use `POST /2/dm_conversations/with/:id/messages`. That message may not appear inside the encrypted Chat inbox.
-- **Chat reactions and edits are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer. `!boobs` in an encrypted group sends an **inline Chat photo** (`encryptStream` + `/2/chat/media/upload`), not a URL and not a file/document attachment.
+- **Chat edits are not moderated, and reactions are not filtered or deleted.** Decrypted text messages and group member add/remove events still feed the command layer. A Chat reaction-add is only used for XP (see [XP and levels](#xp-and-levels)). Classic group DMs do not deliver reaction events. `!boobs` in an encrypted group sends an **inline Chat photo** (`encryptStream` + `/2/chat/media/upload`), not a URL and not a file/document attachment.
 - **Paid API access.** DM read/write is not available on a typical free app-only key. You need a developer account, a Project/App with OAuth 2.0 user auth, and a plan that includes DM endpoints. Activity subscriptions for `chat.*` use the same user token and the existing `dm.read` scope.
 
 ## Features
@@ -85,6 +85,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
 10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
 11. **Adult image** — `!boobs` posts one random chest / cleavage photo. `!ass` and `!booty` post one random butt photo and share that switch. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed. An optional vision check (`BOOBS_VISION`) is off by default.
+12. **XP / levels** — messages (and Chat reactions, when those events arrive) earn XP on a ComBot-like curve. Crossing a level posts `@handle leveled up to level N!`. Reply `+` or `-` to give or take one level. `!xp` / `!level` / `!rank` and `!top`. On by default. See [XP and levels](#xp-and-levels).
 
 ## Commands
 
@@ -94,6 +95,9 @@ Public:
 - `!rules`
 - `!boobs` — one random chest / cleavage photo. Disabled until `BOOBS_ENABLED=true` or `boobs.enabled` in YAML. No extra arguments.
 - `!ass` / `!booty` — one random butt photo. Same enable flag, rate limit, and media attach as `!boobs`. No extra arguments. The image has no caption.
+- `!xp` — your level, XP, and rank in this conversation. `!level` and `!rank` are the same command. `!xp @user` looks up someone else. `/xp` works too.
+- `!top` — leaderboard by XP (`!toplvl` and `!leaderboard` are aliases). Default 10 rows.
+- Reply `+` or `-` — give or take one level from the person you replied to. Not yourself. Any member. Does nothing if the message is not a reply.
 - `!ask <question>` — LLM reply (also `@botname …` or configured wake prefixes)
 - `!summarize [focus]` — load conversation history and summarize
 - `!analyze [prompt]` — load conversation history and answer about the thread
@@ -110,7 +114,7 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 - `!del [event_id]` — classic DMs: own events only (`DELETE /2/dm_events/:event_id`); Chat: `delete_for_all` for own messages, or others' when this account is a group admin
 - `!note` / `!note key` / `!note key text`
 - `!get key`
-- `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`
+- `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`, `xp_enabled` (`on`|`off`)
 - `!settings`
 - `!admin add|remove @user` — a reply with no @user targets that sender
 - `!admins`
@@ -128,6 +132,68 @@ Precedence:
 Encrypted X Chat carries that sender on the decrypted message (`replying_to_preview.senderId`, or `replyingToPreview`). It is used only when chat-xdk sets `replyPreviewValidation` to `valid` (the preview matched the embedded signed original). An `invalid` or missing verdict is ignored, so a forged preview cannot redirect a warn or kick. Classic `GET /2/dm_events` has no reply-to sender. `referenced_tweets` is a post linked in the text, not the author of a DM, so reply-to-target applies in encrypted Chat groups.
 
 Replying to your own message targets you. That matches `!warn` with your own @name, which was already allowed.
+
+## XP and levels
+
+On by default for every group the bot moderates (classic group DMs and encrypted Chat). `XP_ENABLED=false` forces it off even when `xp.enabled` is true. An admin can turn one group off with `!set xp_enabled off` without changing the YAML. Stats are per conversation and per user in SQLite (`user_xp`).
+
+The bot's own messages never earn XP. Messages that start with `!` or `/` do not earn passive XP, so mod commands and `!ask` do not farm. A message that is only `+` or `-` does not earn passive XP either.
+
+### Curve
+
+Levels use the default ComBot thresholds (cumulative XP required to *reach* that level):
+
+| Level | XP to reach it |
+| --- | --- |
+| 0 | 0 |
+| 1 | 100 |
+| 2 | 235 |
+| 3 | 505 |
+| 4 | 810 |
+| 5 | 1250 |
+| 6 | 1725 |
+
+Level 0 is the floor. The recurrence after level 1 is `f(n) = 2*f(n-1) - f(n-2) + 35` when `n` is even, and `+ 135` when `n` is odd. The cap is level 200.
+
+Passive awards are a **fixed** amount, not ComBot's random 1–12, so tests and config stay predictable. Defaults: **10 XP** per message, **5 XP** per reaction. Each user has a separate cooldown for messages and for reactions (`xp.cooldown_ms`, default 60 seconds). `0` disables that cooldown. Spam inside the window does not add XP and does not post anything.
+
+When passive XP crosses one or more level boundaries, the bot posts **one** line in the same conversation with the level they landed on, using the same `@handle` form as other bot messages:
+
+`@handle leveled up to level N!`
+
+### Reactions
+
+chat-xdk decrypts a reaction as a message whose `contentType` is `reaction` (add) or `reactionRemoved`. Adds become a `ReactionAdd` event and award `xp_per_reaction` to the person who reacted, on that action's cooldown. Removals are ignored (toggling a reaction does not refund or add XP). Edits are ignored.
+
+Classic `GET /2/dm_events` does not include reactions, so reaction XP stays quiet there. Set `xp.reactions_enabled: false` to ignore reaction events even on Chat.
+
+### Reply `+` / `-`
+
+This follows ComBot's reply gesture, but it changes **level**, not a separate reputation score. Any member may do it (the same idea as ComBot karma, and this bot does not restrict similar public actions to admins). It does not apply without a reply target, and you cannot `+` or `-` yourself.
+
+- `+` sets the target's XP to the threshold of their current level + 1 (one level, even if they were partway through).
+- `-` sets XP to the threshold of the previous level. Level 0 stays at 0 XP. The bot says they are already level 0.
+- Level 200 is the cap. A further `+` says they are already at that level.
+- One announcement: `@giver gave @target a level! (now level N)` or `@giver removed a level from @target (now level N)`.
+
+The same giver can change the same target only once per `xp.level_grant_cooldown_ms` (default 1 hour, ComBot's reputation cooldown). A no-op (already 0, already max, or yourself) does not start that timer. `0` turns the timer off. `xp.level_grant_enabled: false` leaves `+` / `-` as ordinary messages (still no passive XP).
+
+**Who the reply points at.** Encrypted Chat puts a reply preview on the decrypted message (`replyingToPreview`: sender, sequence id, message id). chat-xdk sets `replyPreviewValidation` to `valid` when it checked the embedded original. This bot trusts that sender only when validation is `valid`. Otherwise it uses the sender it already stored for that sequence id or message id (messages it has processed in this conversation). An unverified preview cannot name a victim the bot has not seen. Classic group DM events have no reply field, so `+` / `-` there only works when an event already carries `replyTo` — the public DM payload this bot reads does not.
+
+### Commands and knobs
+
+| YAML (`xp:`) | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Master switch. `XP_ENABLED` overrides it. `!set xp_enabled off` overrides it per group. |
+| `xp_per_message` | `10` | Passive XP for a normal message. `0` awards none. |
+| `xp_per_reaction` | `5` | Passive XP for a reaction-add. `0` awards none. |
+| `cooldown_ms` | `60000` | Per-user gap for messages, and the same gap again for reactions. |
+| `reactions_enabled` | `true` | Honor reaction-add events when they show up. |
+| `level_grant_enabled` | `true` | Honor reply `+` / `-`. |
+| `level_grant_cooldown_ms` | `3600000` | Per giver→target gap after a level actually changes. |
+| `leaderboard_size` | `10` | Rows in `!top` (clamped to 1–25). |
+
+`!xp` with no XP yet reports level 0, 0 XP, unranked, and the next threshold (100). `!top` skips members at 0 XP.
 
 ## Adult image command
 

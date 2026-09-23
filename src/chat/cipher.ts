@@ -31,7 +31,10 @@ export interface DecryptedEvent {
     /** WASM decrypt uses snake_case for this discriminator. */
     content_type?: string;
     text?: string;
-    /** chat-xdk types this as `unknown`. Shape is read in `trustedReplySenderId`. */
+    emoji?: string;
+    targetMessageId?: string;
+    target_message_id?: string;
+    /** chat-xdk types this as `unknown`. Shape is read in normalize.ts. */
     replyingToPreview?: unknown;
     /** WASM decrypt uses snake_case for the preview object. */
     replying_to_preview?: unknown;

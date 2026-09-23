@@ -1,4 +1,4 @@
-import { loadDefaults, normalizeBoobsConfig } from "./config.js";
+import { loadDefaults, normalizeBoobsConfig, normalizeXpConfig } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
@@ -60,6 +60,9 @@ async function main(): Promise<void> {
       ...(env.boobsEnabled !== undefined ? { enabled: env.boobsEnabled } : {}),
       ...(env.boobsVision !== undefined ? { vision: env.boobsVision } : {}),
     });
+  }
+  if (env.xpEnabled !== undefined) {
+    defaults.xp = normalizeXpConfig({ ...defaults.xp, enabled: env.xpEnabled });
   }
   const provider = env.boobsSearchProvider ?? "duckduckgo";
   if (defaults.boobs?.enabled) {

@@ -1,4 +1,4 @@
-import type { DmEvent, Mention } from "../types.js";
+import type { DmEvent, Mention, ReplyTarget } from "../types.js";
 import type { DecryptedEvent } from "./cipher.js";
 import type { RawChatEvent } from "./http.js";
 
@@ -6,8 +6,10 @@ const MENTION_RE = /@([A-Za-z0-9_]{1,15})/g;
 
 /**
  * Map one raw Chat event plus its decrypted payload into the DM event shape
- * the moderation engine already understands. Key changes, reactions, and
- * typing indicators are not commands and return undefined.
+ * the moderation engine already understands. Key changes, edits, reaction
+ * removals, and typing indicators are not commands and return undefined.
+ * Reaction adds become `ReactionAdd` so passive XP can see them. Text
+ * messages keep a reply preview when chat-xdk decrypted one.
  */
 export function chatEventToDm(
   conversationId: string,
@@ -26,9 +28,27 @@ export function chatEventToDm(
   const senderId = raw.sender_id || nonempty(decrypted.senderId);
 
   if (decrypted.type === "message") {
+    const reaction = readReaction(decrypted);
+    if (reaction) {
+      if (reaction.removed) return undefined;
+      return {
+        id,
+        eventType: "ReactionAdd",
+        conversationId: raw.conversation_id || conversationId,
+        createdAt,
+        senderId,
+        participantIds: [],
+        participants: [],
+        text: reaction.emoji,
+        mentions: [],
+        sequenceId,
+        reactionTargetSequenceId: reaction.targetId,
+      };
+    }
     const text = messageText(decrypted);
     if (text === undefined) return undefined;
     const replyToSenderId = trustedReplySenderId(decrypted);
+    const replyTo = readReply(decrypted);
     return {
       id,
       eventType: "MessageCreate",
@@ -41,6 +61,7 @@ export function chatEventToDm(
       mentions: mentionsIn(text),
       sequenceId,
       ...(replyToSenderId ? { replyToSenderId } : {}),
+      ...(replyTo ? { replyTo } : {}),
     };
   }
 
@@ -98,6 +119,56 @@ export function trustedReplySenderId(event: DecryptedEvent): string | undefined 
   const preview = readRecord(content, "replyingToPreview", "replying_to_preview");
   if (!preview) return undefined;
   return readString(preview, "senderId", "sender_id");
+}
+
+function readReaction(
+  event: DecryptedEvent,
+): { removed: boolean; targetId?: string; emoji?: string } | undefined {
+  const content = event.content;
+  if (!content) return undefined;
+  const kind = `${content.contentType ?? content.content_type ?? ""}`;
+  if (kind !== "reaction" && kind !== "reactionRemoved" && kind !== "reaction_removed") {
+    return undefined;
+  }
+  const targetId = readString(content, "targetMessageId", "target_message_id");
+  const emoji = typeof content.emoji === "string" ? content.emoji : undefined;
+  return { removed: kind !== "reaction", targetId, emoji };
+}
+
+/**
+ * Reply target for `+` / `-`. The sender string is trusted only when
+ * `verified` is true (same rule as `trustedReplySenderId`). Sequence and
+ * message ids are kept either way so a message this process already saw
+ * can still be resolved.
+ */
+function readReply(event: DecryptedEvent): ReplyTarget | undefined {
+  const content = event.content;
+  if (!content) return undefined;
+  const preview = readRecord(content, "replyingToPreview", "replying_to_preview");
+  if (!preview) return undefined;
+  const senderId = readString(preview, "senderId", "sender_id");
+  const sequenceId = readString(
+    preview,
+    "replyingToMessageSequenceId",
+    "replying_to_message_sequence_id",
+    "sequenceId",
+    "sequence_id",
+  );
+  const eventId = readString(
+    preview,
+    "replyingToMessageId",
+    "replying_to_message_id",
+    "messageId",
+    "message_id",
+  );
+  if (!senderId && !sequenceId && !eventId) return undefined;
+  const validation = readString(event, "replyPreviewValidation", "reply_preview_validation");
+  return {
+    senderId,
+    sequenceId,
+    eventId,
+    verified: validation?.toLowerCase() === "valid",
+  };
 }
 
 function readString(value: object, ...keys: string[]): string | undefined {

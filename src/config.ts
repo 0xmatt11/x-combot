@@ -12,7 +12,19 @@ import type {
   LlmContextMode,
   ResolvedConversationConfig,
   TruncateStrategy,
+  XpConfig,
 } from "./types.js";
+
+export const DEFAULT_XP_CONFIG: XpConfig = {
+  enabled: true,
+  xp_per_message: 10,
+  xp_per_reaction: 5,
+  cooldown_ms: 60_000,
+  reactions_enabled: true,
+  level_grant_enabled: true,
+  level_grant_cooldown_ms: 3_600_000,
+  leaderboard_size: 10,
+};
 
 export const DEFAULT_BOOBS_CONFIG: BoobsConfig = {
   enabled: false,
@@ -62,6 +74,7 @@ export function loadDefaults(configPath: string): DefaultsConfig {
     ? parsed.llm.wake_prefixes
     : DEFAULT_LLM_CONFIG.wake_prefixes;
   parsed.boobs = normalizeBoobsConfig(parsed.boobs);
+  parsed.xp = normalizeXpConfig(parsed.xp);
   return parsed;
 }
 
@@ -71,6 +84,7 @@ export function resolveConversationConfig(
 ): ResolvedConversationConfig {
   const llm = { ...DEFAULT_LLM_CONFIG, ...defaults.llm };
   const boobs = normalizeBoobsConfig(defaults.boobs);
+  const xp = normalizeXpConfig(defaults.xp);
   return {
     welcomeEnabled: override?.welcome_enabled ?? defaults.welcome.enabled,
     welcomeText: override?.welcome_text ?? defaults.welcome.text,
@@ -106,13 +120,44 @@ export function resolveConversationConfig(
     boobsRateLimitPerUser: boobs.rate_limit_per_user,
     boobsRateLimitPerConversation: boobs.rate_limit_per_conversation,
     boobsRateLimitWindowMs: boobs.rate_limit_window_ms,
+    xpEnabled: override?.xp_enabled ?? xp.enabled,
+    xpPerMessage: xp.xp_per_message,
+    xpPerReaction: xp.xp_per_reaction,
+    xpCooldownMs: xp.cooldown_ms,
+    xpReactionsEnabled: xp.reactions_enabled,
+    xpLevelGrantEnabled: xp.level_grant_enabled,
+    xpLevelGrantCooldownMs: xp.level_grant_cooldown_ms,
+    xpLeaderboardSize: xp.leaderboard_size,
   };
+}
+
+/** `0` is a real value (no award, or no cooldown). Non-finite or negative values fall back. */
+function nonNegativeInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
 }
 
 /** `0` is unlimited. Non-finite or negative values fall back to unlimited. */
 function nonNegativeLimit(value: number, fallback: number): number {
   if (!Number.isFinite(value) || value < 0) return fallback;
   return value;
+}
+
+export function normalizeXpConfig(raw: Partial<XpConfig> | undefined): XpConfig {
+  const merged: XpConfig = { ...DEFAULT_XP_CONFIG, ...raw };
+  merged.enabled = Boolean(merged.enabled);
+  merged.reactions_enabled = merged.reactions_enabled !== false;
+  merged.level_grant_enabled = merged.level_grant_enabled !== false;
+  merged.xp_per_message = nonNegativeInt(merged.xp_per_message, DEFAULT_XP_CONFIG.xp_per_message);
+  merged.xp_per_reaction = nonNegativeInt(merged.xp_per_reaction, DEFAULT_XP_CONFIG.xp_per_reaction);
+  merged.cooldown_ms = nonNegativeInt(merged.cooldown_ms, DEFAULT_XP_CONFIG.cooldown_ms);
+  merged.level_grant_cooldown_ms = nonNegativeInt(
+    merged.level_grant_cooldown_ms,
+    DEFAULT_XP_CONFIG.level_grant_cooldown_ms,
+  );
+  const size = nonNegativeInt(merged.leaderboard_size, DEFAULT_XP_CONFIG.leaderboard_size);
+  merged.leaderboard_size = Math.min(25, Math.max(1, size));
+  return merged;
 }
 
 export function normalizeBoobsConfig(raw: Partial<BoobsConfig> | undefined): BoobsConfig {

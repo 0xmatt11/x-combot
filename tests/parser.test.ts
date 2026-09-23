@@ -110,6 +110,20 @@ describe("parseCommand", () => {
     expect(parseCommand("!booty please")).toEqual({ name: "booty", extra: "please" });
   });
 
+  it("parses xp, level, rank, and the leaderboard aliases", () => {
+    expect(parseCommand("!xp")).toEqual({ name: "xp" });
+    expect(parseCommand("/level")).toEqual({ name: "xp" });
+    expect(parseCommand("!RANK @bob")).toEqual({
+      name: "xp",
+      target: { raw: "@bob", username: "bob" },
+    });
+    expect(parseCommand("!top")).toEqual({ name: "top" });
+    expect(parseCommand("/toplvl")).toEqual({ name: "top" });
+    expect(parseCommand("!leaderboard")).toEqual({ name: "top" });
+    expect(parseUnknownBang("!xp")).toBeUndefined();
+    expect(parseUnknownBang("!top")).toBeUndefined();
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",

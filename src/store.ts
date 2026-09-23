@@ -105,6 +105,41 @@ CREATE TABLE IF NOT EXISTS chat_message_index (
 
 CREATE INDEX IF NOT EXISTS idx_chat_sequence
   ON chat_message_index (sequence_id);
+
+CREATE TABLE IF NOT EXISTS user_xp (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  xp INTEGER NOT NULL DEFAULT 0,
+  username TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_xp_rank
+  ON user_xp (conversation_id, xp DESC, user_id);
+
+CREATE TABLE IF NOT EXISTS xp_action_cooldown (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  last_ms INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, user_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS xp_level_grants (
+  conversation_id TEXT NOT NULL,
+  giver_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  last_ms INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, giver_id, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS message_authors (
+  conversation_id TEXT NOT NULL,
+  message_key TEXT NOT NULL,
+  sender_id TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, message_key)
+);
 `;
 
 export class Store {
@@ -476,5 +511,169 @@ export class Store {
       )
       .get(conversationId, since) as { count: number };
     return { userUses: userRow.count, conversationUses: convoRow.count };
+  }
+
+  rememberMessageAuthor(conversationId: string, messageKey: string, senderId: string): void {
+    if (!messageKey || !senderId) return;
+    this.db
+      .prepare(
+        `INSERT INTO message_authors (conversation_id, message_key, sender_id)
+         VALUES (?, ?, ?)
+         ON CONFLICT(conversation_id, message_key) DO UPDATE SET
+           sender_id = excluded.sender_id`,
+      )
+      .run(conversationId, messageKey, senderId);
+  }
+
+  lookupMessageAuthor(conversationId: string, messageKey: string): string | undefined {
+    if (!messageKey) return undefined;
+    const row = this.db
+      .prepare(
+        `SELECT sender_id FROM message_authors
+         WHERE conversation_id = ? AND message_key = ?`,
+      )
+      .get(conversationId, messageKey) as { sender_id: string } | undefined;
+    return row?.sender_id;
+  }
+
+  getUserXp(
+    conversationId: string,
+    userId: string,
+  ): { xp: number; username?: string } {
+    const row = this.db
+      .prepare(
+        `SELECT xp, username FROM user_xp
+         WHERE conversation_id = ? AND user_id = ?`,
+      )
+      .get(conversationId, userId) as
+      | { xp: number; username: string | null }
+      | undefined;
+    if (!row) return { xp: 0 };
+    return { xp: row.xp, username: row.username ?? undefined };
+  }
+
+  setUserXp(
+    conversationId: string,
+    userId: string,
+    xp: number,
+    username?: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO user_xp (conversation_id, user_id, xp, username, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+           xp = excluded.xp,
+           username = COALESCE(excluded.username, user_xp.username),
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        conversationId,
+        userId,
+        xp,
+        username ?? null,
+        new Date().toISOString(),
+      );
+  }
+
+  /**
+   * 1-based rank among members with XP > 0. Ties break by user id ascending.
+   * A member with no positive XP is unranked.
+   */
+  xpRank(conversationId: string, userId: string): number | undefined {
+    const self = this.getUserXp(conversationId, userId);
+    if (self.xp <= 0) return undefined;
+    const row = this.db
+      .prepare(
+        `SELECT 1 + COUNT(*) AS rank FROM user_xp
+         WHERE conversation_id = ?
+           AND xp > 0
+           AND (xp > ? OR (xp = ? AND user_id < ?))`,
+      )
+      .get(conversationId, self.xp, self.xp, userId) as { rank: number };
+    return row.rank;
+  }
+
+  listXpLeaders(
+    conversationId: string,
+    limit: number,
+  ): { userId: string; xp: number; username?: string }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT user_id, xp, username FROM user_xp
+         WHERE conversation_id = ? AND xp > 0
+         ORDER BY xp DESC, user_id ASC
+         LIMIT ?`,
+      )
+      .all(conversationId, limit) as {
+      user_id: string;
+      xp: number;
+      username: string | null;
+    }[];
+    return rows.map((row) => ({
+      userId: row.user_id,
+      xp: row.xp,
+      username: row.username ?? undefined,
+    }));
+  }
+
+  getXpActionAt(
+    conversationId: string,
+    userId: string,
+    kind: "message" | "reaction",
+  ): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT last_ms FROM xp_action_cooldown
+         WHERE conversation_id = ? AND user_id = ? AND kind = ?`,
+      )
+      .get(conversationId, userId, kind) as { last_ms: number } | undefined;
+    return row?.last_ms;
+  }
+
+  setXpActionAt(
+    conversationId: string,
+    userId: string,
+    kind: "message" | "reaction",
+    tsMs: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO xp_action_cooldown (conversation_id, user_id, kind, last_ms)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(conversation_id, user_id, kind) DO UPDATE SET
+           last_ms = excluded.last_ms`,
+      )
+      .run(conversationId, userId, kind, tsMs);
+  }
+
+  getLevelGrantAt(
+    conversationId: string,
+    giverId: string,
+    targetId: string,
+  ): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT last_ms FROM xp_level_grants
+         WHERE conversation_id = ? AND giver_id = ? AND target_id = ?`,
+      )
+      .get(conversationId, giverId, targetId) as { last_ms: number } | undefined;
+    return row?.last_ms;
+  }
+
+  setLevelGrantAt(
+    conversationId: string,
+    giverId: string,
+    targetId: string,
+    tsMs: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO xp_level_grants (conversation_id, giver_id, target_id, last_ms)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(conversation_id, giver_id, target_id) DO UPDATE SET
+           last_ms = excluded.last_ms`,
+      )
+      .run(conversationId, giverId, targetId, tsMs);
   }
 }

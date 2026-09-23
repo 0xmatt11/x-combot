@@ -18,6 +18,9 @@ help: |
     !rules — group rules
     !boobs — random chest / cleavage photo (off unless enabled)
     !ass / !booty — random butt photo (same switch as !boobs)
+    !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
+    !top — level leaderboard (!toplvl)
+    Reply + or - to a message — give or take one level (not your own)
     !ask <question> — ask the LLM (or @botname …)
     !summarize [focus] — summarize the group thread (loads history)
     !analyze [prompt] — answer about the whole conversation
@@ -85,6 +88,25 @@ delete:
   attempt_on_filter: true
   attempt_on_flood: true
   attempt_on_mute: true
+
+# ComBot-like XP and levels. On by default in moderated groups (same idea as
+# welcome). XP_ENABLED overrides `enabled` (env wins). Per group: !set xp_enabled off.
+# Curve is ComBot's published default thresholds (see README). Awards are fixed,
+# not random, and each user has a short cooldown so spam does not farm.
+# Reaction XP only fires when a reaction-add event is actually delivered
+# (encrypted X Chat). Classic group DMs do not send reaction events.
+# Reply + / - adds or removes one whole level (floor is level 0). Any member.
+# Not yourself. Same giver→target pair is cooled down (default 1 hour, like
+# ComBot reputation).
+xp:
+  enabled: true
+  xp_per_message: 10
+  xp_per_reaction: 5
+  cooldown_ms: 60000
+  reactions_enabled: true
+  level_grant_enabled: true
+  level_grant_cooldown_ms: 3600000
+  leaderboard_size: 10
 
 # Adult images (`!boobs`, and `!ass` / `!booty`). Off by default so a moderation
 # deploy does not post NSFW. One switch covers all three: enabled: true or

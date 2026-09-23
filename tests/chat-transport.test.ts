@@ -322,6 +322,12 @@ describe("Chat ids and wire shapes", () => {
     );
     expect(valid?.replyToSenderId).toBe("u-bob");
     expect(valid?.senderId).toBe("admin-1");
+    expect(valid?.replyTo).toEqual({
+      senderId: "u-bob",
+      sequenceId: undefined,
+      eventId: undefined,
+      verified: true,
+    });
 
     const wasmShape = chatEventToDm(
       GROUP,
@@ -337,6 +343,8 @@ describe("Chat ids and wire shapes", () => {
       },
     );
     expect(wasmShape?.replyToSenderId).toBe("u-carol");
+    expect(wasmShape?.replyTo?.verified).toBe(true);
+    expect(wasmShape?.replyTo?.senderId).toBe("u-carol");
 
     const forged = chatEventToDm(
       GROUP,
@@ -353,6 +361,8 @@ describe("Chat ids and wire shapes", () => {
     );
     expect(forged?.text).toBe("/warn");
     expect(forged?.replyToSenderId).toBeUndefined();
+    expect(forged?.replyTo?.verified).toBe(false);
+    expect(forged?.replyTo?.senderId).toBe("u-bob");
 
     const unsigned = chatEventToDm(
       GROUP,
@@ -367,6 +377,7 @@ describe("Chat ids and wire shapes", () => {
       },
     );
     expect(unsigned?.replyToSenderId).toBeUndefined();
+    expect(unsigned?.replyTo?.verified).toBe(false);
 
     const numeric = chatEventToDm(
       GROUP,
@@ -382,12 +393,93 @@ describe("Chat ids and wire shapes", () => {
       },
     );
     expect(numeric?.replyToSenderId).toBeUndefined();
+    expect(numeric?.replyTo).toBeUndefined();
+
+    const reply = chatEventToDm(
+      GROUP,
+      { id: "evt-plus", sender_id: "alice-1" },
+      {
+        type: "message",
+        sequenceId: "56",
+        replyPreviewValidation: "valid",
+        content: {
+          contentType: "text",
+          text: "+",
+          replyingToPreview: {
+            senderId: "bob-1",
+            replyingToMessageSequenceId: "55",
+            replyingToMessageId: "evt-9",
+          },
+        },
+      },
+    );
+    expect(reply?.replyToSenderId).toBe("bob-1");
+    expect(reply?.replyTo).toEqual({
+      senderId: "bob-1",
+      sequenceId: "55",
+      eventId: "evt-9",
+      verified: true,
+    });
+
+    const spoof = chatEventToDm(
+      GROUP,
+      { id: "evt-spoof" },
+      {
+        type: "message",
+        replyPreviewValidation: "invalid",
+        content: {
+          contentType: "text",
+          text: "+",
+          replying_to_preview: {
+            sender_id: "victim",
+            replying_to_message_sequence_id: "9",
+          },
+        },
+      },
+    );
+    expect(spoof?.replyToSenderId).toBeUndefined();
+    expect(spoof?.replyTo?.verified).toBe(false);
+    expect(spoof?.replyTo?.senderId).toBe("victim");
+    expect(spoof?.replyTo?.sequenceId).toBe("9");
+  });
+
+  it("maps a reaction add for XP and does not treat it as a command", () => {
+    const reaction = chatEventToDm(
+      GROUP,
+      { id: "evt-react", sender_id: "alice-1" },
+      {
+        type: "message",
+        sequenceId: "70",
+        content: {
+          contentType: "reaction",
+          emoji: "🔥",
+          targetMessageId: "55",
+        },
+      },
+    );
+    expect(reaction).toMatchObject({
+      eventType: "ReactionAdd",
+      senderId: "alice-1",
+      reactionTargetSequenceId: "55",
+      text: "🔥",
+    });
+
+    const disguised = chatEventToDm(GROUP, { id: "evt-react-cmd" }, {
+      type: "message",
+      content: { content_type: "reaction", text: "!warn" },
+    });
+    expect(disguised?.eventType).toBe("ReactionAdd");
+    expect(disguised?.text).toBeUndefined();
 
     expect(
-      chatEventToDm(GROUP, { id: "evt-react" }, {
-        type: "message",
-        content: { content_type: "reaction", text: "!warn" },
-      }),
+      chatEventToDm(
+        GROUP,
+        { id: "evt-unreact" },
+        {
+          type: "message",
+          content: { contentType: "reactionRemoved", targetMessageId: "55", emoji: "🔥" },
+        },
+      ),
     ).toBeUndefined();
   });
 });
