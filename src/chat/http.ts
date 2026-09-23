@@ -5,7 +5,11 @@ export interface RawChatEvent {
   sender_id?: string;
   conversation_id?: string;
   created_at?: string;
-  /** Milliseconds since epoch, as returned by `created_at_msec`. */
+  /**
+   * Optional millisecond timestamp from payloads that include one, such as
+   * Activity. The Chat events list returns `created_at` and rejects
+   * `created_at_msec` in `chat_message_event.fields`.
+   */
   created_at_msec?: string | number;
   encoded_event?: string;
   conversation_token?: string;

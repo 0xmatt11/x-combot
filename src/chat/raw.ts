@@ -1,8 +1,9 @@
 import type { RawChatEvent, RawChatEventsPage } from "./http.js";
 
 /**
- * Fill `id` and `created_at` from the aliases the Chat events API actually returns
- * (`sequence_id`, `created_at_msec`) so the watermark can move even when `id` is absent.
+ * Fill `id` from `sequence_id` when a payload omits `id`, and derive `created_at`
+ * from a millisecond timestamp when `created_at` is absent. The Chat events list
+ * returns `id` and `created_at`; it does not accept `created_at_msec`.
  */
 export function normalizeRawChatEvent(raw: RawChatEvent): RawChatEvent {
   const id = firstString(raw.id, raw.sequence_id);

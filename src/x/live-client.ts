@@ -15,6 +15,21 @@ import {
 const API_BASE = "https://api.x.com";
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 
+/**
+ * Fields accepted by `chat_message_event.fields` on
+ * GET /2/chat/conversations/:id/events. `created_at_msec` and `sequence_id`
+ * are not in that set and make the request return HTTP 400.
+ */
+export const CHAT_MESSAGE_EVENT_FIELDS = [
+  "id",
+  "sender_id",
+  "conversation_id",
+  "created_at",
+  "encoded_event",
+  "conversation_token",
+  "previous_id",
+].join(",");
+
 interface LiveClientOptions {
   clientId?: string;
   clientSecret?: string;
@@ -215,8 +230,7 @@ export class LiveXClient implements XClient {
   ): Promise<RawChatEventsPage> {
     const search: Record<string, string> = {
       max_results: String(params.maxResults ?? 50),
-      "chat_message_event.fields":
-        "id,sender_id,conversation_id,created_at,created_at_msec,encoded_event,conversation_token,sequence_id,previous_id",
+      "chat_message_event.fields": CHAT_MESSAGE_EVENT_FIELDS,
     };
     if (params.paginationToken) search.pagination_token = params.paginationToken;
     return this.request<RawChatEventsPage>(
