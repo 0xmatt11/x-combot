@@ -15,6 +15,25 @@ import {
 const API_BASE = "https://api.x.com";
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 
+/**
+ * `chat_message_event.fields` for GET /2/chat/conversations/:id/events.
+ * The API accepts only `id`, `conversation_id`, `conversation_token`,
+ * `created_at`, `encoded_event`, `is_trusted`, `previous_id`, `sender_id`,
+ * and `message_event_signature`. `created_at_msec` and `sequence_id` return
+ * HTTP 400; those values are read from the payload when present.
+ * `message_event_signature` and `is_trusted` are allowed but unused:
+ * decrypt consumes `encoded_event` only.
+ */
+export const CHAT_MESSAGE_EVENT_FIELDS = [
+  "id",
+  "sender_id",
+  "conversation_id",
+  "created_at",
+  "encoded_event",
+  "conversation_token",
+  "previous_id",
+].join(",");
+
 interface LiveClientOptions {
   clientId?: string;
   clientSecret?: string;
@@ -215,8 +234,7 @@ export class LiveXClient implements XClient {
   ): Promise<RawChatEventsPage> {
     const search: Record<string, string> = {
       max_results: String(params.maxResults ?? 50),
-      "chat_message_event.fields":
-        "id,sender_id,conversation_id,created_at,created_at_msec,encoded_event,conversation_token,sequence_id,previous_id",
+      "chat_message_event.fields": CHAT_MESSAGE_EVENT_FIELDS,
     };
     if (params.paginationToken) search.pagination_token = params.paginationToken;
     return this.request<RawChatEventsPage>(
