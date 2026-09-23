@@ -9,7 +9,7 @@ Telegram's ComBot can kick, ban, and delete anyone's messages because Telegram e
 Classic group DMs only need [sections 1–3](#1-x-developer-app). For an encrypted group (`g…`), in order:
 
 1. **OAuth as the bot account** — `npm run oauth` while logged into the dedicated bot, not the human owner. `BOT_USER_ID` is that OAuth'd account; `BOT_OWNER_ID` is the human owner and is always an admin. See [Install and authorize](#2-install-and-authorize-the-bot-account).
-2. **`npm run chat:register -- --confirm`** — once, as that same account.
+2. **Identity, once, as that same account.** `npm run chat:register -- --confirm` mints a new key. If this account already has an X Chat identity in Juicebox, do not mint a second one — set `CHAT_PIN` for a single start instead. That start writes `data/chat-keys.json`. Later starts load the file and do not need `CHAT_PIN`. See [section 4](#4-run-against-an-encrypted-x-chat-group).
 3. **`CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID`** — your group id (`g` plus digits).
 4. **`npm run chat:rotate -- gYOUR_GROUP_ID --confirm`** only if the bot joined before it registered. Rotate aborts when any current member has no public key; see [section 4](#4-run-against-an-encrypted-x-chat-group).
 5. **`npm start`**
@@ -49,7 +49,7 @@ These are different products. A URL like `https://x.com/i/chat/gYOUR_GROUP_ID` i
 | Delete | `DELETE /2/dm_events/{id}` (own events only) | `POST /2/chat/conversations/{id}/messages/delete` (signed; delete-for-all) |
 | Keys | none | `POST /2/users/{id}/public_keys`, conversation keys from `KeyChange` events |
 
-`GET /2/dm_events` never returns Chat messages. The bot only polls Chat for ids listed in `CHAT_CONVERSATION_IDS`. Crypto is [chat-xdk](https://github.com/xdevplatform/chat-xdk) (`@xdevplatform/chat-xdk`, the WASM engine shipped in that package). The public `createChat()` entrypoint does not expose `importKeys` / `exportKeys` (browser-safe). This process loads the WASM `Chat` class from the same package so a server can keep an identity blob on disk. Juicebox (`CHAT_PIN` + `juicebox-sdk`) is the other supported unlock path.
+`GET /2/dm_events` never returns Chat messages. The bot only polls Chat for ids listed in `CHAT_CONVERSATION_IDS`. Crypto is [chat-xdk](https://github.com/xdevplatform/chat-xdk) (`@xdevplatform/chat-xdk`, the WASM engine shipped in that package). The public `createChat()` wrapper does not expose `exportKeys` (browser-safe). After Juicebox `unlock()`, this process copies the bytes the wrapper imports into the WASM `Chat` class and calls that class's `exportKeys()`, then writes `data/chat-keys.json` (mode `0600`). The next start loads the file with `importKeys` and does not need `CHAT_PIN`.
 
 Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. Chat polling uses the same 429 / 402 backoff as the DM poller (see **Rate limits and credits** above).
 
@@ -166,13 +166,29 @@ On first poll the bot records a watermark and **does not replay 30 days of histo
 
 Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access` — Chat reads and writes use those user scopes, not an app-only bearer token.
 
-1. Register the bot's Chat identity once (rate-limited; a 429 stops instead of retrying):
+1. Give the process an identity once. Pick the path that matches the account.
+
+**The account already uses X Chat** (the phone or web client registered a public key, and Juicebox holds the private key). Do not mint a second key. Install the peer dependency and set the PIN for one process start:
+
+```bash
+npm install juicebox-sdk
+# CHAT_PIN=… in the environment for this start only. Do not commit it.
+npm start
+```
+
+A successful unlock writes `data/chat-keys.json` (mode `0600`) and logs the public key version only. Stop the process, unset `CHAT_PIN`, and start again. That start loads the file.
+
+**The account has never registered a Chat public key.** Register once (rate-limited; a 429 stops instead of retrying):
 
 ```bash
 npm run chat:register -- --confirm
 ```
 
-That calls `generateKeypairs()`, saves `data/chat-keys.json` (mode `0600`, gitignored), and `POST /2/users/{id}/public_keys`. The file holds unencrypted private key bytes. Do not commit it, log it, or paste it into chat. Re-running without `--force` reuses the file and skips the POST when that public key is already on the account.
+That calls `generateKeypairs()`, saves `data/chat-keys.json` (mode `0600`), and `POST /2/users/{id}/public_keys`. Re-running without `--force` reuses the file and skips the POST when that public key is already on the account.
+
+The key file holds unencrypted private key bytes. It is gitignored (`data/` and `chat-keys.json`). Do not commit it, log it, or paste it into chat. Logs never include `CHAT_PIN` or private key bytes.
+
+If both the key file and `CHAT_PIN` are set, a file whose public key matches one registered for this user wins. A file that matches no registered key is replaced by the Juicebox unlock. `CHAT_KEYS_PATH` moves the file (default `data/chat-keys.json`).
 
 2. Put **your** group id in `.env` (placeholder below — do not reuse someone else's id):
 
@@ -196,15 +212,15 @@ npm run chat:rotate -- gYOUR_GROUP_ID --confirm
 npm run chat:rotate -- gYOUR_GROUP_ID --confirm --force
 ```
 
-`--force` wraps the key this process holds. The newer browser key will not read messages under that conversation key. The safer alignment is to leave the file unused and set `CHAT_PIN` so this process unlocks the same Juicebox key the browser registered. A file wins when both the file and `CHAT_PIN` are set.
+`--force` wraps the key this process holds. The newer browser key will not read messages under that conversation key. The safer alignment is one `CHAT_PIN` unlock of the Juicebox key the browser registered. That writes `data/chat-keys.json` and replaces a file that matches no registered public key. A file that matches a registered public key wins when both the file and `CHAT_PIN` are set. Other members' registered versions are all passed in; chat-xdk wraps the newest of those.
 
 4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup. Later polls move that cursor only past events that decrypted. A message that fails to decrypt is retried, which matters when the failure is a KeyChange the process could not verify yet.
 
-Optional: `CHAT_PIN` unlocks a Juicebox-stored identity instead of the file, via `createChat().unlock()`. That needs `npm install juicebox-sdk`. A key file wins when both are set. `CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_KEYS_PATH` moves the identity file. `CHAT_POLL_IDLE_MAX_MS` caps how far a quiet Chat poll stretches (default 120s). `DM_POLL=true` also polls classic group DMs; leave it unset to skip `GET /2/dm_events` when Chat ids are configured.
+`CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_POLL_IDLE_MAX_MS` caps how far a quiet Chat poll stretches (default 120s). `DM_POLL=true` also polls classic group DMs; leave it unset to skip `GET /2/dm_events` when Chat ids are configured.
 
 YAML still defaults `poll.interval_ms` to **12000**. On a busy group that interval, together with classic DM polling, is what produces long 429 backoffs. The running bot should set `POLL_INTERVAL_MS=30000` and `CHAT_POLL_INTERVAL_MS=30000` until Activity push is on. With Activity enabled, the catch-up poll defaults to 5 minutes (`activity.poll_interval_ms`).
 
-Juicebox realm tokens come from `juicebox_config` on `GET /2/users/{id}/public_keys`. They are not written by this repo.
+Juicebox realm tokens come from `juicebox_config` on `GET /2/users/{id}/public_keys`. They are not written into the key file.
 
 #### Activity push for Chat
 
@@ -380,5 +396,5 @@ tests/
 - Delete of another participant's classic DM `MessageCreate` is not part of the documented v2 contract. Chat `delete_for_all` is a separate call and still requires a group admin (or the sender) plus a decrypted sequence id.
 - Communities, Spaces, and public posts are unrelated surfaces.
 - Encrypted Chat has no documented kick/remove-member call. Add-member (`POST /2/chat/conversations/{id}/members`) rotates the key; this bot does not call it from `!kick`.
-- The WASM binding's local key file is unencrypted identity material. The public JS API prefers Juicebox so raw keys never enter application JavaScript; this server uses the WASM `importKeys` / `exportKeys` methods that the official JS example uses for a headless bot.
+- The local key file is unencrypted identity material (`exportKeys` bytes). `createChat()` hides `exportKeys`; this server still calls it on the WASM `Chat` class after Juicebox unlock, which is how the wrapper itself moves key bytes. Do not log or commit that file. chat-xdk wraps one public key version per user (the newest in the list), so a rotation cannot wrap every historical key for the same user in one call.
 - Chat ciphertext in CI tests is the upstream `chat-xdk` fixture (`tests/fixtures/sdk_vectors.json`), not a live account.

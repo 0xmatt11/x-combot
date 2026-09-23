@@ -45,6 +45,81 @@ export function latestPublicKey(keys: RemotePublicKey[]): RemotePublicKey | unde
   return [...keys].sort((a, b) => versionRank(b.publicKeyVersion) - versionRank(a.publicKeyVersion))[0];
 }
 
+/**
+ * Newest registered key that carries a Juicebox config. The account's latest
+ * public key is not always the one Juicebox can recover (a later
+ * `generateKeypairs` registration may have no `juicebox_config`).
+ */
+export function publicKeyWithJuicebox(keys: RemotePublicKey[]): RemotePublicKey | undefined {
+  return [...keys]
+    .filter((key) => key.juiceboxConfig !== undefined && key.juiceboxConfig !== null)
+    .sort((a, b) => versionRank(b.publicKeyVersion) - versionRank(a.publicKeyVersion))[0];
+}
+
+export interface RotationMemberKeys {
+  userId: string;
+  keys: RemotePublicKey[];
+}
+
+export interface LoadedIdentityVersion {
+  userId: string;
+  publicKeyVersion: string;
+  publicKey: string;
+}
+
+/**
+ * Public keys to pass to `prepareConversationKeyChange`.
+ *
+ * chat-xdk 0.5 groups by user id and wraps only the newest version in the
+ * list. Passing every account version for this bot therefore wraps a newer
+ * key than the one the process loaded, and the process cannot decrypt.
+ * For the loaded user, versions newer than the loaded identity are omitted
+ * so the loaded version is the newest entry and gets the wrap. Older versions
+ * of that user stay in the list. Every other member's versions are passed
+ * through (the SDK wraps their newest).
+ */
+export function participantKeysForRotation(
+  members: RotationMemberKeys[],
+  loaded?: LoadedIdentityVersion,
+): { userId: string; publicKey: string; keyVersion: string }[] {
+  const selected: { userId: string; publicKey: string; keyVersion: string }[] = [];
+  for (const member of members) {
+    let keys = member.keys;
+    if (loaded && member.userId === loaded.userId) {
+      const known = keys.some(
+        (key) => key.publicKeyVersion === loaded.publicKeyVersion || key.publicKey === loaded.publicKey,
+      );
+      if (!known && loaded.publicKey && loaded.publicKeyVersion) {
+        keys = [
+          ...keys,
+          {
+            userId: member.userId,
+            publicKeyVersion: loaded.publicKeyVersion,
+            publicKey: loaded.publicKey,
+            signingPublicKey: "",
+            identityPublicKeySignature: "",
+          },
+        ];
+      }
+      const ceiling = versionRank(loaded.publicKeyVersion);
+      keys = keys.filter((key) => {
+        if (key.publicKeyVersion === loaded.publicKeyVersion || key.publicKey === loaded.publicKey) {
+          return true;
+        }
+        return versionRank(key.publicKeyVersion) < ceiling;
+      });
+    }
+    for (const key of keys) {
+      selected.push({
+        userId: member.userId,
+        publicKey: key.publicKey,
+        keyVersion: key.publicKeyVersion,
+      });
+    }
+  }
+  return selected;
+}
+
 export function toSigningEntries(keys: RemotePublicKey[]) {
   return keys.map((key) => ({
     userId: key.userId,

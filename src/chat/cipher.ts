@@ -71,6 +71,8 @@ export interface LoadedChatIdentity {
 }
 
 export interface ChatCipher {
+  /** Set when the cipher was opened from a key file or a Juicebox unlock. */
+  identity?: LoadedChatIdentity;
   setSigningKeys(keys: SigningKeyEntry[]): void;
   decryptEvents(eventsB64: string[], signingKeys?: SigningKeyEntry[]): DecryptEventsResult;
   /**
