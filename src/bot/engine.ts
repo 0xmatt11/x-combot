@@ -835,7 +835,7 @@ export class ModerationEngine {
           bytes: fetched.bytes,
           mimeType: fetched.mimeType,
         });
-        actions.replies.push("18+");
+        // The image is the whole message. Do not record a caption such as "18+".
         log.info(`!boobs posted native image conversation=${conversationId} host=${host}`);
         return;
       } catch (error) {

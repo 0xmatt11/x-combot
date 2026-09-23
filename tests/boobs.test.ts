@@ -780,14 +780,18 @@ describe("!boobs engine", () => {
     return { engine, client, search };
   }
 
-  it("searches and attaches a native image", async () => {
+  it("searches and attaches a native image with no caption", async () => {
     const { engine, client, search } = setup();
-    await engine.processEvent(message({ id: "b1", senderId: alice.id, text: "!Boobs" }));
+    const actions = await engine.processEvent(
+      message({ id: "b1", senderId: alice.id, text: "!Boobs" }),
+    );
     expect(search.calls).toBe(1);
     expect(client.images).toEqual([
       { conversationId: groupId, url: SAFE_URL, mimeType: "image/jpeg", bytes: 3 },
     ]);
     expect(client.sent).toHaveLength(0);
+    expect(actions.replies).toEqual([]);
+    expect(JSON.stringify(actions.replies)).not.toContain("18+");
   });
 
   it("posts the image URL when native attach fails", async () => {

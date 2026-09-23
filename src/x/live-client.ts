@@ -175,6 +175,11 @@ export class LiveXClient implements XClient {
    * `attachments: [{ media_id }]` on the conversation message.
    * Needs a user token that can upload media (`media.write`). Callers post
    * the image URL as text when this throws.
+   *
+   * `text` is omitted. CreateMessageRequest accepts an attachments-only body
+   * (`CreateAttachmentsMessageRequest`). When `text` is present it must be at
+   * least one character, so `""` is invalid and a space would still be a
+   * caption. Omitting the field attaches the image with no caption.
    */
   async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
     if (!image.bytes || image.bytes.byteLength === 0) {
@@ -190,7 +195,6 @@ export class LiveXClient implements XClient {
     }>(`/2/dm_conversations/${encodeURIComponent(conversationId)}/messages`, {
       method: "POST",
       json: {
-        text: "18+",
         attachments: [{ media_id: mediaId }],
       },
     });
