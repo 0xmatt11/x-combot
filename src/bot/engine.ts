@@ -17,6 +17,7 @@ import { fetchConversationTurns } from "../llm/history.js";
 import {
   containsBannedAgeTerm,
   imageHost,
+  pickAdultBootyImage,
   pickAdultChestImage,
   redactSecrets,
   type AdultImageCandidate,
@@ -505,7 +506,9 @@ export class ModerationEngine {
         await this.reply(conversationId, settings.rules.trim(), actions);
         return;
       case "boobs":
-        await this.handleBoobs(event, command.extra, settings, actions, nowMs);
+      case "ass":
+      case "booty":
+        await this.handleAdultImage(event, command.name, command.extra, settings, actions, nowMs);
         return;
       default:
         break;
@@ -743,8 +746,9 @@ export class ModerationEngine {
     }
   }
 
-  private async handleBoobs(
+  private async handleAdultImage(
     event: DmEvent,
+    command: "boobs" | "ass" | "booty",
     extra: string | undefined,
     settings: ResolvedConversationConfig,
     actions: EngineActions,
@@ -752,18 +756,19 @@ export class ModerationEngine {
   ): Promise<void> {
     const conversationId = event.conversationId;
     const senderId = event.senderId!;
+    const label = `!${command}`;
 
     if (!settings.boobsEnabled) {
-      await this.reply(conversationId, "!boobs is disabled on this bot.", actions);
+      await this.reply(conversationId, `${label} is disabled on this bot.`, actions);
       return;
     }
     if (extra) {
       if (containsBannedAgeTerm(extra)) {
-        log.warn(`Refused !boobs with unsafe extra text conversation=${conversationId}`);
-        await this.reply(conversationId, "Refused. !boobs does not search custom text.", actions);
+        log.warn(`Refused ${label} with unsafe extra text conversation=${conversationId}`);
+        await this.reply(conversationId, `Refused. ${label} does not search custom text.`, actions);
         return;
       }
-      await this.reply(conversationId, "!boobs does not take extra text.", actions);
+      await this.reply(conversationId, `${label} does not take extra text.`, actions);
       return;
     }
 
@@ -780,7 +785,7 @@ export class ModerationEngine {
         settings.boobsRateLimitPerConversation > 0 &&
         conversationUses > settings.boobsRateLimitPerConversation;
       if (overUser || overConversation) {
-        await this.reply(conversationId, boobsRateLimitMessage(settings), actions);
+        await this.reply(conversationId, boobsRateLimitMessage(settings, label), actions);
         return;
       }
     }
@@ -791,12 +796,15 @@ export class ModerationEngine {
       return;
     }
 
+    const booty = command !== "boobs";
     let candidates: AdultImageCandidate[];
     try {
-      candidates = await search.searchAdultChestImages();
+      candidates = booty
+        ? await search.searchAdultBootyImages()
+        : await search.searchAdultChestImages();
     } catch (error) {
       const detail = redactSecrets(error instanceof Error ? error.message : "search failed");
-      log.warn(`!boobs search failed conversation=${conversationId}: ${detail}`);
+      log.warn(`${label} search failed conversation=${conversationId}: ${detail}`);
       const userMessage =
         error instanceof ImageSearchError
           ? error.userMessage
@@ -805,18 +813,19 @@ export class ModerationEngine {
       return;
     }
 
-    const picked = pickAdultChestImage(candidates);
+    const picked = booty ? pickAdultBootyImage(candidates) : pickAdultChestImage(candidates);
     if (!picked) {
       await this.reply(conversationId, "No safe adult image came back. Try again later.", actions);
       return;
     }
-    await this.deliverAdultImage(conversationId, picked, actions);
+    await this.deliverAdultImage(conversationId, picked, actions, label);
   }
 
   private async deliverAdultImage(
     conversationId: string,
     image: AdultImageCandidate,
     actions: EngineActions,
+    label: string,
   ): Promise<void> {
     const host = imageHost(image.url);
     let fetched: { bytes: Uint8Array; mimeType: string } | undefined;
@@ -824,7 +833,7 @@ export class ModerationEngine {
       try {
         fetched = await this.deps.fetchImage(image.url);
       } catch {
-        log.warn(`!boobs image download failed conversation=${conversationId} host=${host}`);
+        log.warn(`${label} image download failed conversation=${conversationId} host=${host}`);
       }
     }
 
@@ -836,18 +845,18 @@ export class ModerationEngine {
           mimeType: fetched.mimeType,
         });
         // The image is the whole message. Do not record a caption such as "18+".
-        log.info(`!boobs posted native image conversation=${conversationId} host=${host}`);
+        log.info(`${label} posted native image conversation=${conversationId} host=${host}`);
         return;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         log.warn(
-          `!boobs native attach failed; posting the image link as text. conversation=${conversationId} host=${host} (${detail})`,
+          `${label} native attach failed; posting the image link as text. conversation=${conversationId} host=${host} (${detail})`,
         );
       }
     }
 
     await this.reply(conversationId, image.url, actions);
-    log.info(`!boobs posted image link conversation=${conversationId} host=${host}`);
+    log.info(`${label} posted image link conversation=${conversationId} host=${host}`);
   }
 
   private async applyWarn(
@@ -968,7 +977,7 @@ function boobsRateLimitActive(settings: ResolvedConversationConfig): boolean {
   return hasCap && settings.boobsRateLimitWindowMs > 0;
 }
 
-function boobsRateLimitMessage(settings: ResolvedConversationConfig): string {
+function boobsRateLimitMessage(settings: ResolvedConversationConfig, label = "!boobs"): string {
   const minutes = Math.max(1, Math.round(settings.boobsRateLimitWindowMs / 60_000));
   const parts: string[] = [];
   if (settings.boobsRateLimitPerUser > 0) {
@@ -977,7 +986,7 @@ function boobsRateLimitMessage(settings: ResolvedConversationConfig): string {
   if (settings.boobsRateLimitPerConversation > 0) {
     parts.push(`${settings.boobsRateLimitPerConversation} per conversation`);
   }
-  return `Slow down — !boobs is limited to ${parts.join(" and ")} every ${minutes} min.`;
+  return `Slow down — ${label} is limited to ${parts.join(" and ")} every ${minutes} min.`;
 }
 
 function parseSetting(key: string, value: string): ConversationSettings | undefined {

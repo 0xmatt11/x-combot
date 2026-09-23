@@ -1,4 +1,6 @@
 import {
+  ADULT_BOOTY_QUERY,
+  ADULT_BOOTY_SUBREDDITS,
   ADULT_CHEST_QUERY,
   ADULT_SUBREDDITS,
   containsBannedAgeTerm,
@@ -7,9 +9,27 @@ import {
   type AdultImageCandidate,
 } from "./adult-filter.js";
 
+/** Fixed query plus the Reddit boards for one adult-image command. Never caller text. */
+interface AdultTopic {
+  query: string;
+  subreddits: readonly string[];
+}
+
+const CHEST_TOPIC: AdultTopic = {
+  query: ADULT_CHEST_QUERY,
+  subreddits: ADULT_SUBREDDITS,
+};
+
+const BOOTY_TOPIC: AdultTopic = {
+  query: ADULT_BOOTY_QUERY,
+  subreddits: ADULT_BOOTY_SUBREDDITS,
+};
+
 export interface ImageSearch {
   /** Fixed adult chest query only. No caller text is accepted. */
   searchAdultChestImages(): Promise<AdultImageCandidate[]>;
+  /** Fixed adult butt query only. No caller text is accepted. */
+  searchAdultBootyImages(): Promise<AdultImageCandidate[]>;
 }
 
 export class ImageSearchError extends Error {
@@ -55,46 +75,46 @@ export function createImageSearch(options: {
     requested === "" ? "duckduckgo" : (normalizeBoobsSearchProvider(requested) ?? "unknown");
   const fetchImpl = options.fetchImpl ?? fetch;
   const random = options.random ?? Math.random;
+  const bind = (run: (topic: AdultTopic) => Promise<AdultImageCandidate[]>): ImageSearch => ({
+    searchAdultChestImages: () => run(CHEST_TOPIC),
+    searchAdultBootyImages: () => run(BOOTY_TOPIC),
+  });
   if (provider === "duckduckgo") {
     const fallback = options.fallbackToReddit !== false;
-    return {
-      searchAdultChestImages: () => searchDuckDuckGoCascade(fetchImpl, random, fallback),
-    };
+    return bind((topic) => searchDuckDuckGoCascade(fetchImpl, random, fallback, topic));
   }
   if (provider === "reddit") {
-    return { searchAdultChestImages: () => searchReddit(fetchImpl, random) };
+    return bind((topic) => searchReddit(fetchImpl, random, topic.subreddits));
   }
   if (provider === "serpapi" || provider === "bing") {
     const apiKey = options.apiKey?.trim();
     if (!apiKey) {
-      return {
-        async searchAdultChestImages() {
-          throw new ImageSearchError(
-            `BOOBS_SEARCH_API_KEY is required for provider ${provider}`,
-            "Image search needs BOOBS_SEARCH_API_KEY. An admin can set it, or leave BOOBS_SEARCH_PROVIDER unset for DuckDuckGo (no key).",
-          );
-        },
-      };
+      const error = new ImageSearchError(
+        `BOOBS_SEARCH_API_KEY is required for provider ${provider}`,
+        "Image search needs BOOBS_SEARCH_API_KEY. An admin can set it, or leave BOOBS_SEARCH_PROVIDER unset for DuckDuckGo (no key).",
+      );
+      return bind(async () => {
+        throw error;
+      });
     }
     if (provider === "serpapi") {
-      return { searchAdultChestImages: () => searchSerpApi(fetchImpl, apiKey) };
+      return bind((topic) => searchSerpApi(fetchImpl, apiKey, topic.query));
     }
-    return { searchAdultChestImages: () => searchBing(fetchImpl, apiKey) };
+    return bind((topic) => searchBing(fetchImpl, apiKey, topic.query));
   }
-  return {
-    async searchAdultChestImages() {
-      throw new ImageSearchError(
-        `Unknown BOOBS_SEARCH_PROVIDER ${requested}`,
-        "Image search provider is not recognized. Use duckduckgo, reddit, serpapi, or bing.",
-      );
-    },
-  };
+  const unknown = new ImageSearchError(
+    `Unknown BOOBS_SEARCH_PROVIDER ${requested}`,
+    "Image search provider is not recognized. Use duckduckgo, reddit, serpapi, or bing.",
+  );
+  return bind(async () => {
+    throw unknown;
+  });
 }
 
-export function serpApiImageSearchUrl(apiKey: string): string {
+export function serpApiImageSearchUrl(apiKey: string, query = ADULT_CHEST_QUERY): string {
   const params = new URLSearchParams({
     engine: "google_images",
-    q: ADULT_CHEST_QUERY,
+    q: query,
     safe: "off",
     api_key: apiKey,
   });
@@ -120,21 +140,21 @@ export function redditHotJsonUrl(subreddit: string): string {
 
 /**
  * DuckDuckGo HTML page that embeds the `vqd` token.
- * The query is always `ADULT_CHEST_QUERY` — never caller text.
+ * `query` is a fixed adult phrase — never caller text. Defaults to the chest query.
  */
-export function duckDuckGoVqdPageUrl(): string {
-  const params = new URLSearchParams({ q: ADULT_CHEST_QUERY });
+export function duckDuckGoVqdPageUrl(query = ADULT_CHEST_QUERY): string {
+  const params = new URLSearchParams({ q: query });
   return `https://duckduckgo.com/?${params.toString()}`;
 }
 
 /**
  * Same `i.js` request current `ddgs` sends for images: `o=json`, safesearch off (`p=-1`).
- * `vqd` comes from the HTML page. The query stays the fixed adult chest phrase.
+ * `vqd` comes from the HTML page. `query` stays the fixed adult phrase for that command.
  */
-export function duckDuckGoImageScriptUrl(vqd: string): string {
+export function duckDuckGoImageScriptUrl(vqd: string, query = ADULT_CHEST_QUERY): string {
   const params = new URLSearchParams({
     o: "json",
-    q: ADULT_CHEST_QUERY,
+    q: query,
     l: "us-en",
     vqd,
     p: "-1",
@@ -145,11 +165,11 @@ export function duckDuckGoImageScriptUrl(vqd: string): string {
 
 /**
  * Keyless Bing images HTML (`ddgs` Bing images backend). Not the Azure Image Search API.
- * `adlt=off` allows adult results. The query is always `ADULT_CHEST_QUERY`.
+ * `adlt=off` allows adult results. `query` is the fixed phrase for that command.
  */
-export function bingHtmlImageSearchUrl(): string {
+export function bingHtmlImageSearchUrl(query = ADULT_CHEST_QUERY): string {
   const params = new URLSearchParams({
-    q: ADULT_CHEST_QUERY,
+    q: query,
     adlt: "off",
     async: "1",
     first: "1",
@@ -211,8 +231,9 @@ export function parseDuckDuckGoImages(body: unknown): AdultImageCandidate[] {
 async function searchReddit(
   fetchImpl: typeof fetch,
   random: () => number,
+  subreddits: readonly string[] = ADULT_SUBREDDITS,
 ): Promise<AdultImageCandidate[]> {
-  const order = shuffle([...ADULT_SUBREDDITS], random);
+  const order = shuffle([...subreddits], random);
   const found: AdultImageCandidate[] = [];
   let anyOk = false;
   for (const sub of order) {
@@ -408,10 +429,11 @@ async function searchDuckDuckGoCascade(
   fetchImpl: typeof fetch,
   random: () => number,
   fallback: boolean,
+  topic: AdultTopic = CHEST_TOPIC,
 ): Promise<AdultImageCandidate[]> {
   let ddgError: unknown;
   try {
-    return await searchDuckDuckGo(fetchImpl);
+    return await searchDuckDuckGo(fetchImpl, topic.query);
   } catch (error) {
     ddgError = error;
     if (!fallback) {
@@ -422,13 +444,13 @@ async function searchDuckDuckGoCascade(
 
   let bingError: unknown;
   try {
-    return await searchBingHtml(fetchImpl);
+    return await searchBingHtml(fetchImpl, topic.query);
   } catch (error) {
     bingError = error;
   }
 
   try {
-    return await searchReddit(fetchImpl, random);
+    return await searchReddit(fetchImpl, random, topic.subreddits);
   } catch (redditError) {
     const ddgDetail = ddgError instanceof Error ? ddgError.message : "duckduckgo failed";
     const bingDetail = bingError instanceof Error ? bingError.message : "bing html failed";
@@ -469,8 +491,11 @@ export function parseBingHtmlImages(html: string): AdultImageCandidate[] {
   return out;
 }
 
-async function searchBingHtml(fetchImpl: typeof fetch): Promise<AdultImageCandidate[]> {
-  const url = bingHtmlImageSearchUrl();
+async function searchBingHtml(
+  fetchImpl: typeof fetch,
+  query = ADULT_CHEST_QUERY,
+): Promise<AdultImageCandidate[]> {
+  const url = bingHtmlImageSearchUrl(query);
   let response: Response;
   try {
     response = await fetchImpl(url, {
@@ -533,8 +558,11 @@ function decodeHtmlAttr(value: string): string {
   });
 }
 
-async function searchDuckDuckGo(fetchImpl: typeof fetch): Promise<AdultImageCandidate[]> {
-  const pageUrl = duckDuckGoVqdPageUrl();
+async function searchDuckDuckGo(
+  fetchImpl: typeof fetch,
+  query = ADULT_CHEST_QUERY,
+): Promise<AdultImageCandidate[]> {
+  const pageUrl = duckDuckGoVqdPageUrl(query);
   let page: Response;
   try {
     page = await fetchImpl(pageUrl, {
@@ -560,7 +588,7 @@ async function searchDuckDuckGo(fetchImpl: typeof fetch): Promise<AdultImageCand
     throw new ImageSearchError("duckduckgo vqd missing", "Image search is unavailable right now.");
   }
 
-  const scriptUrl = duckDuckGoImageScriptUrl(vqd);
+  const scriptUrl = duckDuckGoImageScriptUrl(vqd, query);
   let images: Response;
   try {
     images = await fetchImpl(scriptUrl, {
@@ -601,8 +629,12 @@ async function searchDuckDuckGo(fetchImpl: typeof fetch): Promise<AdultImageCand
   return parsed;
 }
 
-async function searchSerpApi(fetchImpl: typeof fetch, apiKey: string): Promise<AdultImageCandidate[]> {
-  const url = serpApiImageSearchUrl(apiKey);
+async function searchSerpApi(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  query = ADULT_CHEST_QUERY,
+): Promise<AdultImageCandidate[]> {
+  const url = serpApiImageSearchUrl(apiKey, query);
   let response: Response;
   try {
     response = await fetchImpl(url, {
@@ -646,9 +678,13 @@ export function parseSerpApiImages(body: unknown): AdultImageCandidate[] {
   return out;
 }
 
-async function searchBing(fetchImpl: typeof fetch, apiKey: string): Promise<AdultImageCandidate[]> {
+async function searchBing(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  query = ADULT_CHEST_QUERY,
+): Promise<AdultImageCandidate[]> {
   const params = new URLSearchParams({
-    q: ADULT_CHEST_QUERY,
+    q: query,
     safeSearch: "Off",
     count: "30",
     imageType: "Photo",

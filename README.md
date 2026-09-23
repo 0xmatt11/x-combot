@@ -84,7 +84,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 8. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
 10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
-11. **Adult image** — `!boobs` posts one random 18+ chest close-up. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed.
+11. **Adult image** — `!boobs` posts one random 18+ chest close-up. `!ass` and `!booty` post one random 18+ butt close-up and share that switch. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed.
 
 ## Commands
 
@@ -93,6 +93,7 @@ Public:
 - `!help`
 - `!rules`
 - `!boobs` — one random adult (18+) chest close-up. Disabled until `BOOBS_ENABLED=true` or `boobs.enabled` in YAML. No extra arguments.
+- `!ass` / `!booty` — one random adult (18+) butt close-up. Same enable flag, rate limit, and media attach as `!boobs`. No extra arguments. The image has no caption.
 - `!ask <question>` — LLM reply (also `@botname …` or configured wake prefixes)
 - `!summarize [focus]` — load conversation history and summarize
 - `!analyze [prompt]` — load conversation history and answer about the thread
@@ -118,19 +119,19 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 
 ## Adult image command
 
-Posts one random **adult (18+)** close-up of a woman's chest into the same group. It is **off** unless you opt in, so a normal moderation process does not start posting NSFW.
+Posts one random **adult (18+)** close-up into the same group. `!boobs` searches a woman's chest. `!ass` and `!booty` are aliases of each other and search a woman's butt, with their own fixed query and subreddit list. All three are **off** unless you opt in, so a normal moderation process does not start posting NSFW. None of them send an age-label caption with the image.
 
 ```bash
 BOOBS_ENABLED=true
 ```
 
-`BOOBS_ENABLED` overrides `boobs.enabled` in `config/default.yaml`. `BOOBS_ENABLED=false` forces it off even when the YAML says true. `!boobs` has no rate limit by default: `boobs.rate_limit_per_user`, `boobs.rate_limit_per_conversation`, and `boobs.rate_limit_window_ms` are `0` (unlimited). A positive count is enforced only together with a positive window; those timestamps go in SQLite (`boobs_rate`) and are not written while the command is unlimited. Image URLs are not logged (only the host), and API keys are not written to the repo.
+`BOOBS_ENABLED` overrides `boobs.enabled` in `config/default.yaml`. `BOOBS_ENABLED=false` forces it off even when the YAML says true. That one flag gates `!boobs`, `!ass`, and `!booty`. They have no rate limit by default: `boobs.rate_limit_per_user`, `boobs.rate_limit_per_conversation`, and `boobs.rate_limit_window_ms` are `0` (unlimited). A positive count is enforced only together with a positive window; those timestamps go in SQLite (`boobs_rate`) and are shared by all three commands. They are not written while the commands are unlimited. Image URLs are not logged (only the host), and API keys are not written to the repo.
 
-The command is exact. `!boobs`, `!BOOBS`, and `/boobs` run it. `!boobs anything` is refused and is **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. This is a text filter, not a vision model.
+The commands are exact. `!boobs`, `!BOOBS`, and `/boobs` run the chest search. `!ass` and `!booty` (any case, `!` or `/`) run the butt search. `!boobs anything`, `!ass anything`, and `!booty anything` are refused and are **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. This is a text filter, not a vision model.
 
-**Search.** Default provider is DuckDuckGo. No API key. It follows the same keyless image search as the Python `ddgs` library: fetch `https://duckduckgo.com/?q=…` and read the `vqd` token, then `https://duckduckgo.com/i.js` with `o=json` and safesearch off (`p=-1`). The query is the fixed adult chest phrase. It is never text from the command. Each hit uses that result's direct `image` URL. Titles, sources, and URLs still go through the same 18+ text filter as the other providers.
+**Search.** Default provider is DuckDuckGo. No API key. It follows the same keyless image search as the Python `ddgs` library: fetch `https://duckduckgo.com/?q=…` and read the `vqd` token, then `https://duckduckgo.com/i.js` with `o=json` and safesearch off (`p=-1`). The query is the fixed phrase for that command (chest, or butt). It is never text from the command. Each hit uses that result's direct `image` URL. Titles, sources, and URLs still go through the same 18+ text filter as the other providers.
 
-If DuckDuckGo fails or returns no direct image URLs, the bot tries keyless Bing HTML image search, then Reddit. Bing HTML is `https://www.bing.com/images/async` with `adlt=off` (adult content allowed). It does not use the Azure Bing Image Search API or `BOOBS_SEARCH_API_KEY`. Each hit is the result's direct `murl`, not the Bing thumbnail. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. Reddit reads the desktop listing at `gateway.reddit.com` for fixed adult chest subreddits (`sort=hot`, `allow_over18=1`) and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud and datacenter IPs.
+If DuckDuckGo fails or returns no direct image URLs, the bot tries keyless Bing HTML image search, then Reddit. Bing HTML is `https://www.bing.com/images/async` with `adlt=off` (adult content allowed). It does not use the Azure Bing Image Search API or `BOOBS_SEARCH_API_KEY`. Each hit is the result's direct `murl`, not the Bing thumbnail. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. Reddit reads the desktop listing at `gateway.reddit.com` for that command's fixed subreddits (`sort=hot`, `allow_over18=1`) and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud and datacenter IPs.
 
 ```bash
 # optional; duckduckgo is the default (aliases: ddg, ddgs). No key.
@@ -382,7 +383,7 @@ Then in a group DM:
 
 **Unknown bang commands**
 
-A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, and the rest of the list above) are unchanged, including incomplete ones such as `!warn` with no target. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
+A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, and the rest of the list above) are unchanged, including incomplete ones such as `!warn` with no target. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
 
 The joke uses a dedicated prompt. It does **not** load group history, so it does not spend X read quota the way `!summarize` does. The invented command token and any arguments are included so the reply can riff on them. The model is asked for one or two group-chat sentences, with no actionable harmful advice, and the posted text is cut to `llm.max_reply_chars`.
 
@@ -419,8 +420,8 @@ npm test
 ## Configuration
 
 - `.env` — credentials and IDs (see `.env.example`), including Activity and `DM_POLL`.
-- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, `!boobs` enablement. `!boobs` rate limits default to unlimited (`0`).
-- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts). Optional `!boobs` rate-limit timestamps (not image URLs) are stored only when a positive cap and window are configured.
+- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, adult-image enablement (`!boobs`, `!ass`, `!booty`). Those rate limits default to unlimited (`0`).
+- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts). Optional adult-image rate-limit timestamps (not image URLs) are stored only when a positive cap and window are configured. `!ass` and `!booty` share that window with `!boobs`.
 
 Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.
 
@@ -431,7 +432,7 @@ src/
   index.ts            # poll loop, optional Activity stream/webhook
   bot/engine.ts       # ComBot-like actions + LLM dispatch
   bot/parser.ts       # command + wake parsing
-  bot/adult-filter.ts # 18+ text gate for !boobs
+  bot/adult-filter.ts # 18+ text gate for !boobs, !ass, and !booty
   bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
   bot/image-fetch.ts  # https image download for DM upload
   bot/flood.ts        # flood window
