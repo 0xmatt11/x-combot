@@ -81,6 +81,8 @@ export function chatEventToDm(
         sequenceId,
       };
     }
+    // chat-xdk GroupChange `membersRemoved` (Thrift GroupMemberRemoveChange).
+    // Voluntary leave and an admin remove/kick share this one variant.
     if (changeType === "membersRemoved") {
       return {
         id,

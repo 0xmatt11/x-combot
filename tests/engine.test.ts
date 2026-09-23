@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ModerationEngine } from "../src/bot/engine.js";
+import { leaveAnnouncementText, ModerationEngine } from "../src/bot/engine.js";
+import { loadDefaults } from "../src/config.js";
 import { collectNewEvents } from "../src/poller.js";
 import { Store } from "../src/store.js";
 import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
@@ -76,6 +77,148 @@ describe("ModerationEngine", () => {
       mentions: [],
     });
     expect(client.sent[0]?.text).toBe("Welcome @alice!");
+  });
+
+  it("announces a classic ParticipantsLeave with the @handle", async () => {
+    const { engine, client } = setup();
+    const actions = await engine.processEvent({
+      id: "leave-1",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    });
+    expect(actions.replies).toEqual(["@alice has left"]);
+    expect(client.sent).toEqual([{ conversationId: groupId, text: "@alice has left" }]);
+  });
+
+  it("uses the same has-left line for a removal and looks up a handle from an id", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent({
+      id: "kick-1",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      senderId: owner.id,
+      participantIds: [bob.id, bob.id],
+      participants: [],
+      mentions: [],
+    });
+    expect(client.sent.map((row) => row.text)).toEqual(["@bob has left"]);
+  });
+
+  it("does not announce the bot leaving, including when someone else leaves with it", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent({
+      id: "bot-left",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      senderId: "bot-1",
+      participantIds: ["bot-1"],
+      participants: [{ id: "bot-1", username: "modbot" }],
+      mentions: [],
+    });
+    await engine.processEvent({
+      id: "bot-and-alice",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      senderId: owner.id,
+      participantIds: ["bot-1", alice.id],
+      participants: [{ id: "bot-1" }, alice],
+      mentions: [],
+    });
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice has left"]);
+  });
+
+  it("stays quiet when leave announcements are turned off", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent(
+      message({ id: "set-leave", senderId: owner.id, text: "!set leave_enabled off" }),
+    );
+    await engine.processEvent({
+      id: "leave-off",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    });
+    expect(client.sent.map((row) => row.text)).toEqual(["Updated leave_enabled."]);
+  });
+
+  it("uses a per-conversation leave_text", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent(
+      message({ id: "set-text", senderId: owner.id, text: "!set leave_text {name} has left" }),
+    );
+    await engine.processEvent({
+      id: "leave-name",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    });
+    expect(client.sent.at(-1)?.text).toBe("Alice has left");
+  });
+
+  it("announces a leave only once for the same event id", async () => {
+    const { engine, client } = setup();
+    const event: DmEvent = {
+      id: "leave-dup",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    };
+    await engine.processEvent(event);
+    await engine.processEvent(event);
+    expect(client.sent).toHaveLength(1);
+  });
+
+  it("announces once when Activity and the poll use different ids for one sequence", async () => {
+    const { engine, client } = setup();
+    const base = {
+      eventType: "ParticipantsLeave" as const,
+      conversationId: groupId,
+      sequenceId: "77",
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    };
+    await engine.processEvent({ ...base, id: "activity-uuid" });
+    await engine.processEvent({ ...base, id: "poll-message-id" });
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice has left"]);
+  });
+
+  it("falls back to the user id when a leaver lookup fails", async () => {
+    const { engine, client } = setup();
+    client.getUserById = async () => {
+      throw new Error("rate limited");
+    };
+    await engine.processEvent({
+      id: "leave-ghost",
+      eventType: "ParticipantsLeave",
+      conversationId: groupId,
+      participantIds: ["u-ghost"],
+      participants: [],
+      mentions: [],
+    });
+    expect(client.sent[0]?.text).toBe("@u-ghost has left");
+  });
+
+  it("ignores a leave in a one-to-one conversation", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent({
+      id: "dm-leave",
+      eventType: "ParticipantsLeave",
+      conversationId: "111-222",
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    });
+    expect(client.sent).toHaveLength(0);
   });
 
   it("replies to !rules and !help in the group", async () => {
@@ -180,6 +323,22 @@ describe("ModerationEngine", () => {
       message({ id: "bot-msg", senderId: "bot-1", text: "!rules" }),
     );
     expect(client.sent).toHaveLength(0);
+  });
+});
+
+describe("leave announcement text", () => {
+  it("uses the @handle, the display name, or the id", () => {
+    expect(leaveAnnouncementText(alice)).toBe("@alice has left");
+    expect(leaveAnnouncementText({ id: "9", name: "Nine" }, "{name} has left")).toBe(
+      "Nine has left",
+    );
+    expect(leaveAnnouncementText({ id: "9" })).toBe("@9 has left");
+  });
+
+  it("loads leave announcements on by default", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    expect(loaded.leave?.enabled).toBe(true);
+    expect(loaded.leave?.text).toBe("@{username} has left");
   });
 });
 

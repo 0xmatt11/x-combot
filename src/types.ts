@@ -76,11 +76,23 @@ export interface BoobsConfig {
   rate_limit_window_ms: number;
 }
 
+export interface LeaveConfig {
+  /** On unless set false. Per-conversation `leave_enabled` overrides this. */
+  enabled: boolean;
+  /** Same placeholders as welcome: `{username}`, `{user_id}`, `{name}`. */
+  text: string;
+}
+
 export interface DefaultsConfig {
   welcome: {
     enabled: boolean;
     text: string;
   };
+  /**
+   * Leave / remove announcements. Optional so callers can omit it; resolution
+   * then uses the built-in default (enabled, `@{username} has left`).
+   */
+  leave?: LeaveConfig;
   rules: string;
   help: string;
   flood: {
@@ -127,6 +139,8 @@ export interface ActivityConfig {
 export interface ConversationSettings {
   welcome_enabled?: boolean;
   welcome_text?: string;
+  leave_enabled?: boolean;
+  leave_text?: string;
   rules?: string;
   help?: string;
   flood_max_messages?: number;
@@ -145,6 +159,8 @@ export interface ConversationSettings {
 export interface ResolvedConversationConfig {
   welcomeEnabled: boolean;
   welcomeText: string;
+  leaveEnabled: boolean;
+  leaveText: string;
   rules: string;
   help: string;
   floodMaxMessages: number;

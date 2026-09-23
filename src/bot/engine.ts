@@ -1,4 +1,10 @@
-import { isFullContextMode, normalizeAllow, normalizeContextMode, resolveConversationConfig } from "../config.js";
+import {
+  DEFAULT_LEAVE_TEXT,
+  isFullContextMode,
+  normalizeAllow,
+  normalizeContextMode,
+  resolveConversationConfig,
+} from "../config.js";
 import { log } from "../log.js";
 import { Store } from "../store.js";
 import type {
@@ -60,6 +66,8 @@ import {
 const SETTING_KEYS = new Set([
   "welcome_enabled",
   "welcome_text",
+  "leave_enabled",
+  "leave_text",
   "rules",
   "help",
   "flood_max_messages",
@@ -118,18 +126,19 @@ export class ModerationEngine {
       return actions;
     }
 
+    const settings = this.conversationConfig(event.conversationId);
+
+    if (event.eventType === "ParticipantsLeave") {
+      await this.handleLeave(event, settings, actions);
+      return actions;
+    }
+
     if (event.senderId && event.senderId === this.config.botUserId) {
       return actions;
     }
 
-    const settings = this.conversationConfig(event.conversationId);
-
     if (event.eventType === "ParticipantsJoin") {
       await this.handleJoin(event, settings, actions);
-      return actions;
-    }
-
-    if (event.eventType === "ParticipantsLeave") {
       return actions;
     }
 
@@ -644,6 +653,43 @@ export class ModerationEngine {
       this.config.defaults,
       this.store.getSettings(conversationId),
     );
+  }
+
+  private async handleLeave(
+    event: DmEvent,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+  ): Promise<void> {
+    const replayKey = leaveReplayKey(event);
+    if (replayKey) {
+      if (this.store.hasProcessed(replayKey)) return;
+      this.store.markProcessed(replayKey, event.createdAt);
+    }
+    if (!settings.leaveEnabled) return;
+
+    const seen = new Set<string>();
+    const listed =
+      event.participants.length > 0
+        ? event.participants
+        : event.participantIds.map((id) => ({ id }));
+    for (const user of listed) {
+      if (!user.id || seen.has(user.id)) continue;
+      seen.add(user.id);
+      if (user.id === this.config.botUserId) continue;
+      const resolved = await this.resolveLeaver(user);
+      const text = leaveAnnouncementText(resolved, settings.leaveText);
+      if (text) await this.reply(event.conversationId, text, actions);
+    }
+  }
+
+  private async resolveLeaver(user: XUser): Promise<XUser> {
+    if (user.username) return user;
+    try {
+      return (await this.client.getUserById(user.id)) ?? user;
+    } catch (error) {
+      log.warn(`Could not look up user ${user.id} for a leave announcement`, error);
+      return user;
+    }
   }
 
   private async handleJoin(
@@ -1264,6 +1310,25 @@ function boobsRateLimitMessage(settings: ResolvedConversationConfig, label = "!b
   return `Slow down — ${label} is limited to ${parts.join(" and ")} every ${minutes} min.`;
 }
 
+/**
+ * Same-event key when Activity and the Chat poll decrypt one membership
+ * change under different raw ids. Classic DM leaves have no sequence id and
+ * rely on the event id already recorded in `processed_events`.
+ */
+export function leaveReplayKey(event: Pick<DmEvent, "conversationId" | "sequenceId">): string | undefined {
+  if (!event.sequenceId) return undefined;
+  return `leave:${event.conversationId}:${event.sequenceId}`;
+}
+
+/** `{username}` is the @handle when known, otherwise the numeric id. */
+export function leaveAnnouncementText(user: XUser, template = DEFAULT_LEAVE_TEXT): string {
+  return renderTemplate(template, {
+    username: user.username ?? user.id,
+    user_id: user.id,
+    name: user.name ?? user.username ?? user.id,
+  }).trim();
+}
+
 function parseSetting(key: string, value: string): ConversationSettings | undefined {
   const normalized = key.toLowerCase();
   if (!SETTING_KEYS.has(normalized)) return undefined;
@@ -1271,6 +1336,10 @@ function parseSetting(key: string, value: string): ConversationSettings | undefi
     return { welcome_enabled: ["1", "true", "on", "yes"].includes(value.toLowerCase()) };
   }
   if (normalized === "welcome_text") return { welcome_text: value };
+  if (normalized === "leave_enabled") {
+    return { leave_enabled: ["1", "true", "on", "yes"].includes(value.toLowerCase()) };
+  }
+  if (normalized === "leave_text") return { leave_text: value };
   if (normalized === "rules") return { rules: value };
   if (normalized === "help") return { help: value };
   if (normalized === "flood_max_messages") return { flood_max_messages: Number(value) };
@@ -1303,6 +1372,7 @@ function parseSetting(key: string, value: string): ConversationSettings | undefi
 function formatSettings(settings: ResolvedConversationConfig): string {
   return [
     `welcome_enabled: ${settings.welcomeEnabled}`,
+    `leave_enabled: ${settings.leaveEnabled}`,
     `warn_limit: ${settings.warnLimit}`,
     `flood: ${settings.floodMaxMessages} msgs / ${settings.floodWindowMs}ms, mute ${settings.floodMuteMs}ms`,
     `filters: ${settings.filters.length}`,
