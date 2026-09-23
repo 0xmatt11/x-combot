@@ -1,9 +1,13 @@
 import { loadDefaults } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
-import { Poller } from "./poller.js";
+import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
+import { startActivityStream } from "./chat/activity-stream.js";
+import { ensureChatActivitySubscription } from "./chat/activity-subscribe.js";
+import { startActivityWebhook, type ActivityWebhook } from "./chat/activity-webhook.js";
 import { ChatPoller } from "./chat/poller.js";
 import { openChatCipher } from "./chat/identity.js";
 import { chatHttpFromLive } from "./chat/live-http.js";
@@ -63,9 +67,29 @@ async function main(): Promise<void> {
   );
 
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;
+  const activity = resolveActivitySettings(env, defaults);
+  const dmPoll = shouldPollClassicDms({
+    chatConversationCount: env.chatConversationIds.length,
+    dmPoll: env.dmPoll,
+  });
   const poller = new Poller(client, store, engine, intervalMs, defaults.poll.max_results);
-  poller.start();
-  const chatInterval = env.chatPollIntervalMs ?? intervalMs;
+  if (dmPoll) {
+    poller.start();
+  } else if (env.dmPoll === false) {
+    log.info("Skipping GET /2/dm_events because DM_POLL=false.");
+  } else {
+    log.info(
+      "Skipping GET /2/dm_events because CHAT_CONVERSATION_IDS is set. Set DM_POLL=true to also moderate classic group DMs.",
+    );
+  }
+
+  const activityOn = Boolean(activity.enabled && chatService);
+  const chatInterval = activityOn
+    ? (env.chatPollIntervalMs ?? activity.pollIntervalMs)
+    : (env.chatPollIntervalMs ?? intervalMs);
+  const idleMaxMs = activityOn
+    ? chatInterval
+    : (env.chatPollIdleMaxMs ?? defaults.poll.chat_idle_max_ms ?? chatInterval);
   const chatPoller = chatService
     ? new ChatPoller(
         chatService,
@@ -74,14 +98,38 @@ async function main(): Promise<void> {
         chatInterval,
         env.chatConversationIds,
         defaults.poll.max_results,
+        idleMaxMs,
       )
     : undefined;
   chatPoller?.start();
+
+  const activityRuntime = chatService
+    ? await startActivityRuntime({
+        env,
+        client,
+        chat: chatService,
+        engine,
+        botUserId,
+        enabled: activity.enabled,
+        transport: activity.transport,
+        subscribe: activity.subscribe,
+        bearerToken: activity.bearerToken,
+        webhookPort: activity.webhookPort,
+        webhookPath: activity.webhookPath,
+        webhookPublicUrl: activity.webhookPublicUrl,
+        conversationIds: env.chatConversationIds,
+      })
+    : undefined;
+  if (activity.enabled && !chatService) {
+    log.warn("ACTIVITY_ENABLED is set but CHAT_CONVERSATION_IDS is empty, so Activity push was not started.");
+  }
 
   const shutdown = () => {
     log.info("Shutting down");
     poller.stop();
     chatPoller?.stop();
+    activityRuntime?.stop();
+    void activityRuntime?.webhook?.close();
     store.close();
     process.exit(0);
   };
@@ -104,6 +152,86 @@ async function openChatService(
   });
   log.info(`X Chat groups: ${env.chatConversationIds.join(", ")}`);
   return new ChatService(chatHttpFromLive(client), cipher, store);
+}
+
+async function startActivityRuntime(options: {
+  env: Env;
+  client: LiveXClient;
+  chat: ChatService;
+  engine: ModerationEngine;
+  botUserId: string;
+  enabled: boolean;
+  transport: "stream" | "webhook" | "both";
+  subscribe: boolean;
+  bearerToken?: string;
+  webhookPort: number;
+  webhookPath: string;
+  webhookPublicUrl?: string;
+  conversationIds: string[];
+}): Promise<{ stop(): void; webhook?: ActivityWebhook } | undefined> {
+  if (!options.enabled) return undefined;
+  const intake = new ChatActivityIntake(options.chat, options.engine, options.conversationIds);
+
+  if (options.subscribe) {
+    try {
+      await ensureChatActivitySubscription(options.client, options.botUserId);
+    } catch (error) {
+      log.error(
+        "Could not ensure the chat.received subscription. The stream or webhook will still start, and the Chat poller remains the catch-up path. Create the subscription with the user token (scope dm.read) if this persists.",
+        error,
+      );
+    }
+  }
+
+  let stream: { stop(): void } | undefined;
+  if (options.transport !== "webhook") {
+    log.info(
+      options.bearerToken
+        ? "Activity stream will use ACTIVITY_BEARER_TOKEN"
+        : "Activity stream will use the bot user access token",
+    );
+    stream = startActivityStream({
+      nextToken: async () => options.bearerToken ?? (await options.client.getAccessToken()),
+      open: (token, signal) => options.client.openActivityStream(token, signal),
+      onEvent: (body) => intake.handle(body),
+    });
+  }
+
+  let webhook: ActivityWebhook | undefined;
+  if (options.transport !== "stream") {
+    if (!options.env.clientSecret) {
+      log.error(
+        "Activity webhook transport needs CLIENT_SECRET to answer CRC checks. The webhook server was not started.",
+      );
+    } else {
+      webhook = await startActivityWebhook({
+        port: options.webhookPort,
+        path: options.webhookPath,
+        clientSecret: options.env.clientSecret,
+        onEvent: (body) => intake.handle(body),
+      });
+      if (options.webhookPublicUrl) {
+        log.info(
+          `Register this HTTPS URL with POST /2/webhooks (app-only bearer): ${options.webhookPublicUrl}`,
+        );
+      } else {
+        log.info(
+          "Set ACTIVITY_WEBHOOK_URL to the public HTTPS URL X should call, then POST /2/webhooks with the app bearer. The local server only receives events after that registration and a chat.received subscription.",
+        );
+      }
+    }
+  }
+
+  log.info(
+    "Activity push is on. The Chat poller is a slow catch-up, not the realtime path. Sends, key fetches, and that fallback poll can still return 429/402.",
+  );
+
+  return {
+    webhook,
+    stop() {
+      stream?.stop();
+    },
+  };
 }
 
 function buildLlmClient(env: Env, defaults: DefaultsConfig): LlmClient | undefined {

@@ -15,6 +15,30 @@ function optional(name: string): string | undefined {
   return value ? value : undefined;
 }
 
+function optionalBool(name: string): boolean | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const normalized = value.toLowerCase();
+  if (normalized === "1" || normalized === "true" || normalized === "yes") return true;
+  if (normalized === "0" || normalized === "false" || normalized === "no") return false;
+  throw new Error(`${name} must be true or false`);
+}
+
+function optionalNumber(name: string): number | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`${name} must be a number`);
+  return parsed;
+}
+
+function optionalActivityTransport(name: string): "stream" | "webhook" | "both" | undefined {
+  const value = optional(name)?.toLowerCase();
+  if (!value) return undefined;
+  if (value === "stream" || value === "webhook" || value === "both") return value;
+  throw new Error(`${name} must be stream, webhook, or both`);
+}
+
 function csv(name: string): string[] {
   const value = optional(name);
   if (!value) return [];
@@ -50,6 +74,18 @@ export interface Env {
   /** Juicebox PIN. Used only when no local key file exists. Never commit this. */
   chatPin?: string;
   chatPollIntervalMs?: number;
+  /** When unset, classic DM polling is skipped if Chat conversation ids are set. */
+  dmPoll?: boolean;
+  chatPollIdleMaxMs?: number;
+  activityEnabled?: boolean;
+  activityTransport?: "stream" | "webhook" | "both";
+  activitySubscribe?: boolean;
+  /** App-only bearer for `GET /2/activity/stream` and `POST /2/webhooks`. Not a user token. */
+  activityBearerToken?: string;
+  activityWebhookPort?: number;
+  activityWebhookPath?: string;
+  /** Public HTTPS URL registered with X. The local server must be reachable there. */
+  activityWebhookUrl?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -83,5 +119,14 @@ export function loadEnv(requireOwner = true): Env {
     chatKeysPath: path.resolve(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
     chatPin: optional("CHAT_PIN"),
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,
+    dmPoll: optionalBool("DM_POLL"),
+    chatPollIdleMaxMs: optionalNumber("CHAT_POLL_IDLE_MAX_MS"),
+    activityEnabled: optionalBool("ACTIVITY_ENABLED"),
+    activityTransport: optionalActivityTransport("ACTIVITY_TRANSPORT"),
+    activitySubscribe: optionalBool("ACTIVITY_SUBSCRIBE"),
+    activityBearerToken: optional("ACTIVITY_BEARER_TOKEN"),
+    activityWebhookPort: optionalNumber("ACTIVITY_WEBHOOK_PORT"),
+    activityWebhookPath: optional("ACTIVITY_WEBHOOK_PATH"),
+    activityWebhookUrl: optional("ACTIVITY_WEBHOOK_URL"),
   };
 }

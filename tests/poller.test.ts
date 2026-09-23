@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModerationEngine } from "../src/bot/engine.js";
-import { Poller, nextPollDelayMs } from "../src/poller.js";
+import { Poller, nextPollDelayMs, shouldPollClassicDms } from "../src/poller.js";
 import type { Store } from "../src/store.js";
 import type { XClient } from "../src/x/client.js";
 import { CREDITS_DEPLETED_BACKOFF_MS, LiveXClient } from "../src/x/live-client.js";
@@ -207,5 +207,17 @@ describe("Poller with LiveXClient backoff", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     poller.stop();
+  });
+});
+
+describe("shouldPollClassicDms", () => {
+  it("skips classic DM polling when only Chat ids are configured", () => {
+    expect(shouldPollClassicDms({ chatConversationCount: 1, dmPoll: undefined })).toBe(false);
+    expect(shouldPollClassicDms({ chatConversationCount: 0, dmPoll: undefined })).toBe(true);
+  });
+
+  it("lets DM_POLL override the Chat-only default", () => {
+    expect(shouldPollClassicDms({ chatConversationCount: 1, dmPoll: true })).toBe(true);
+    expect(shouldPollClassicDms({ chatConversationCount: 0, dmPoll: false })).toBe(false);
   });
 });

@@ -5,8 +5,11 @@ export interface RawChatEvent {
   sender_id?: string;
   conversation_id?: string;
   created_at?: string;
+  /** Milliseconds since epoch, as returned by `created_at_msec`. */
+  created_at_msec?: string | number;
   encoded_event?: string;
   conversation_token?: string;
+  sequence_id?: string;
 }
 
 export interface RawChatEventsPage {

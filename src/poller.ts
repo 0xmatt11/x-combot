@@ -95,6 +95,19 @@ function readRetryAfterMs(error: unknown): number | undefined {
   return value;
 }
 
+/**
+ * Classic `GET /2/dm_events` is a separate quota from Chat. When the process
+ * is configured only with encrypted Chat ids, skip it unless `DM_POLL=true`.
+ * An explicit `DM_POLL=false` always skips, including when no Chat ids are set.
+ */
+export function shouldPollClassicDms(options: {
+  chatConversationCount: number;
+  dmPoll: boolean | undefined;
+}): boolean {
+  if (options.dmPoll !== undefined) return options.dmPoll;
+  return options.chatConversationCount === 0;
+}
+
 export function collectNewEvents(eventsNewestFirst: DmEvent[], watermarkId: string): DmEvent[] {
   const collected: DmEvent[] = [];
   for (const event of eventsNewestFirst) {

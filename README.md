@@ -13,7 +13,7 @@ Classic group DMs only need [sections 1–3](#1-x-developer-app). For an encrypt
 3. **`CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID`** — your group id (`g` plus digits).
 4. **`npm run chat:rotate -- gYOUR_GROUP_ID --confirm`** only if the bot joined before it registered. Rotate aborts when any current member has no public key; see [section 4](#4-run-against-an-encrypted-x-chat-group).
 5. **`npm start`**
-6. **Send `!help`** in the group. The first poll only records a watermark and does not replay messages already in the thread.
+6. **Send `!help`** in the group. The first poll only records a watermark and does not replay messages already in the thread. For back-to-back commands in a busy group, turn on [Activity push](#activity-push-for-chat) so the bot is not waiting on the poll interval.
 
 ## What X actually allows
 
@@ -53,6 +53,10 @@ These are different products. A URL like `https://x.com/i/chat/gYOUR_GROUP_ID` i
 
 Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. Chat polling uses the same 429 / 402 backoff as the DM poller (see **Rate limits and credits** above).
 
+**Watermark.** Each Chat conversation stores a cursor (`chat_events:<id>`) at the newest event id on the page, including events this process cannot decrypt. The next poll does not submit ciphertext at or before that cursor, so messages encrypted with a retired key version are not decrypted again every interval. The first poll only seeds the cursor and does not replay commands. If the stored id has fallen off the latest pages, the cursor jumps to the newest id so those pages are not re-fetched forever. Decrypt failures are logged at most once a minute per conversation.
+
+**Polling volume.** With only `CHAT_CONVERSATION_IDS` set, classic `GET /2/dm_events` is not polled (`DM_POLL=true` turns it back on). Quiet Chat polls stretch from `poll.interval_ms` up to `poll.chat_idle_max_ms` (default 120s) and snap back when a new event arrives. Activity push (below) is what makes back-to-back commands realtime; the poll stays as catch-up.
+
 There is still **no documented remove-member endpoint** on Chat (only add members, which rotates the key). `!kick` stays a local soft-mute plus an admin DM.
 
 ### Honest gaps vs Telegram ComBot
@@ -61,12 +65,12 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 - **No reliable delete of other people's classic DM messages.** `DELETE /2/dm_events/:event_id` succeeds only for events the bot sent. In an encrypted Chat group the bot instead calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`. X documents that as working for messages the account sent, and for other people's messages when the account administers the group. If X refuses, the bot says so.
 - **Chat delete needs a sequence id** from a message this process decrypted. `!del` with no argument uses the last user message it saw. A numeric id can be a sequence id. UUID message ids are not accepted by the `!del` parser.
 - **Soft-mute is local.** Timed-out users are ignored by the bot (and delete is attempted). They can still talk in the X client.
-- **Polling, not realtime.** Default interval is 12s. Both pollers back off on 429/402; ignoring that wait burns pay-per-use credits. Classic DM events older than ~30 days are not returned.
+- **Polling plus optional Activity push.** Without Activity, Chat is polled (default 12s, slower when idle). Both pollers back off on 429/402; ignoring that wait burns pay-per-use credits. During a long backoff, commands are invisible until the next successful poll. Classic DM events older than ~30 days are not returned.
+- **Activity is the realtime path.** `chat.received` (X Activity API) wakes the bot on new Chat messages. The Chat poller keeps running as a slower catch-up when Activity is enabled. Sends, public-key reads, key rotation, and that fallback poll can still return 429/402.
 - **Group DMs ≠ Communities ≠ encrypted Chat.** Communities are unused. Chat is a separate encrypted inbox; see above.
 - **Admin notify DMs are classic 1:1.** `!kick` and filter alerts still use `POST /2/dm_conversations/with/:id/messages`. That message may not appear inside the encrypted Chat inbox.
 - **Chat reactions, edits, and media are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer.
-- **No Activity API webhook in v1.** `chat.received` is unused. The bot polls.
-- **Paid API access.** DM read/write is not available on a typical free app-only key. You need a developer account, a Project/App with OAuth 2.0 user auth, and a plan that includes DM endpoints.
+- **Paid API access.** DM read/write is not available on a typical free app-only key. You need a developer account, a Project/App with OAuth 2.0 user auth, and a plan that includes DM endpoints. Activity subscriptions for `chat.*` use the same user token and the existing `dm.read` scope.
 
 ## Features
 
@@ -186,11 +190,73 @@ npm run chat:rotate -- gYOUR_GROUP_ID --confirm
 
 **Rotate aborts if any member has no public key.** The command lists current members, then `GET /2/users/{id}/public_keys` for each one. An empty key list for **any** member stops the command before it posts, so that person is not locked out. Every member must have opened X Chat and registered a public key, or be removed from the group, before rotate can finish — including when you are only trying to wrap keys for a bot that joined before `chat:register`. Rotate does not remove members. Skip this step when the bot was added after its public key was already on the account.
 
-4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup.
+4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup. Ciphertext older than that cursor, including pre-rotation messages this key cannot open, is not decrypted on later polls.
 
-Optional: `CHAT_PIN` unlocks a Juicebox-stored identity instead of the file, via `createChat().unlock()`. That needs `npm install juicebox-sdk`. A key file wins when both are set. `CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_KEYS_PATH` moves the identity file.
+Optional: `CHAT_PIN` unlocks a Juicebox-stored identity instead of the file, via `createChat().unlock()`. That needs `npm install juicebox-sdk`. A key file wins when both are set. `CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_KEYS_PATH` moves the identity file. `CHAT_POLL_IDLE_MAX_MS` caps how far a quiet Chat poll stretches (default 120s). `DM_POLL=true` also polls classic group DMs; leave it unset to skip `GET /2/dm_events` when Chat ids are configured.
 
 Juicebox realm tokens come from `juicebox_config` on `GET /2/users/{id}/public_keys`. They are not written by this repo.
+
+#### Activity push for Chat
+
+Polling a large group every 12s, plus `GET /2/dm_events`, is what produces long 429 backoffs. During that wait the bot cannot see new commands. The X Activity API delivers `chat.received` over a persistent stream or a webhook so back-to-back messages do not depend on the poll interval.
+
+This does **not** add OAuth scopes. [Create subscription](https://docs.x.com/x-api/activity/create-x-activity-subscription) requires `dm.read` for `chat.*` and `dm.*`, which `npm run oauth` already requests (`dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`).
+
+Two delivery mechanisms, both optional, both in this process. The Chat poller stays on as catch-up. When Activity is enabled its interval defaults to `activity.poll_interval_ms` (5 minutes) unless `CHAT_POLL_INTERVAL_MS` is set. They are not exclusive.
+
+**Stream (fits a long-running Node process)**
+
+```bash
+ACTIVITY_ENABLED=true
+ACTIVITY_TRANSPORT=stream
+ACTIVITY_SUBSCRIBE=true
+```
+
+On startup the bot lists `GET /2/activity/subscriptions` and, if needed, `POST /2/activity/subscriptions` with the **user** access token:
+
+```json
+{
+  "event_type": "chat.received",
+  "filter": { "user_id": "BOT_USER_ID", "qualifiers": { "conversation_type": "group" } },
+  "tag": "x-combot chat.received"
+}
+```
+
+It then holds `GET /2/activity/stream`. By default that request uses the same user access token. Set `ACTIVITY_BEARER_TOKEN` to the app-only bearer from the developer portal if the user-token stream is rejected; that is what the official xchat-bot example uses for the stream. Payloads are decrypted with the same `decryptEvents` path as the poller (`encoded_event` plus any `conversation_key_change_event`). Only ids in `CHAT_CONVERSATION_IDS` are moderated. `chat.sent` is ignored. The stream does not replay history.
+
+**Webhook**
+
+X must reach a public **HTTPS URL with no port**. This process listens locally and answers the CRC check (`GET ?crc_token=`) with HMAC-SHA256 of the token keyed by `CLIENT_SECRET` (`sha256=<base64>`). POSTs are checked against `X-Twitter-Webhooks-Signature-OAuth2` over the raw body.
+
+```bash
+ACTIVITY_ENABLED=true
+ACTIVITY_TRANSPORT=webhook
+ACTIVITY_WEBHOOK_PORT=8080
+ACTIVITY_WEBHOOK_PATH=/webhook
+ACTIVITY_WEBHOOK_URL=https://your-domain.example/webhook
+```
+
+`ACTIVITY_TRANSPORT=both` runs the stream and the webhook server. Register the public URL with an **app-only** bearer (not the user token):
+
+```bash
+curl -X POST "https://api.x.com/2/webhooks" \
+  -H "Authorization: Bearer $ACTIVITY_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://your-domain.example/webhook"}'
+```
+
+Put the returned webhook id on the subscription if you want delivery there (`webhook_id`). The bot's auto-subscribe call does not set `webhook_id`; events still arrive on `GET /2/activity/stream` when that connection is open. To deliver only to the webhook, create the subscription yourself with `webhook_id` and set `ACTIVITY_SUBSCRIBE=false`. Point a reverse proxy at `ACTIVITY_WEBHOOK_PORT`. X will not call `http://127.0.0.1:8080`.
+
+**What still rate-limits**
+
+Activity removes the need to GET the Chat event page every few seconds, which is the quota burn behind multi-minute 429s in a busy group. These calls can still return 429 or 402, and the bot still waits them out:
+
+- sending a reply (`POST /2/chat/conversations/{id}/messages`)
+- key registration and rotation (`POST /2/users/{id}/public_keys`, `POST /2/chat/conversations/{id}/keys`)
+- the slow catch-up poll, and `GET /2/dm_events` when `DM_POLL=true`
+- the Activity stream itself (reconnect uses the same backoff)
+
+A 429 on send still means that one reply waits. The next inbound command is not stuck behind a 12s poll, and it is not invisible for the whole Chat read-window if the stream is connected.
 
 ### 5. LLM replies (optional)
 
@@ -270,8 +336,8 @@ npm test
 
 ## Configuration
 
-- `.env` — credentials and IDs (see `.env.example`).
-- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, LLM context/rate limits.
+- `.env` — credentials and IDs (see `.env.example`), including Activity and `DM_POLL`.
+- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits.
 - SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts).
 
 Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.
@@ -280,16 +346,16 @@ Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` a
 
 ```
 src/
-  index.ts            # poll loop
+  index.ts            # poll loop, optional Activity stream/webhook
   bot/engine.ts       # ComBot-like actions + LLM dispatch
   bot/parser.ts       # command + wake parsing
   bot/flood.ts        # flood window
   bot/filters.ts      # keyword/regex
   llm/                # OpenAI-compatible client, context assembly, history fetch
-  x/live-client.ts    # thin v2 HTTP client (DM + Chat)
+  x/live-client.ts    # thin v2 HTTP client (DM + Chat + Activity)
   x/routed-client.ts  # g… ids use Chat; everything else stays on /2/dm_*
   x/mock-client.ts    # in-memory client for tests
-  chat/               # poller, decrypt/encrypt, key file, wire bodies
+  chat/               # poller, decrypt/encrypt, Activity intake, key file, wire bodies
   store.ts            # SQLite
   oauth.ts            # PKCE helpers
 scripts/oauth.ts      # interactive user-token helper
@@ -300,7 +366,7 @@ tests/
 ## Limitations checklist (do not assume these exist)
 
 - No `POST /2/dm_conversations/:id/participants` (or similar) in current public docs.
-- No v2 DM streaming; Account Activity webhooks are a separate, historically enterprise product and are not used here.
+- No v2 DM streaming for classic group DMs. Encrypted Chat can use the X Activity API (`chat.received`) via `GET /2/activity/stream` or a webhook; see [Activity push for Chat](#activity-push-for-chat). Account Activity (enterprise) is a different product and is not used here.
 - Delete of another participant's classic DM `MessageCreate` is not part of the documented v2 contract. Chat `delete_for_all` is a separate call and still requires a group admin (or the sender) plus a decrypted sequence id.
 - Communities, Spaces, and public posts are unrelated surfaces.
 - Encrypted Chat has no documented kick/remove-member call. Add-member (`POST /2/chat/conversations/{id}/members`) rotates the key; this bot does not call it from `!kick`.

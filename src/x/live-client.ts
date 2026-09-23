@@ -156,6 +156,42 @@ export class LiveXClient implements XClient {
     };
   }
 
+  async getAccessToken(): Promise<string> {
+    await this.ensureFreshToken();
+    return this.tokens.accessToken;
+  }
+
+  async listActivitySubscriptions(): Promise<unknown> {
+    return this.request("/2/activity/subscriptions", {
+      search: { max_results: "1000" },
+    });
+  }
+
+  async createActivitySubscription(body: Record<string, unknown>): Promise<unknown> {
+    return this.request("/2/activity/subscriptions", { method: "POST", json: body });
+  }
+
+  /**
+   * Long-lived Activity stream. Does not parse the body; the caller reads NDJSON.
+   * 429/402 throw with `retryAfterMs`, matching the pollers.
+   */
+  async openActivityStream(token: string, signal: AbortSignal): Promise<Response> {
+    const response = await fetch(new URL("/2/activity/stream", API_BASE), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      const error = new Error(
+        `GET /2/activity/stream -> ${response.status}: ${text.slice(0, 300)}`,
+      ) as ApiError;
+      error.status = response.status;
+      applyRateLimit(error, response);
+      throw error;
+    }
+    return response;
+  }
+
   async deleteEvent(eventId: string, _hint?: DeleteHint): Promise<DeleteResult> {
     try {
       const payload = await this.request<{ data?: { deleted?: boolean } }>(
@@ -180,7 +216,7 @@ export class LiveXClient implements XClient {
     const search: Record<string, string> = {
       max_results: String(params.maxResults ?? 50),
       "chat_message_event.fields":
-        "id,sender_id,conversation_id,created_at,encoded_event,conversation_token,previous_id",
+        "id,sender_id,conversation_id,created_at,created_at_msec,encoded_event,conversation_token,sequence_id,previous_id",
     };
     if (params.paginationToken) search.pagination_token = params.paginationToken;
     return this.request<RawChatEventsPage>(
@@ -281,18 +317,9 @@ export class LiveXClient implements XClient {
     }
 
     if (response.status === 429 || response.status === 402) {
-      const fromHeaders = headerBackoffMs(response.headers, Date.now());
-      const waitMs =
-        response.status === 402
-          ? Math.max(fromHeaders ?? 0, CREDITS_DEPLETED_BACKOFF_MS)
-          : (fromHeaders ?? DEFAULT_RATE_LIMIT_BACKOFF_MS);
-      const error = new Error(
-        response.status === 402
-          ? `Credits depleted; retry after ${waitMs}ms`
-          : `Rate limited; retry after ${waitMs}ms`,
-      ) as ApiError;
+      const error = new Error("rate limit") as ApiError;
       error.status = response.status;
-      error.retryAfterMs = waitMs;
+      applyRateLimit(error, response);
       throw error;
     }
 
@@ -370,6 +397,24 @@ export class LiveXClient implements XClient {
       this.refreshPromise = undefined;
     }
   }
+}
+
+/**
+ * Attach `retryAfterMs` and a stable message for HTTP 429 and 402.
+ * Other statuses are left unchanged.
+ */
+function applyRateLimit(error: ApiError, response: Response): void {
+  if (response.status !== 429 && response.status !== 402) return;
+  const fromHeaders = headerBackoffMs(response.headers, Date.now());
+  const waitMs =
+    response.status === 402
+      ? Math.max(fromHeaders ?? 0, CREDITS_DEPLETED_BACKOFF_MS)
+      : (fromHeaders ?? DEFAULT_RATE_LIMIT_BACKOFF_MS);
+  error.retryAfterMs = waitMs;
+  error.message =
+    response.status === 402
+      ? `Credits depleted; retry after ${waitMs}ms`
+      : `Rate limited; retry after ${waitMs}ms`;
 }
 
 /**

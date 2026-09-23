@@ -61,6 +61,19 @@ filters:
 poll:
   interval_ms: 12000
   max_results: 50
+  # Quiet Chat polls wait longer (doubling) up to this cap. A new event resets to interval_ms.
+  chat_idle_max_ms: 120000
+
+# X Activity API push for encrypted Chat (chat.received). Off until you opt in.
+# transport: stream (this process opens GET /2/activity/stream), webhook, or both.
+# When enabled, the Chat poller uses poll_interval_ms as a slow catch-up.
+activity:
+  enabled: false
+  transport: stream
+  subscribe: true
+  poll_interval_ms: 300000
+  webhook_port: 8080
+  webhook_path: /webhook
 
 # X DELETE /2/dm_events/:event_id only succeeds for events owned by the
 # authenticated bot user. Attempts on other users' messages are logged.

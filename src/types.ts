@@ -55,6 +55,8 @@ export interface DefaultsConfig {
   poll: {
     interval_ms: number;
     max_results: number;
+    /** Cap for stretching the Chat poll when a poll finds nothing new. */
+    chat_idle_max_ms?: number;
   };
   delete: {
     attempt_on_filter: boolean;
@@ -62,6 +64,19 @@ export interface DefaultsConfig {
     attempt_on_mute: boolean;
   };
   llm?: LlmConfig;
+  activity?: ActivityConfig;
+}
+
+export type ActivityTransport = "stream" | "webhook" | "both";
+
+export interface ActivityConfig {
+  enabled: boolean;
+  transport: ActivityTransport;
+  subscribe: boolean;
+  /** Chat poll interval used as catch-up while Activity push is on. */
+  poll_interval_ms: number;
+  webhook_port: number;
+  webhook_path: string;
 }
 
 export interface ConversationSettings {
