@@ -298,6 +298,9 @@ describe("chat:rotate wrap list", () => {
       encryptMessage() {
         return { messageId: "m", encryptedContent: "e", encodedEventSignature: "s" };
       },
+      encryptStream(plaintext: Uint8Array) {
+        return plaintext;
+      },
       prepareMessageDelete() {
         return {
           messageId: "d",
@@ -344,6 +347,9 @@ describe("chat:rotate wrap list", () => {
         return { deleted: true };
       },
       async addConversationKeys() {},
+      async uploadChatMedia() {
+        return "media-hash";
+      },
       async addUserPublicKey() {
         return {};
       },

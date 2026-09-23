@@ -69,7 +69,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 - **Activity is the realtime path.** `chat.received` (X Activity API) wakes the bot on new Chat messages. The Chat poller keeps running as a slower catch-up when Activity is enabled. Sends, public-key reads, key rotation, and that fallback poll can still return 429/402.
 - **Group DMs ≠ Communities ≠ encrypted Chat.** Communities are unused. Chat is a separate encrypted inbox; see above.
 - **Admin notify DMs are classic 1:1.** `!kick` and filter alerts still use `POST /2/dm_conversations/with/:id/messages`. That message may not appear inside the encrypted Chat inbox.
-- **Chat reactions, edits, and media are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer. `!boobs` in an encrypted group sends a link, not a Chat media upload.
+- **Chat reactions and edits are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer. `!boobs` in an encrypted group sends an **inline Chat photo** (`encryptStream` + `/2/chat/media/upload`), not a URL and not a file/document attachment.
 - **Paid API access.** DM read/write is not available on a typical free app-only key. You need a developer account, a Project/App with OAuth 2.0 user auth, and a plan that includes DM endpoints. Activity subscriptions for `chat.*` use the same user token and the existing `dm.read` scope.
 
 ## Features
@@ -151,7 +151,7 @@ A key is sent only to SerpAPI or the Azure Bing Image Search API (`BOOBS_SEARCH_
 | Conversation | Delivery |
 | --- | --- |
 | Classic group DM | Native image. The bot downloads the file (https, max 5 MB, jpeg/png/gif/webp) and uploads it with `POST /2/media/upload/initialize`, `/append`, `/finalize` using `media_category` `dm_image` (or `dm_gif`). The message is `POST /2/dm_conversations/:id/messages` with `attachments: [{ media_id }]` and the text `18+`. That upload needs the `media.write` scope from `npm run oauth`. |
-| Encrypted X Chat (`g…`) | **A direct https image URL as encrypted text**, not a native attachment. `encryptMessage` in this bot sends text. Chat can attach media only after `encryptStream` and `POST /2/chat/media/upload` (`media.write`), which this process does not call. The X client may unfurl the link. |
+| Encrypted X Chat (`g…`) | **Inline Chat photo**. Bytes are `encryptStream`'d with the conversation key, uploaded via `POST /2/chat/media/upload/initialize`, `/append`, and `/finalize` (`media.write`), then referenced from `encryptMessage` as `attachment_type: "media"` with `media_type` omitted so clients render a photo bubble, not a file. Falls back to a URL text message if upload or encrypt fails. Classic DM `dm_image` is not used for `g…` ids. |
 | Either, if upload or download fails | The same URL is sent as a text message, including on the encrypted path, so a media failure does not drop the reply. |
 
 Re-run `npm run oauth` after the app allows `media.write` if classic DMs should attach the file instead of linking it. Existing tokens without that scope still post the link.
@@ -170,7 +170,7 @@ Re-run `npm run oauth` after the app allows `media.write` if classic DMs should 
    - `tweet.read` — required alongside DM scopes
    - `users.read` — required alongside DM scopes
    - `offline.access` — refresh token so the bot can run longer than ~2 hours
-   - `media.write` — upload an image for `!boobs` in a classic group DM. The app must allow this scope. Without it, that command posts a link instead of a native attachment. Encrypted Chat still posts a link either way.
+   - `media.write` — upload an image for `!boobs` (classic DM `dm_image` and encrypted Chat `/2/chat/media/upload`). The app must allow this scope. Without it, that command falls back to posting a link.
 6. Copy the OAuth 2.0 **Client ID** and **Client Secret**.
 
 App-only / project bearer tokens will not work.
@@ -208,7 +208,7 @@ On first poll the bot records a watermark and **does not replay 30 days of histo
 
 ### 4. Run against an encrypted X Chat group
 
-Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`, and `media.write` — Chat reads and writes use those user scopes, not an app-only bearer token. `media.write` is what lets `!boobs` upload a classic DM image. Chat replies for that command are still a link; see [Adult image command](#adult-image-command).
+Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`, and `media.write` — Chat reads and writes use those user scopes, not an app-only bearer token. `media.write` is what lets `!boobs` upload a classic DM image and an encrypted Chat photo. Encrypted Chat replies for that command are inline photos when media upload succeeds; see [Adult image command](#adult-image-command).
 
 1. Give the process an identity once. Pick the path that matches the account.
 

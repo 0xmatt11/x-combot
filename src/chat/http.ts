@@ -45,4 +45,9 @@ export interface ChatHttp {
     body: Record<string, unknown>,
   ): Promise<void>;
   addUserPublicKey(userId: string, body: Record<string, unknown>): Promise<{ version?: string }>;
+  /**
+   * Upload already-encrypted Chat media bytes (initialize → append → finalize).
+   * Returns `media_hash_key` for an inline `attachment_type: "media"` message.
+   */
+  uploadChatMedia(conversationId: string, ciphertext: Uint8Array): Promise<string>;
 }

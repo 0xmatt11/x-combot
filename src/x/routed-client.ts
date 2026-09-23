@@ -58,9 +58,12 @@ export class RoutedXClient implements XClient {
   }
 
   async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
+    if (this.chat && isChatGroupId(conversationId)) {
+      return this.chat.sendImage(conversationId, image);
+    }
     if (isChatGroupId(conversationId)) {
       throw new Error(
-        "Encrypted X Chat send is text-only here. POST /2/chat/conversations/:id/messages carries an encrypted payload from encryptMessage, which this bot fills with text. Chat media upload needs encryptStream plus POST /2/chat/media/upload and the media.write scope.",
+        "Encrypted X Chat image send needs Chat configured (encryptStream + POST /2/chat/media/upload + inline media attachment).",
       );
     }
     return this.dm.sendImage(conversationId, image);

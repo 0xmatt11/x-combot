@@ -25,8 +25,9 @@ export interface XClient {
     text: string,
   ): Promise<SendMessageResult>;
   /**
-   * Attach an image in a classic group DM (media upload + `attachments.media_id`).
-   * Encrypted Chat ids reject this; the caller posts `image.url` as text instead.
+   * Attach an image. Classic group DMs use media upload plus `attachments.media_id`.
+   * Encrypted Chat (`g…`) uses `encryptStream`, `POST /2/chat/media/upload`, and an
+   * inline media attachment. Callers post `image.url` as text when this throws.
    */
   sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult>;
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult>;

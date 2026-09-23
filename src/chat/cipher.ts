@@ -29,9 +29,38 @@ export interface DecryptedEvent {
   groupChange?: { changeType?: string; memberIds?: string[] };
 }
 
+export interface ConversationKeySet {
+  /** version → raw 32-byte conversation key */
+  keys: Record<string, Uint8Array>;
+  latestVersion: string | null;
+}
+
 export interface DecryptEventsResult {
   messages: { event: DecryptedEvent; originalB64?: string }[];
   errors: Record<string, string>;
+  /** Keys extracted while decrypting. Also feeds the WASM key cache when caching is on. */
+  conversationKeys?: ConversationKeySet;
+}
+
+/**
+ * Inline Chat photo. `mediaType` omitted (or `1`) renders in the bubble.
+ * Do not set a file/document type.
+ */
+export interface ChatMediaAttachment {
+  mediaHashKey: string;
+  width: number;
+  height: number;
+  /** Plaintext image size in bytes. */
+  filesizeBytes: number;
+  filename: string;
+  /** Omit for an inline image. `1` image, `2` gif, `3` video. */
+  mediaType?: number;
+}
+
+export interface EncryptMessageOptions {
+  conversationKey?: Uint8Array;
+  conversationKeyVersion?: string;
+  attachments?: ChatMediaAttachment[];
 }
 
 export interface SendPayload {
@@ -87,7 +116,9 @@ export interface ChatCipher {
   /** True when `publicKey` is the identity loaded in this process (SEC1 or SPKI). */
   matchesRegisteredKey(publicKey: string): boolean;
   loadedIdentity(): LoadedChatIdentity | undefined;
-  encryptMessage(conversationId: string, text: string): SendPayload;
+  encryptMessage(conversationId: string, text: string, options?: EncryptMessageOptions): SendPayload;
+  /** Streaming encrypt for Chat media (`encryptStream` / secretstream). */
+  encryptStream(plaintext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
   prepareMessageDelete(
     conversationId: string,
     sequenceIds: string[],
