@@ -7,6 +7,7 @@ import type {
   BoobsConfig,
   ConversationSettings,
   DefaultsConfig,
+  LeaveConfig,
   LlmAllow,
   LlmConfig,
   LlmContextMode,
@@ -14,6 +15,13 @@ import type {
   TruncateStrategy,
   XpConfig,
 } from "./types.js";
+
+export const DEFAULT_LEAVE_TEXT = "@{username} has left";
+
+export const DEFAULT_LEAVE_CONFIG: LeaveConfig = {
+  enabled: true,
+  text: DEFAULT_LEAVE_TEXT,
+};
 
 export const DEFAULT_XP_CONFIG: XpConfig = {
   enabled: true,
@@ -58,6 +66,7 @@ export function loadDefaults(configPath: string): DefaultsConfig {
   if (!parsed?.welcome || !parsed?.flood || !parsed?.warns) {
     throw new Error(`Invalid config file: ${configPath}`);
   }
+  parsed.leave = normalizeLeaveConfig(parsed.leave);
   parsed.filters ??= [];
   parsed.poll ??= { interval_ms: 12_000, max_results: 50 };
   parsed.poll.chat_idle_max_ms ??= 120_000;
@@ -84,10 +93,13 @@ export function resolveConversationConfig(
 ): ResolvedConversationConfig {
   const llm = { ...DEFAULT_LLM_CONFIG, ...defaults.llm };
   const boobs = normalizeBoobsConfig(defaults.boobs);
+  const leave = normalizeLeaveConfig(defaults.leave);
   const xp = normalizeXpConfig(defaults.xp);
   return {
     welcomeEnabled: override?.welcome_enabled ?? defaults.welcome.enabled,
     welcomeText: override?.welcome_text ?? defaults.welcome.text,
+    leaveEnabled: override?.leave_enabled ?? leave.enabled,
+    leaveText: override?.leave_text?.trim() ? override.leave_text : leave.text,
     rules: override?.rules ?? defaults.rules,
     help: override?.help ?? defaults.help,
     floodMaxMessages: override?.flood_max_messages ?? defaults.flood.max_messages,
@@ -158,6 +170,14 @@ export function normalizeXpConfig(raw: Partial<XpConfig> | undefined): XpConfig 
   const size = nonNegativeInt(merged.leaderboard_size, DEFAULT_XP_CONFIG.leaderboard_size);
   merged.leaderboard_size = Math.min(25, Math.max(1, size));
   return merged;
+}
+
+export function normalizeLeaveConfig(raw: Partial<LeaveConfig> | undefined): LeaveConfig {
+  const text = typeof raw?.text === "string" ? raw.text.trim() : "";
+  return {
+    enabled: raw?.enabled ?? DEFAULT_LEAVE_CONFIG.enabled,
+    text: text ? raw?.text ?? DEFAULT_LEAVE_CONFIG.text : DEFAULT_LEAVE_CONFIG.text,
+  };
 }
 
 export function normalizeBoobsConfig(raw: Partial<BoobsConfig> | undefined): BoobsConfig {

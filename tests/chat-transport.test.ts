@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { parseChatConversationIds } from "../src/chat/ids.js";
 import { chatEventToDm } from "../src/chat/normalize.js";
+import { ChatActivityIntake } from "../src/chat/activity.js";
 import { ChatPoller } from "../src/chat/poller.js";
 import { ChatService } from "../src/chat/service.js";
 import type {
@@ -300,8 +301,37 @@ describe("Chat ids and wire shapes", () => {
     expect(join?.eventType).toBe("ParticipantsJoin");
     expect(join?.participantIds).toEqual(["new-1"]);
 
+    const left = chatEventToDm(
+      GROUP,
+      { id: "evt-left", sequence_id: "77" },
+      {
+        type: "groupChange",
+        changeType: "membersRemoved",
+        memberIds: ["alice-1", "bob-2"],
+        sequenceId: "77",
+        senderId: "owner-1",
+      },
+    );
+    expect(left).toMatchObject({
+      id: "evt-left",
+      eventType: "ParticipantsLeave",
+      participantIds: ["alice-1", "bob-2"],
+      sequenceId: "77",
+      senderId: "owner-1",
+    });
+
+    expect(
+      chatEventToDm(
+        GROUP,
+        { id: "evt-admin" },
+        { type: "groupChange", changeType: "adminsRemoved", memberIds: ["alice-1"] },
+      ),
+    ).toBeUndefined();
     expect(
       chatEventToDm(GROUP, { id: "evt-k" }, { type: "keyChange" }),
+    ).toBeUndefined();
+    expect(
+      chatEventToDm(GROUP, { id: "evt-acct" }, { type: "memberDeleted", memberIds: ["alice-1"] }),
     ).toBeUndefined();
   });
 
@@ -556,6 +586,53 @@ describe("Chat transport into the moderation engine", () => {
     const helpBatch = cipher.batches.at(-1) ?? [];
     expect(helpBatch).toContain("b64-help");
     expect(helpBatch).not.toContain("b64-old");
+  });
+
+  it("posts one leave line when Activity and the poll both deliver membersRemoved", async () => {
+    const { http, cipher, dm, poller, service, store } = setup();
+    dm.addUser({ id: "alice-1", username: "alice", name: "Alice" });
+    cipher.events.set("b64-left", {
+      type: "groupChange",
+      changeType: "membersRemoved",
+      memberIds: ["alice-1"],
+      sequenceId: "77",
+      id: "msg-leave",
+      senderId: "owner-1",
+    });
+    http.pages.push({ data: [] });
+    await poller.pollOnce();
+
+    const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
+    const intake = new ChatActivityIntake(service, engine, [GROUP]);
+    await intake.handle({
+      data: {
+        event_type: "chat.received",
+        event_uuid: "activity-1",
+        payload: {
+          id: "activity-1",
+          sender_id: "owner-1",
+          conversation_id: GROUP,
+          encoded_event: "b64-left",
+          sequence_id: "77",
+        },
+      },
+    });
+    expect(cipher.texts).toEqual(["@alice has left"]);
+    expect(dm.sent).toHaveLength(0);
+
+    http.pages.push({
+      data: [
+        {
+          id: "msg-leave",
+          sender_id: "owner-1",
+          encoded_event: "b64-left",
+          sequence_id: "77",
+          conversation_id: GROUP,
+        },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.texts).toEqual(["@alice has left"]);
   });
 
   it("does not advance the watermark when decrypt fails", async () => {

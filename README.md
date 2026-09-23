@@ -75,18 +75,19 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 ## Features
 
 1. **Welcome** — on `ParticipantsJoin`, send configurable text (`{username}`, `{user_id}`, `{name}`).
-2. **Rules / help** — `!rules` and `!help` reply in the group.
-3. **Warn** — `!warn @user [reason]`, or reply to their message with `!warn` / `/warn`; counts in SQLite; at N warns, soft-mute + admin notify.
-4. **Delete** — `!del [event_id]`. Classic group DMs call `DELETE /2/dm_events/:event_id`, which succeeds only for events the authenticated account sent. Encrypted Chat (`g…`) calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`: the bot's own messages, and other people's messages when this account administers the group. Chat delete needs a sequence id from a message this process decrypted.
-5. **Anti-flood** — more than N messages in a window → delete attempt, local mute, warn.
-6. **Filters** — keyword / regex rules auto-delete (attempt) and optionally warn.
-7. **Notes** — `!note key text` / `!get key` per conversation.
-8. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
-9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
-10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
-11. **Adult image** — `!boobs` posts one random chest / cleavage photo. `!ass` and `!booty` post one random butt photo and share that switch. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed. An optional vision check (`BOOBS_VISION`) is off by default.
-12. **XP / levels** — messages (and Chat reactions, when those events arrive) earn XP on a ComBot-like curve. Crossing a level posts `@handle leveled up to level N!`. Reply `+` or `-` to give or take one level. `!xp` / `!level` / `!rank` and `!top`. On by default. See [XP and levels](#xp-and-levels).
-13. **Games** — anyone in the group can play. Games start with `!dice` (1d6, or notation like `!dice 2d20`).
+2. **Leave** — on classic `ParticipantsLeave` and Chat `groupChange` `membersRemoved` (a voluntary leave and a remove/kick are the same event), post `@{username} has left` in that conversation. On by default (`leave.enabled`, or `!set leave_enabled off`). The bot does not announce its own departure. Activity and the Chat poll share one announcement per event.
+3. **Rules / help** — `!rules` and `!help` reply in the group.
+4. **Warn** — `!warn @user [reason]`, or reply to their message with `!warn` / `/warn`; counts in SQLite; at N warns, soft-mute + admin notify.
+5. **Delete** — `!del [event_id]`. Classic group DMs call `DELETE /2/dm_events/:event_id`, which succeeds only for events the authenticated account sent. Encrypted Chat (`g…`) calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all`: the bot's own messages, and other people's messages when this account administers the group. Chat delete needs a sequence id from a message this process decrypted.
+6. **Anti-flood** — more than N messages in a window → delete attempt, local mute, warn.
+7. **Filters** — keyword / regex rules auto-delete (attempt) and optionally warn.
+8. **Notes** — `!note key text` / `!get key` per conversation.
+9. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
+10. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
+11. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
+12. **Adult image** — `!boobs` posts one random chest / cleavage photo. `!ass` and `!booty` post one random butt photo and share that switch. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed. An optional vision check (`BOOBS_VISION`) is off by default.
+13. **XP / levels** — messages (and Chat reactions, when those events arrive) earn XP on a ComBot-like curve. Crossing a level posts `@handle leveled up to level N!`. Reply `+` or `-` to give or take one level. `!xp` / `!level` / `!rank` and `!top`. On by default. See [XP and levels](#xp-and-levels).
+14. **Games** — anyone in the group can play. Games start with `!dice` (1d6, or notation like `!dice 2d20`).
 
 ## Commands
 
@@ -116,7 +117,7 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 - `!del [event_id]` — classic DMs: own events only (`DELETE /2/dm_events/:event_id`); Chat: `delete_for_all` for own messages, or others' when this account is a group admin
 - `!note` / `!note key` / `!note key text`
 - `!get key`
-- `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`, `xp_enabled` (`on`|`off`)
+- `!set <key> <value>` — `welcome_enabled`, `welcome_text`, `leave_enabled`, `leave_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`|`admins`), `llm_context_mode` (`none`|`recent`|`full`|`conversation`), `llm_recent_messages`, `xp_enabled` (`on`|`off`)
 - `!settings`
 - `!admin add|remove @user` — a reply with no @user targets that sender
 - `!admins`
@@ -293,7 +294,7 @@ X has no “add bot to chat” switch like Telegram.
 npm start
 ```
 
-On first poll the bot records a watermark and **does not replay 30 days of history** (avoids mass welcomes). After that it processes new `MessageCreate` / `ParticipantsJoin` / `ParticipantsLeave` events for group conversations only.
+On first poll the bot records a watermark and **does not replay 30 days of history** (avoids mass welcomes and leave lines). After that it processes new `MessageCreate` / `ParticipantsJoin` / `ParticipantsLeave` events for group conversations only. A leave posts `@{username} has left`.
 
 ### 4. Run against an encrypted X Chat group
 
@@ -508,7 +509,7 @@ npm test
 ## Configuration
 
 - `.env` — credentials and IDs (see `.env.example`), including Activity and `DM_POLL`.
-- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, adult-image enablement (`!boobs`, `!ass`, `!booty`) and the optional `boobs.vision` check (`BOOBS_VISION`, default off). Those rate limits default to unlimited (`0`).
+- `config/default.yaml` — welcome text, leave text (`leave.enabled`, on by default), rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, adult-image enablement (`!boobs`, `!ass`, `!booty`) and the optional `boobs.vision` check (`BOOBS_VISION`, default off). Those rate limits default to unlimited (`0`).
 - SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts). Optional adult-image rate-limit timestamps (not image URLs) are stored only when a positive cap and window are configured. `!ass` and `!booty` share that window with `!boobs`.
 
 Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.

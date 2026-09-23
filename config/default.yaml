@@ -7,6 +7,14 @@ welcome:
     Welcome @{username}!
     Please read the group rules with !rules. Type !help for commands.
 
+# Posted when someone leaves or is removed. X reports both as the same event
+# (classic ParticipantsLeave, Chat groupChange membersRemoved), so the line
+# does not try to tell a kick apart from a voluntary leave. On by default.
+# `{username}` is the @handle when X returns one, otherwise the user id.
+leave:
+  enabled: true
+  text: "@{username} has left"
+
 rules: |
   1. Be respectful — no harassment or hate.
   2. No spam, floods, or unsolicited promo.
