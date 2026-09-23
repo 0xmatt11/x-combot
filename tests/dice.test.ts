@@ -1,0 +1,205 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ModerationEngine } from "../src/bot/engine.js";
+import {
+  DICE_HELP,
+  MAX_DICE,
+  MAX_MODIFIER,
+  MAX_SIDES,
+  diceReply,
+  formatDiceRoll,
+  parseDiceNotation,
+  rollDice,
+  type DiceSpec,
+} from "../src/bot/games/index.js";
+import { loadDefaults } from "../src/config.js";
+import { Store } from "../src/store.js";
+import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
+import { MockXClient } from "../src/x/mock-client.js";
+
+const alice: XUser = { id: "u-alice", username: "alice", name: "Alice" };
+const owner: XUser = { id: "u-owner", username: "owner", name: "Owner" };
+const groupId = "1578398451921985538";
+
+const defaults: DefaultsConfig = {
+  welcome: { enabled: true, text: "Welcome @{username}!" },
+  rules: "Be nice.",
+  help: "Type !rules",
+  flood: { max_messages: 3, window_ms: 10_000, mute_ms: 60_000, warn_on_flood: true },
+  warns: { limit: 2, auto_mute_ms: 60_000, notify_admins: true },
+  filters: [],
+  poll: { interval_ms: 1000, max_results: 50 },
+  delete: { attempt_on_filter: true, attempt_on_flood: true, attempt_on_mute: true },
+};
+
+function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "senderId" | "text">): DmEvent {
+  const sender = partial.sender ?? (partial.senderId === owner.id ? owner : alice);
+  return {
+    eventType: "MessageCreate",
+    conversationId: groupId,
+    participantIds: [],
+    participants: [],
+    mentions: [],
+    sender,
+    ...partial,
+  };
+}
+
+describe("parseDiceNotation", () => {
+  it("defaults a blank roll to 1d6", () => {
+    const spec: DiceSpec = { count: 1, sides: 6, modifier: 0 };
+    expect(parseDiceNotation(undefined)).toEqual({ ok: true, spec });
+    expect(parseDiceNotation(null)).toEqual({ ok: true, spec });
+    expect(parseDiceNotation("")).toEqual({ ok: true, spec });
+    expect(parseDiceNotation("   ")).toEqual({ ok: true, spec });
+  });
+
+  it("parses NdM, a bare count, and modifiers", () => {
+    expect(parseDiceNotation("2d20")).toEqual({
+      ok: true,
+      spec: { count: 2, sides: 20, modifier: 0 },
+    });
+    expect(parseDiceNotation("d20")).toEqual({
+      ok: true,
+      spec: { count: 1, sides: 20, modifier: 0 },
+    });
+    expect(parseDiceNotation("D6")).toEqual({
+      ok: true,
+      spec: { count: 1, sides: 6, modifier: 0 },
+    });
+    expect(parseDiceNotation("2")).toEqual({
+      ok: true,
+      spec: { count: 2, sides: 6, modifier: 0 },
+    });
+    expect(parseDiceNotation("1d6+2")).toEqual({
+      ok: true,
+      spec: { count: 1, sides: 6, modifier: 2 },
+    });
+    expect(parseDiceNotation("2D6 - 1")).toEqual({
+      ok: true,
+      spec: { count: 2, sides: 6, modifier: -1 },
+    });
+  });
+
+  it("rejects junk and rolls past the caps", () => {
+    for (const input of [
+      "banana",
+      "2d",
+      "d",
+      "1d6+",
+      "2d20 drop",
+      "0d6",
+      "0",
+      "d0",
+      `${MAX_DICE + 1}d6`,
+      `1d${MAX_SIDES + 1}`,
+      `1d6+${MAX_MODIFIER + 1}`,
+      `1d6-${MAX_MODIFIER + 1}`,
+      "999999999999999999999d6",
+    ]) {
+      const parsed = parseDiceNotation(input);
+      expect(parsed, input).toEqual({ ok: false, help: DICE_HELP });
+    }
+  });
+
+  it("accepts the cap exactly", () => {
+    expect(parseDiceNotation(`${MAX_DICE}d${MAX_SIDES}+${MAX_MODIFIER}`)).toEqual({
+      ok: true,
+      spec: { count: MAX_DICE, sides: MAX_SIDES, modifier: MAX_MODIFIER },
+    });
+  });
+});
+
+describe("rollDice", () => {
+  it("maps the RNG onto inclusive face bounds", () => {
+    const spec: DiceSpec = { count: 4, sides: 20, modifier: 2 };
+    const samples = [0, 0.999999, 1, -4];
+    let i = 0;
+    const roll = rollDice(spec, () => samples[i++] ?? Number.NaN);
+    expect(roll.rolls).toEqual([1, 20, 20, 1]);
+    expect(roll.total).toBe(1 + 20 + 20 + 1 + 2);
+  });
+
+  it("clamps a wild RNG so no face leaves 1..sides", () => {
+    const spec: DiceSpec = { count: MAX_DICE, sides: MAX_SIDES, modifier: 0 };
+    const low = rollDice(spec, () => Number.NEGATIVE_INFINITY);
+    const high = rollDice(spec, () => 50);
+    expect(low.rolls).toHaveLength(MAX_DICE);
+    expect(high.rolls).toHaveLength(MAX_DICE);
+    expect(low.rolls.every((face) => face === 1)).toBe(true);
+    expect(high.rolls.every((face) => face === MAX_SIDES)).toBe(true);
+    expect(low.total).toBe(MAX_DICE);
+    expect(high.total).toBe(MAX_DICE * MAX_SIDES);
+  });
+
+  it("formats a single die and a modified pool", () => {
+    expect(
+      formatDiceRoll({
+        spec: { count: 1, sides: 6, modifier: 0 },
+        rolls: [4],
+        total: 4,
+      }),
+    ).toBe("🎲 You rolled a 4");
+    expect(
+      formatDiceRoll({
+        spec: { count: 1, sides: 20, modifier: 0 },
+        rolls: [8],
+        total: 8,
+      }),
+    ).toBe("🎲 You rolled an 8");
+    expect(
+      diceReply("2d6+2", () => 0),
+    ).toBe("🎲 You rolled 1, 1 +2 (total 4)");
+    expect(diceReply("nope")).toBe(DICE_HELP);
+  });
+});
+
+describe("!dice command", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  function setup(): { engine: ModerationEngine; client: MockXClient } {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(owner);
+    const config: BotRuntimeConfig = {
+      botUserId: "bot-1",
+      ownerId: owner.id,
+      globalAdminIds: [],
+      defaults,
+    };
+    return { engine: new ModerationEngine(store, client, config), client };
+  }
+
+  it("lets a non-admin roll 1d6", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { engine, client } = setup();
+    await engine.processEvent(message({ id: "d1", senderId: alice.id, text: "!dice" }));
+    expect(client.sent.map((row) => row.text)).toEqual(["🎲 You rolled a 4"]);
+  });
+
+  it("accepts /dice notation and answers invalid args with help", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { engine, client } = setup();
+    await engine.processEvent(message({ id: "d2", senderId: alice.id, text: "/dice d20" }));
+    await engine.processEvent(message({ id: "d3", senderId: alice.id, text: "!dice 99d6" }));
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "🎲 You rolled a 1",
+      DICE_HELP,
+    ]);
+    expect(client.sent.some((row) => /admins/i.test(row.text))).toBe(false);
+  });
+
+  it("lists !dice under games in the default help text", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    expect(loaded.help).toMatch(/Games:/);
+    expect(loaded.help).toMatch(/!dice/);
+    expect(loaded.help).toMatch(/2d20/);
+  });
+});

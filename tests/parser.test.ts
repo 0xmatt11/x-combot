@@ -124,6 +124,13 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!top")).toBeUndefined();
   });
 
+  it("parses !dice with optional notation and a slash alias", () => {
+    expect(parseCommand("!dice")).toEqual({ name: "dice" });
+    expect(parseCommand("  /DICE  ")).toEqual({ name: "dice" });
+    expect(parseCommand("!dice 2d20")).toEqual({ name: "dice", notation: "2d20" });
+    expect(parseCommand("!dice 1d6+2")).toEqual({ name: "dice", notation: "1d6+2" });
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",
@@ -163,6 +170,7 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!boobs")).toBeUndefined();
     expect(parseUnknownBang("!ass")).toBeUndefined();
     expect(parseUnknownBang("!booty extra")).toBeUndefined();
+    expect(parseUnknownBang("!dice 2d20")).toBeUndefined();
     expect(parseUnknownBang("!summary focus")).toBeUndefined();
     expect(parseUnknownBang("!delete 12")).toBeUndefined();
     expect(parseUnknownBang("!warn")).toBeUndefined();
