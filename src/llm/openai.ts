@@ -1,5 +1,14 @@
 import { log } from "../log.js";
-import type { ChatMessage, LlmClient } from "./client.js";
+import type { ChatMessage, LlmClient, LlmVisionImage } from "./client.js";
+
+type WireContent =
+  | string
+  | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+
+interface WireMessage {
+  role: "system" | "user" | "assistant";
+  content: WireContent;
+}
 
 export interface OpenAiCompatibleOptions {
   apiKey?: string;
@@ -22,6 +31,32 @@ export class OpenAiCompatibleClient implements LlmClient {
   }
 
   async complete(messages: ChatMessage[]): Promise<string> {
+    return this.request(messages, 0.4, this.timeoutMs);
+  }
+
+  /**
+   * One image plus a text prompt. Uses the same Chat Completions endpoint as
+   * `complete`, with an `image_url` data URI. Grok/xAI and OpenAI both accept it.
+   * The request body is not logged.
+   */
+  async completeVision(prompt: string, image: LlmVisionImage): Promise<string> {
+    const mime = image.mimeType === "image/jpg" || image.mimeType === "image/pjpeg" ? "image/jpeg" : image.mimeType;
+    return this.request(
+      [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: `data:${mime};base64,${image.base64}` } },
+          ],
+        },
+      ],
+      0,
+      Math.min(this.timeoutMs, 20_000),
+    );
+  }
+
+  private async request(messages: WireMessage[], temperature: number, timeoutMs: number): Promise<string> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -35,9 +70,9 @@ export class OpenAiCompatibleClient implements LlmClient {
       body: JSON.stringify({
         model: this.model,
         messages,
-        temperature: 0.4,
+        temperature,
       }),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const raw = await response.text();
