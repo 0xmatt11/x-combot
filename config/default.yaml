@@ -20,6 +20,7 @@ help: |
     !ask <question> — ask the LLM (or @botname …)
     !summarize [focus] — summarize the group thread (loads history)
     !analyze [prompt] — answer about the whole conversation
+    !notacommand — unknown bang commands get a short LLM joke when the LLM is on (quiet if it is off)
 
   Admin commands:
     !warn @user [reason] — add a warning

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isAdmin, parseCommand, parseLlmWake, parseUserRef, renderTemplate } from "../src/bot/parser.js";
+import {
+  isAdmin,
+  parseCommand,
+  parseLlmWake,
+  parseUnknownBang,
+  parseUserRef,
+  renderTemplate,
+} from "../src/bot/parser.js";
 
 describe("parseCommand", () => {
   it("parses public help and rules commands", () => {
@@ -93,6 +100,34 @@ describe("parseCommand", () => {
       prompt: "who owns the launch?",
     });
     expect(parseCommand("!ask")).toEqual({ name: "ask", prompt: "" });
+  });
+});
+
+describe("parseUnknownBang", () => {
+  it("captures invented bang commands and their arguments", () => {
+    expect(parseUnknownBang("!diediesillygoat")).toEqual({
+      token: "!diediesillygoat",
+      args: "",
+    });
+    expect(parseUnknownBang("!banana please clap")).toEqual({
+      token: "!banana",
+      args: "please clap",
+    });
+    expect(parseUnknownBang("  /Banana  ")).toEqual({ token: "/Banana", args: "" });
+  });
+
+  it("ignores plain text, known commands, and names the bang regex cannot parse", () => {
+    expect(parseUnknownBang("hello there")).toBeUndefined();
+    expect(parseUnknownBang("talk !banana later")).toBeUndefined();
+    expect(parseUnknownBang("!help")).toBeUndefined();
+    expect(parseUnknownBang("!ask what now")).toBeUndefined();
+    expect(parseUnknownBang("!boobs")).toBeUndefined();
+    expect(parseUnknownBang("!summary focus")).toBeUndefined();
+    expect(parseUnknownBang("!delete 12")).toBeUndefined();
+    expect(parseUnknownBang("!warn")).toBeUndefined();
+    expect(parseUnknownBang("!del not-an-id")).toBeUndefined();
+    expect(parseUnknownBang("!unknown-cmd")).toBeUndefined();
+    expect(parseCommand("!diediesillygoat")).toBeUndefined();
   });
 });
 

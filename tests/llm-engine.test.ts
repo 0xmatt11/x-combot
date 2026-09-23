@@ -155,4 +155,129 @@ describe("LLM engine", () => {
     await engine.processEvent(message({ id: "q4", senderId: alice.id, text: "!ask hello" }));
     expect(client.sent[0]?.text).toMatch(/LLM_PROVIDER/);
   });
+
+  it("leaves known commands unchanged", async () => {
+    const llm = new MockLlmClient("should not be used");
+    const { engine, client } = setup(llm);
+    await engine.processEvent(message({ id: "k1", senderId: alice.id, text: "!help" }));
+    await engine.processEvent(message({ id: "k2", senderId: alice.id, text: "!boobs" }));
+    await engine.processEvent(message({ id: "k3", senderId: alice.id, text: "hello there" }));
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "Type !rules",
+      "!boobs is disabled on this bot.",
+    ]);
+    expect(llm.calls).toHaveLength(0);
+    expect(client.conversationListCalls).toHaveLength(0);
+  });
+
+  it("replies to an unknown bang with a witty prompt and no group history", async () => {
+    const llm = new MockLlmClient("the goat has left the chat");
+    const { engine, client } = setup(llm, { max_reply_chars: 80 });
+    client.events.push(
+      message({ id: "h1", senderId: owner.id, text: "secret thread", createdAt: "2026-01-01T00:00:01Z" }),
+    );
+    const result = await engine.processEvent(
+      message({ id: "u1", senderId: alice.id, text: "!diediesillygoat" }),
+    );
+    expect(result.llm).toBe(true);
+    expect(client.sent.at(-1)?.text).toBe("the goat has left the chat");
+    expect(client.conversationListCalls).toHaveLength(0);
+    const system = llm.calls[0]?.[0]?.content ?? "";
+    const user = llm.calls[0]?.[1]?.content ?? "";
+    expect(system).toMatch(/one or two short/i);
+    expect(system).toMatch(/harmful/i);
+    expect(system).toMatch(/80 characters/);
+    expect(user).toContain("!diediesillygoat");
+    expect(user).not.toContain("secret thread");
+    expect(user).not.toMatch(/Group DM context/);
+  });
+
+  it("includes unknown-command arguments in the witty prompt", async () => {
+    const llm = new MockLlmClient("a banana walks into the chat");
+    const { engine } = setup(llm);
+    await engine.processEvent(
+      message({ id: "u2", senderId: alice.id, text: "!banana please clap" }),
+    );
+    const user = llm.calls[0]?.[1]?.content ?? "";
+    expect(user).toContain("!banana");
+    expect(user).toContain("please clap");
+  });
+
+  it("caps the witty reply at llm max_reply_chars", async () => {
+    const llm = new MockLlmClient("x".repeat(100));
+    const { engine, client } = setup(llm, { max_reply_chars: 20 });
+    await engine.processEvent(message({ id: "u3", senderId: alice.id, text: "!banana" }));
+    expect(client.sent[0]?.text.length).toBeLessThanOrEqual(20);
+  });
+
+  it("stays quiet when the LLM is disabled, unconfigured, admin-only, or rate-limited", async () => {
+    const disabled = new MockLlmClient("nope");
+    const disabledSetup = setup(disabled, { enabled: false });
+    await disabledSetup.engine.processEvent(
+      message({ id: "d1", senderId: alice.id, text: "!diediesillygoat" }),
+    );
+    expect(disabledSetup.client.sent).toHaveLength(0);
+    expect(disabled.calls).toHaveLength(0);
+
+    const adminsOnly = new MockLlmClient("admin joke");
+    const adminSetup = setup(adminsOnly, { allow: "admins" });
+    await adminSetup.engine.processEvent(
+      message({ id: "a1", senderId: alice.id, text: "!banana" }),
+    );
+    expect(adminSetup.client.sent).toHaveLength(0);
+    expect(adminsOnly.calls).toHaveLength(0);
+    const allowed = await adminSetup.engine.processEvent(
+      message({ id: "a2", senderId: owner.id, text: "!banana" }),
+    );
+    expect(allowed.llm).toBe(true);
+    expect(adminSetup.client.sent.at(-1)?.text).toBe("admin joke");
+
+    const limited = new MockLlmClient("once");
+    const limitedSetup = setup(limited, { rate_limit_per_user: 1, rate_limit_window_ms: 60_000 });
+    await limitedSetup.engine.processEvent(
+      message({ id: "r3", senderId: alice.id, text: "!ask one" }),
+      2000,
+    );
+    await limitedSetup.engine.processEvent(
+      message({ id: "r4", senderId: alice.id, text: "!goatnoise" }),
+      2001,
+    );
+    expect(limited.calls).toHaveLength(1);
+    expect(limitedSetup.client.sent.map((row) => row.text)).toEqual(["once"]);
+
+    const missingStore = new Store(":memory:");
+    stores.push(missingStore);
+    const missingClient = new MockXClient();
+    const missingEngine = new ModerationEngine(missingStore, missingClient, runtime());
+    await missingEngine.processEvent(
+      message({ id: "m1", senderId: alice.id, text: "!banana" }),
+    );
+    expect(missingClient.sent).toHaveLength(0);
+  });
+
+  it("rate-limits a burst of unknown bang commands without a second reply", async () => {
+    const llm = new MockLlmClient("once");
+    const { engine, client } = setup(llm, {
+      rate_limit_per_user: 1,
+      rate_limit_window_ms: 60_000,
+    });
+    await engine.processEvent(message({ id: "b1", senderId: alice.id, text: "!banana" }), 3000);
+    await engine.processEvent(message({ id: "b2", senderId: alice.id, text: "!goatnoise" }), 3001);
+    expect(llm.calls).toHaveLength(1);
+    expect(client.sent.map((row) => row.text)).toEqual(["once"]);
+  });
+
+  it("does not spend an LLM call on an unknown bang from a muted user", async () => {
+    const llm = new MockLlmClient("muted joke");
+    const { engine, client, store } = setup(llm);
+    store.mute(groupId, alice.id, 10_000, "manual");
+    const result = await engine.processEvent(
+      message({ id: "mute1", senderId: alice.id, text: "!banana" }),
+      1000,
+    );
+    expect(result.muted).toBe(true);
+    expect(result.llm).toBe(false);
+    expect(llm.calls).toHaveLength(0);
+    expect(client.sent).toHaveLength(0);
+  });
 });
