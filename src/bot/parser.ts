@@ -27,18 +27,91 @@ export type ParsedCommand =
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
-const COMMAND_RE = /^[!/]([A-Za-z]+)(?:\s+([\s\S]*))?$/;
+/**
+ * Names `parseCommand` recognizes, including aliases that map to another command.
+ * A bang that uses one of these names keeps today's behavior even when the
+ * arguments are incomplete (`!warn` with no target stays a normal message).
+ */
+const KNOWN_COMMAND_NAMES = new Set([
+  "help",
+  "rules",
+  "settings",
+  "admins",
+  "warn",
+  "kick",
+  "warns",
+  "unwarn",
+  "unmute",
+  "mute",
+  "del",
+  "delete",
+  "note",
+  "get",
+  "set",
+  "admin",
+  "ask",
+  "summarize",
+  "summary",
+  "analyze",
+  "boobs",
+]);
+
+const COMMAND_RE = /^([!/])([A-Za-z]+)(?:\s+([\s\S]*))?$/;
 const USERNAME_RE = /^@?([A-Za-z0-9_]{1,15})$/;
 const SNOWFLAKE_RE = /^[0-9]{1,19}$/;
 
-export function parseCommand(text: string | undefined | null): ParsedCommand | undefined {
+interface BangMatch {
+  prefix: "!" | "/";
+  /** Lowercase command name. */
+  name: string;
+  /** Command name as typed, original case. */
+  token: string;
+  rest: string;
+}
+
+function matchBang(text: string | undefined | null): BangMatch | undefined {
   if (!text) return undefined;
   const trimmed = text.trim();
   const match = trimmed.match(COMMAND_RE);
   if (!match) return undefined;
+  const token = match[2]!;
+  const prefix = match[1];
+  if (prefix !== "!" && prefix !== "/") return undefined;
+  return {
+    prefix,
+    name: token.toLowerCase(),
+    token,
+    rest: match[3]?.trim() ?? "",
+  };
+}
 
-  const name = match[1]!.toLowerCase();
-  const rest = match[2]?.trim() ?? "";
+export interface UnknownBangCommand {
+  /** Invented command as typed, including the `!` or `/` prefix. */
+  token: string;
+  args: string;
+}
+
+/**
+ * A `!name` / `/name` message whose name is not a registered command.
+ * Plain text, mentions, and malformed known commands return undefined.
+ */
+export function parseUnknownBang(
+  text: string | undefined | null,
+): UnknownBangCommand | undefined {
+  const bang = matchBang(text);
+  if (!bang || KNOWN_COMMAND_NAMES.has(bang.name)) return undefined;
+  return {
+    token: `${bang.prefix}${bang.token}`,
+    args: bang.rest,
+  };
+}
+
+export function parseCommand(text: string | undefined | null): ParsedCommand | undefined {
+  const bang = matchBang(text);
+  if (!bang) return undefined;
+
+  const name = bang.name;
+  const rest = bang.rest;
 
   switch (name) {
     case "help":

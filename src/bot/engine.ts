@@ -12,7 +12,7 @@ import type {
 import { isChatGroupId } from "../chat/ids.js";
 import { displayName, isGroupConversation, type XClient } from "../x/client.js";
 import type { LlmClient } from "../llm/client.js";
-import { buildLlmMessages, selectContextTurns, splitReply } from "../llm/context.js";
+import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
   containsBannedAgeTerm,
@@ -29,9 +29,11 @@ import {
   llmRequestFromCommand,
   parseCommand,
   parseLlmWake,
+  parseUnknownBang,
   renderTemplate,
   type LlmWakeMatch,
   type ParsedCommand,
+  type UnknownBangCommand,
   type UserRef,
 } from "./parser.js";
 
@@ -151,6 +153,26 @@ export class ModerationEngine {
         return actions;
       }
       await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
+      return actions;
+    }
+
+    const unknownBang = parseUnknownBang(event.text);
+    if (unknownBang) {
+      if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
+        actions.muted = true;
+        if (settings.attemptDeleteOnMute) {
+          await this.tryDelete(event.id, actions, event);
+        }
+        return actions;
+      }
+      await this.handleUnknownCommand(
+        event,
+        unknownBang,
+        senderIsAdmin,
+        settings,
+        actions,
+        nowMs,
+      );
       return actions;
     }
 
@@ -363,6 +385,75 @@ export class ModerationEngine {
         actions,
       );
     }
+  }
+
+  /**
+   * Witty reply for a bang command this bot does not implement.
+   * Stays quiet when the LLM cannot run or the shared per-user limit is spent,
+   * so invented commands do not spam the group.
+   */
+  private async handleUnknownCommand(
+    event: DmEvent,
+    unknown: UnknownBangCommand,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const senderId = event.senderId!;
+    const skip = this.unknownCommandSkipReason(settings, senderIsAdmin);
+    if (skip) {
+      log.debug(
+        `Unknown command skipped (${skip}) conversation=${conversationId} token=${unknown.token}`,
+      );
+      return;
+    }
+
+    const uses = this.store.recordLlmUse(
+      conversationId,
+      senderId,
+      nowMs,
+      settings.llmRateLimitWindowMs,
+    );
+    if (uses > settings.llmRateLimitPerUser) {
+      log.debug(
+        `Unknown command skipped (rate-limit) conversation=${conversationId} token=${unknown.token}`,
+      );
+      return;
+    }
+
+    log.info(
+      `LLM unknown conversation=${conversationId} user=${senderId} token=${unknown.token}`,
+    );
+
+    try {
+      const messages = buildUnknownCommandMessages({
+        token: unknown.token,
+        args: unknown.args,
+        maxChars: settings.llmMaxReplyChars,
+      });
+      const answer = await this.llmClient!.complete(messages);
+      const reply = splitReply(answer, settings.llmMaxReplyChars)[0]?.trim();
+      if (!reply) return;
+      await this.reply(conversationId, reply, actions);
+      actions.llm = true;
+    } catch (error) {
+      log.warn(
+        `Unknown-command LLM reply failed for conversation=${conversationId}`,
+        error,
+      );
+    }
+  }
+
+  private unknownCommandSkipReason(
+    settings: ResolvedConversationConfig,
+    senderIsAdmin: boolean,
+  ): string | undefined {
+    if (!settings.llmEnabled) return "llm-disabled";
+    if (settings.llmAllow === "admins" && !senderIsAdmin) return "llm-admins-only";
+    if (!this.llmClient) return "llm-unconfigured";
+    return undefined;
   }
 
   private conversationConfig(conversationId: string): ResolvedConversationConfig {

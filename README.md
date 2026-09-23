@@ -83,7 +83,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 7. **Notes** — `!note key text` / `!get key` per conversation.
 8. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
-10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. OpenAI-compatible; mockable.
+10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
 11. **Adult image** — `!boobs` posts one random 18+ chest close-up. Off unless enabled. Rate-limited. Extra text is rejected so the search query cannot be changed.
 
 ## Commands
@@ -96,6 +96,7 @@ Public:
 - `!ask <question>` — LLM reply (also `@botname …` or configured wake prefixes)
 - `!summarize [focus]` — load conversation history and summarize
 - `!analyze [prompt]` — load conversation history and answer about the thread
+- `!<made-up>` — if the name is not a real command (`!diediesillygoat`, `!banana …`), a one- or two-sentence witty LLM reply. The bot stays quiet when the LLM is off, unconfigured, limited to admins, or rate-limited. See [Unknown bang commands](#unknown-bang-commands).
 
 Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 
@@ -374,6 +375,17 @@ Then in a group DM:
 - `!ask should we ship Friday?`
 - `@YourBotName what did Alice mean?`
 - `!summarize` / `!analyze who owns the launch?`
+- `!diediesillygoat` — not a real command; see below
+
+**Unknown bang commands**
+
+A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, and the rest of the list above) are unchanged, including incomplete ones such as `!warn` with no target. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
+
+The joke uses a dedicated prompt. It does **not** load group history, so it does not spend X read quota the way `!summarize` does. The invented command token and any arguments are included so the reply can riff on them. The model is asked for one or two group-chat sentences, with no actionable harmful advice, and the posted text is cut to `llm.max_reply_chars`.
+
+Unknown-command replies share the per-user LLM rate limit (`rate_limit_per_user` / `rate_limit_window_ms`) with `!ask`. That stops a burst of invented names from burning tokens.
+
+When the bot cannot call the model, it **stays quiet** instead of posting “unknown command” or “not a real command — try !help”. That covers `llm.enabled: false` (or `!set llm_enabled off`), a missing LLM client, and `llm.allow: admins` when the sender is not an admin. The same silence applies once the shared rate limit is used up. A real `!ask` still explains those gates out loud, because that command is a request for an answer. A failed joke completion is also silent (the error is logged).
 
 **Context modes** (YAML `llm.context_mode`, override with `!set llm_context_mode …`):
 
@@ -389,8 +401,8 @@ Then in a group DM:
 
 - X DM and Chat reads are typically **pay-per-use**. Full mode and summarize/analyze paginate history: classic groups use `GET /2/dm_conversations/:id/dm_events`; `g…` groups use decrypted `GET /2/chat/conversations/:id/events` (`RoutedXClient.listConversationDmEvents` → `ChatService.listHistory`). That is extra read volume on top of the poll loop. Polling itself also backs off on 429/402; a tight restart loop still spends credits (see **Rate limits and credits**).
 - LLM tokens scale with the assembled context (`full_max_chars` default 24k characters). Truncation drops oldest messages by default (`truncate: oldest`).
-- Per-user rate limits (`rate_limit_per_user` / `rate_limit_window_ms`) are stored in SQLite (timestamps only — prompts are not persisted or logged).
-- `llm.allow: admins` gates LLM commands to the owner / `ADMIN_IDS` / per-group admins.
+- Per-user rate limits (`rate_limit_per_user` / `rate_limit_window_ms`) are stored in SQLite (timestamps only — prompts are not persisted or logged). Unknown bang commands share that limit and do not fetch group history.
+- `llm.allow: admins` gates LLM commands, including unknown-bang jokes, to the owner / `ADMIN_IDS` / per-group admins.
 
 System prompt lives in `config/default.yaml` (`llm.system_prompt`). The bot is instructed that it is both a group assistant and the moderation bot, and that it cannot kick users on X.
 

@@ -1,3 +1,4 @@
+import type { ChatMessage } from "./client.js";
 import { displayName } from "../x/client.js";
 import type { DmEvent, LlmContextMode, TruncateStrategy } from "../types.js";
 
@@ -146,6 +147,34 @@ export function buildLlmMessages(params: {
 
   return [
     { role: "system", content: params.systemPrompt },
+    { role: "user", content: user },
+  ];
+}
+
+/**
+ * Prompt for a bang command the bot does not implement.
+ * No group history — only the invented token and its arguments.
+ */
+export function buildUnknownCommandMessages(params: {
+  token: string;
+  args: string;
+  maxChars: number;
+}): ChatMessage[] {
+  const cap = Math.max(1, params.maxChars);
+  const system = [
+    "You are a witty bot in a group chat.",
+    "Someone typed a bang command that this bot does not implement.",
+    "Reply with one or two short, playful sentences that riff on the invented command name and any arguments.",
+    "Be group-chat friendly.",
+    "Do not give actionable harmful, illegal, dangerous, or explicit advice, and do not provide steps to carry the command out.",
+    "Do not claim the command actually ran.",
+    `Stay within ${cap} characters.`,
+  ].join(" ");
+  const user = params.args
+    ? `Invented command: ${params.token}\nArguments: ${params.args}`
+    : `Invented command: ${params.token}`;
+  return [
+    { role: "system", content: system },
     { role: "user", content: user },
   ];
 }
