@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import type {
   ActivityConfig,
   ActivityTransport,
+  BoobsConfig,
   ConversationSettings,
   DefaultsConfig,
   LlmAllow,
@@ -12,6 +13,13 @@ import type {
   ResolvedConversationConfig,
   TruncateStrategy,
 } from "./types.js";
+
+export const DEFAULT_BOOBS_CONFIG: BoobsConfig = {
+  enabled: false,
+  rate_limit_per_user: 1,
+  rate_limit_per_conversation: 4,
+  rate_limit_window_ms: 300_000,
+};
 
 export const DEFAULT_LLM_CONFIG: LlmConfig = {
   enabled: true,
@@ -52,6 +60,7 @@ export function loadDefaults(configPath: string): DefaultsConfig {
   parsed.llm.wake_prefixes = parsed.llm.wake_prefixes?.length
     ? parsed.llm.wake_prefixes
     : DEFAULT_LLM_CONFIG.wake_prefixes;
+  parsed.boobs = normalizeBoobsConfig(parsed.boobs);
   return parsed;
 }
 
@@ -60,6 +69,7 @@ export function resolveConversationConfig(
   override: ConversationSettings | undefined,
 ): ResolvedConversationConfig {
   const llm = { ...DEFAULT_LLM_CONFIG, ...defaults.llm };
+  const boobs = normalizeBoobsConfig(defaults.boobs);
   return {
     welcomeEnabled: override?.welcome_enabled ?? defaults.welcome.enabled,
     welcomeText: override?.welcome_text ?? defaults.welcome.text,
@@ -90,7 +100,26 @@ export function resolveConversationConfig(
     llmMaxPages: llm.max_pages,
     llmWakePrefixes: llm.wake_prefixes,
     llmSystemPrompt: llm.system_prompt,
+    boobsEnabled: boobs.enabled,
+    boobsRateLimitPerUser: boobs.rate_limit_per_user,
+    boobsRateLimitPerConversation: boobs.rate_limit_per_conversation,
+    boobsRateLimitWindowMs: boobs.rate_limit_window_ms,
   };
+}
+
+export function normalizeBoobsConfig(raw: Partial<BoobsConfig> | undefined): BoobsConfig {
+  const merged: BoobsConfig = { ...DEFAULT_BOOBS_CONFIG, ...raw };
+  if (!Number.isFinite(merged.rate_limit_per_user) || merged.rate_limit_per_user < 1) {
+    merged.rate_limit_per_user = DEFAULT_BOOBS_CONFIG.rate_limit_per_user;
+  }
+  if (!Number.isFinite(merged.rate_limit_per_conversation) || merged.rate_limit_per_conversation < 1) {
+    merged.rate_limit_per_conversation = DEFAULT_BOOBS_CONFIG.rate_limit_per_conversation;
+  }
+  if (!Number.isFinite(merged.rate_limit_window_ms) || merged.rate_limit_window_ms < 1_000) {
+    merged.rate_limit_window_ms = DEFAULT_BOOBS_CONFIG.rate_limit_window_ms;
+  }
+  merged.enabled = Boolean(merged.enabled);
+  return merged;
 }
 
 export function defaultConfigPath(): string {

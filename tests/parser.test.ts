@@ -70,6 +70,14 @@ describe("parseCommand", () => {
     });
   });
 
+  it("parses !boobs case-insensitively and keeps extra text off the query", () => {
+    expect(parseCommand("!boobs")).toEqual({ name: "boobs" });
+    expect(parseCommand("!BOOBS")).toEqual({ name: "boobs" });
+    expect(parseCommand("  /boobs  ")).toEqual({ name: "boobs" });
+    expect(parseCommand("!boobs teen")).toEqual({ name: "boobs", extra: "teen" });
+    expect(parseCommand("!boobs please")).toEqual({ name: "boobs", extra: "please" });
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",

@@ -3,6 +3,7 @@ import {
   CHAT_MESSAGE_EVENT_FIELDS,
   CREDITS_DEPLETED_BACKOFF_MS,
   LiveXClient,
+  dmMediaSpec,
   headerBackoffMs,
   type ApiError,
 } from "../src/x/live-client.js";
@@ -205,5 +206,76 @@ describe("LiveXClient 429 and 402", () => {
     const error = await capture(client().listDmEvents({}));
     expect(error.status).toBe(500);
     expect(error.retryAfterMs).toBeUndefined();
+  });
+});
+
+describe("DM image attach", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("maps gif uploads to dm_gif and still photos to dm_image", () => {
+    expect(dmMediaSpec("image/gif").mediaCategory).toBe("dm_gif");
+    expect(dmMediaSpec("image/jpeg").mediaCategory).toBe("dm_image");
+    expect(dmMediaSpec("image/png; charset=binary").mediaType).toBe("image/png");
+  });
+
+  it("uploads dm_image then sends attachments.media_id", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        const path = String(url);
+        if (path.endsWith("/2/media/upload/initialize")) {
+          return new Response(JSON.stringify({ data: { id: "999" } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (path.includes("/append") || path.includes("/finalize")) {
+          return new Response("", { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({ data: { dm_conversation_id: "1578", dm_event_id: "evt-9" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
+    const live = new LiveXClient({
+      tokens: {
+        accessToken: "test-access-token",
+        expiresAtMs: Date.now() + 60 * 60 * 1000,
+      },
+    });
+    const result = await live.sendImage("1578398451921985538", {
+      url: "https://i.redd.it/should-not-be-logged.jpg",
+      bytes: Uint8Array.from([1, 2, 3, 4]),
+      mimeType: "image/jpeg",
+    });
+    expect(result.dmEventId).toBe("evt-9");
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      "/2/media/upload/initialize",
+      "/2/media/upload/999/append",
+      "/2/media/upload/999/finalize",
+      "/2/dm_conversations/1578398451921985538/messages",
+    ]);
+    const initBody = JSON.parse(String(calls[0]?.init.body));
+    expect(initBody).toMatchObject({
+      media_type: "image/jpeg",
+      media_category: "dm_image",
+      total_bytes: 4,
+    });
+    expect(calls[1]?.init.body).toBeInstanceOf(FormData);
+    const message = JSON.parse(String(calls[3]?.init.body));
+    expect(message).toEqual({
+      text: "18+",
+      attachments: [{ media_id: "999" }],
+    });
+    expect(String(calls[0]?.init.headers && (calls[0].init.headers as Record<string, string>).Authorization)).toBe(
+      "Bearer test-access-token",
+    );
+    expect(calls.some((call) => call.url.includes("should-not-be-logged"))).toBe(false);
   });
 });

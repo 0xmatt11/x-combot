@@ -22,7 +22,8 @@ export type ParsedCommand =
   | { name: "admins" }
   | { name: "ask"; prompt: string }
   | { name: "summarize"; prompt?: string }
-  | { name: "analyze"; prompt?: string };
+  | { name: "analyze"; prompt?: string }
+  | { name: "boobs"; extra?: string };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -108,6 +109,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "summarize", prompt: rest } : { name: "summarize" };
     case "analyze":
       return rest ? { name: "analyze", prompt: rest } : { name: "analyze" };
+    case "boobs":
+      return rest ? { name: "boobs", extra: rest } : { name: "boobs" };
     default:
       return undefined;
   }

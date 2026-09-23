@@ -1,4 +1,11 @@
-import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
+import type {
+  DeleteHint,
+  DeleteResult,
+  DmEvent,
+  OutboundImage,
+  SendMessageResult,
+  XUser,
+} from "../types.js";
 
 export interface XClient {
   getMe(): Promise<XUser>;
@@ -17,6 +24,11 @@ export interface XClient {
     conversationId: string,
     text: string,
   ): Promise<SendMessageResult>;
+  /**
+   * Attach an image in a classic group DM (media upload + `attachments.media_id`).
+   * Encrypted Chat ids reject this; the caller posts `image.url` as text instead.
+   */
+  sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult>;
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult>;
   deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult>;
 }

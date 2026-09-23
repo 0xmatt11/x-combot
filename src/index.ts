@@ -1,9 +1,11 @@
-import { loadDefaults } from "./config.js";
+import { loadDefaults, normalizeBoobsConfig } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { fetchAdultImage } from "./bot/image-fetch.js";
+import { createImageSearch } from "./bot/image-search.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
 import { startActivityStream } from "./chat/activity-stream.js";
 import { ensureChatActivitySubscription } from "./chat/activity-subscribe.js";
@@ -48,6 +50,23 @@ async function main(): Promise<void> {
   const me = await client.getMe();
   log.info(`Authenticated as @${me.username ?? "unknown"} (${me.id})`);
 
+  if (env.boobsEnabled !== undefined) {
+    defaults.boobs = normalizeBoobsConfig({ ...defaults.boobs, enabled: env.boobsEnabled });
+  }
+  const provider = env.boobsSearchProvider ?? "reddit";
+  if (defaults.boobs?.enabled) {
+    const needsKey = provider === "serpapi" || provider === "bing";
+    if (needsKey && !env.boobsSearchApiKey) {
+      log.warn(
+        `!boobs is enabled with provider ${provider} but BOOBS_SEARCH_API_KEY is unset.`,
+      );
+    } else {
+      log.info(
+        `!boobs enabled (provider=${provider}). Classic group DMs upload a dm_image; encrypted Chat posts the image link as text.`,
+      );
+    }
+  }
+
   const llmClient = buildLlmClient(env, defaults);
   const botUserId = env.botUserId ?? me.id;
   const chatService = await openChatService(env, client, store, botUserId);
@@ -64,6 +83,13 @@ async function main(): Promise<void> {
       defaults,
     },
     llmClient,
+    {
+      imageSearch: createImageSearch({
+        provider,
+        apiKey: env.boobsSearchApiKey,
+      }),
+      fetchImage: fetchAdultImage,
+    },
   );
 
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;

@@ -3,7 +3,16 @@ import path from "node:path";
 import { log } from "../log.js";
 import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
 import type { RawChatEventsPage } from "../chat/http.js";
-import type { DeleteHint, DeleteResult, DmEvent, Mention, SendMessageResult, TokenSet, XUser } from "../types.js";
+import type {
+  DeleteHint,
+  DeleteResult,
+  DmEvent,
+  Mention,
+  OutboundImage,
+  SendMessageResult,
+  TokenSet,
+  XUser,
+} from "../types.js";
 import {
   DM_EVENT_FIELDS,
   DM_EXPANSIONS,
@@ -13,6 +22,8 @@ import {
 } from "./client.js";
 
 const API_BASE = "https://api.x.com";
+/** X documents 5 MB for `dm_image`. GIFs are capped here too so a command cannot pull a huge file. */
+const DM_IMAGE_MAX_BYTES = 5_000_000;
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 
 /**
@@ -157,6 +168,65 @@ export class LiveXClient implements XClient {
       dmConversationId: payload.data.dm_conversation_id,
       dmEventId: payload.data.dm_event_id,
     };
+  }
+
+  /**
+   * Classic DM image: chunked upload (`dm_image` / `dm_gif`) then
+   * `attachments: [{ media_id }]` on the conversation message.
+   * Needs a user token that can upload media (`media.write`). Callers post
+   * the image URL as text when this throws.
+   */
+  async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
+    if (!image.bytes || image.bytes.byteLength === 0) {
+      throw new Error("No image bytes to attach.");
+    }
+    if (image.bytes.byteLength > DM_IMAGE_MAX_BYTES) {
+      throw new Error("Image exceeds the DM image size limit.");
+    }
+    const spec = dmMediaSpec(image.mimeType);
+    const mediaId = await this.uploadDmImage(image.bytes, spec);
+    const payload = await this.request<{
+      data: { dm_conversation_id: string; dm_event_id: string };
+    }>(`/2/dm_conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: "POST",
+      json: {
+        text: "18+",
+        attachments: [{ media_id: mediaId }],
+      },
+    });
+    return {
+      dmConversationId: payload.data.dm_conversation_id,
+      dmEventId: payload.data.dm_event_id,
+    };
+  }
+
+  private async uploadDmImage(
+    bytes: Uint8Array,
+    spec: { mediaType: string; mediaCategory: "dm_image" | "dm_gif"; filename: string },
+  ): Promise<string> {
+    const initialized = await this.request<unknown>("/2/media/upload/initialize", {
+      method: "POST",
+      json: {
+        media_type: spec.mediaType,
+        total_bytes: bytes.byteLength,
+        media_category: spec.mediaCategory,
+        shared: false,
+      },
+    });
+    const mediaId = readMediaId(initialized);
+    await this.request(`/2/media/upload/${encodeURIComponent(mediaId)}/append`, {
+      method: "POST",
+      form: () => {
+        const form = new FormData();
+        form.append("segment_index", "0");
+        form.append("media", new Blob([Buffer.from(bytes)], { type: spec.mediaType }), spec.filename);
+        return form;
+      },
+    });
+    await this.request(`/2/media/upload/${encodeURIComponent(mediaId)}/finalize`, {
+      method: "POST",
+    });
+    return mediaId;
   }
 
   async sendDirectMessage(
@@ -307,6 +377,8 @@ export class LiveXClient implements XClient {
       method?: string;
       search?: Record<string, string>;
       json?: unknown;
+      /** Recreated on auth retry. Fetch sets the multipart boundary. */
+      form?: () => FormData;
       retryAuth?: boolean;
     } = {},
   ): Promise<T> {
@@ -323,7 +395,9 @@ export class LiveXClient implements XClient {
       method: options.method ?? "GET",
       headers,
     };
-    if (options.json !== undefined) {
+    if (options.form) {
+      init.body = options.form();
+    } else if (options.json !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(options.json);
     }
@@ -342,7 +416,20 @@ export class LiveXClient implements XClient {
     }
 
     const text = await response.text();
-    const body = text ? (JSON.parse(text) as unknown) : {};
+    let body: unknown = {};
+    if (text) {
+      try {
+        body = JSON.parse(text) as unknown;
+      } catch {
+        if (!response.ok) {
+          const error = new Error(
+            `X API ${options.method ?? "GET"} ${pathname} -> ${response.status}: ${text.slice(0, 500)}`,
+          ) as ApiError;
+          error.status = response.status;
+          throw error;
+        }
+      }
+    }
     if (!response.ok) {
       const error = new Error(
         `X API ${options.method ?? "GET"} ${pathname} -> ${response.status}: ${text.slice(0, 500)}`,
@@ -536,6 +623,39 @@ export function loadTokensFromDisk(tokenPath: string): TokenSet | undefined {
     expiresAtMs: raw.expires_at_ms,
     botUserId: raw.bot_user_id,
   };
+}
+
+export function dmMediaSpec(mime: string | undefined): {
+  mediaType: string;
+  mediaCategory: "dm_image" | "dm_gif";
+  filename: string;
+} {
+  const normalized = (mime ?? "").split(";")[0]!.trim().toLowerCase();
+  if (normalized === "image/jpeg" || normalized === "image/jpg" || normalized === "image/pjpeg") {
+    return { mediaType: "image/jpeg", mediaCategory: "dm_image", filename: "image.jpg" };
+  }
+  if (normalized === "image/png") {
+    return { mediaType: "image/png", mediaCategory: "dm_image", filename: "image.png" };
+  }
+  if (normalized === "image/webp") {
+    return { mediaType: "image/webp", mediaCategory: "dm_image", filename: "image.webp" };
+  }
+  if (normalized === "image/gif") {
+    return { mediaType: "image/gif", mediaCategory: "dm_gif", filename: "image.gif" };
+  }
+  throw new Error("Unsupported image type for a DM attachment.");
+}
+
+function readMediaId(body: unknown): string {
+  if (!body || typeof body !== "object") {
+    throw new Error("Media upload returned no media id.");
+  }
+  const data = (body as { data?: { id?: string | number; media_id?: string | number } }).data;
+  const id = data?.id ?? data?.media_id;
+  if (id === undefined || id === null || String(id).trim() === "") {
+    throw new Error("Media upload returned no media id.");
+  }
+  return String(id);
 }
 
 export function persistTokens(tokenPath: string | undefined, tokens: TokenSet): void {

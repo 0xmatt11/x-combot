@@ -9,6 +9,9 @@ export const DM_SCOPES = [
   "tweet.read",
   "users.read",
   "offline.access",
+  // Classic DM image attach (`!boobs`) uploads via POST /2/media/upload.
+  // The developer portal must allow this scope. Without it, the command posts a link.
+  "media.write",
 ] as const;
 
 export function generatePkce(): { verifier: string; challenge: string } {
