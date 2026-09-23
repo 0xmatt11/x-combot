@@ -33,6 +33,14 @@ export interface LlmConfig {
   model?: string;
 }
 
+export interface BoobsConfig {
+  /** Off unless set. `BOOBS_ENABLED` overrides this at startup. */
+  enabled: boolean;
+  rate_limit_per_user: number;
+  rate_limit_per_conversation: number;
+  rate_limit_window_ms: number;
+}
+
 export interface DefaultsConfig {
   welcome: {
     enabled: boolean;
@@ -65,6 +73,7 @@ export interface DefaultsConfig {
   };
   llm?: LlmConfig;
   activity?: ActivityConfig;
+  boobs?: BoobsConfig;
 }
 
 export type ActivityTransport = "stream" | "webhook" | "both";
@@ -126,6 +135,10 @@ export interface ResolvedConversationConfig {
   llmMaxPages: number;
   llmWakePrefixes: string[];
   llmSystemPrompt: string;
+  boobsEnabled: boolean;
+  boobsRateLimitPerUser: number;
+  boobsRateLimitPerConversation: number;
+  boobsRateLimitWindowMs: number;
 }
 
 export interface BotRuntimeConfig {
@@ -179,6 +192,14 @@ export interface DeleteHint {
 export interface SendMessageResult {
   dmEventId: string;
   dmConversationId: string;
+}
+
+/** Image bytes to attach, plus the source URL used when attach is impossible. */
+export interface OutboundImage {
+  /** Direct https URL. Do not log this; CDN links can carry signatures. */
+  url: string;
+  bytes?: Uint8Array;
+  mimeType?: string;
 }
 
 export interface DeleteResult {

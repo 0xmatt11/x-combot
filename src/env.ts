@@ -32,6 +32,13 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
+function optionalBoobsProvider(name: string): "reddit" | "serpapi" | "bing" | undefined {
+  const value = optional(name)?.toLowerCase();
+  if (!value) return undefined;
+  if (value === "reddit" || value === "serpapi" || value === "bing") return value;
+  throw new Error(`${name} must be reddit, serpapi, or bing`);
+}
+
 function optionalActivityTransport(name: string): "stream" | "webhook" | "both" | undefined {
   const value = optional(name)?.toLowerCase();
   if (!value) return undefined;
@@ -86,6 +93,12 @@ export interface Env {
   activityWebhookPath?: string;
   /** Public HTTPS URL registered with X. The local server must be reachable there. */
   activityWebhookUrl?: string;
+  /** Overrides `boobs.enabled` in YAML when set. */
+  boobsEnabled?: boolean;
+  /** `reddit` (default, no key), `serpapi`, or `bing`. */
+  boobsSearchProvider?: "reddit" | "serpapi" | "bing";
+  /** SerpAPI key or Bing Image Search key. Unused by the Reddit provider. */
+  boobsSearchApiKey?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -128,5 +141,8 @@ export function loadEnv(requireOwner = true): Env {
     activityWebhookPort: optionalNumber("ACTIVITY_WEBHOOK_PORT"),
     activityWebhookPath: optional("ACTIVITY_WEBHOOK_PATH"),
     activityWebhookUrl: optional("ACTIVITY_WEBHOOK_URL"),
+    boobsEnabled: optionalBool("BOOBS_ENABLED"),
+    boobsSearchProvider: optionalBoobsProvider("BOOBS_SEARCH_PROVIDER"),
+    boobsSearchApiKey: optional("BOOBS_SEARCH_API_KEY"),
   };
 }

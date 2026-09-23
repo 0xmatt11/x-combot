@@ -1,6 +1,13 @@
 import type { ChatService } from "../chat/service.js";
 import { isChatGroupId } from "../chat/ids.js";
-import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
+import type {
+  DeleteHint,
+  DeleteResult,
+  DmEvent,
+  OutboundImage,
+  SendMessageResult,
+  XUser,
+} from "../types.js";
 import type { XClient } from "./client.js";
 
 /**
@@ -48,6 +55,15 @@ export class RoutedXClient implements XClient {
       return this.chat.sendText(conversationId, text);
     }
     return this.dm.sendMessage(conversationId, text);
+  }
+
+  async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
+    if (isChatGroupId(conversationId)) {
+      throw new Error(
+        "Encrypted X Chat send is text-only here. POST /2/chat/conversations/:id/messages carries an encrypted payload from encryptMessage, which this bot fills with text. Chat media upload needs encryptStream plus POST /2/chat/media/upload and the media.write scope.",
+      );
+    }
+    return this.dm.sendImage(conversationId, image);
   }
 
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult> {

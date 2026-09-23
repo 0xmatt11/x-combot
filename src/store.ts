@@ -87,6 +87,15 @@ CREATE TABLE IF NOT EXISTS llm_rate (
 CREATE INDEX IF NOT EXISTS idx_llm_rate
   ON llm_rate (conversation_id, user_id, ts_ms);
 
+CREATE TABLE IF NOT EXISTS boobs_rate (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_boobs_rate
+  ON boobs_rate (conversation_id, user_id, ts_ms);
+
 CREATE TABLE IF NOT EXISTS chat_message_index (
   event_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
@@ -433,5 +442,39 @@ export class Store {
       )
       .get(conversationId, userId, tsMs - windowMs) as { count: number };
     return row.count;
+  }
+
+  /**
+   * Count a `!boobs` attempt for this user and this conversation.
+   * Old rows outside the window are dropped. The returned counts include this call.
+   */
+  recordBoobsUse(
+    conversationId: string,
+    userId: string,
+    tsMs: number,
+    windowMs: number,
+  ): { userUses: number; conversationUses: number } {
+    this.db
+      .prepare(
+        "INSERT INTO boobs_rate (conversation_id, user_id, ts_ms) VALUES (?, ?, ?)",
+      )
+      .run(conversationId, userId, tsMs);
+    this.db
+      .prepare("DELETE FROM boobs_rate WHERE ts_ms < ?")
+      .run(tsMs - windowMs);
+    const since = tsMs - windowMs;
+    const userRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM boobs_rate
+         WHERE conversation_id = ? AND user_id = ? AND ts_ms >= ?`,
+      )
+      .get(conversationId, userId, since) as { count: number };
+    const convoRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM boobs_rate
+         WHERE conversation_id = ? AND ts_ms >= ?`,
+      )
+      .get(conversationId, since) as { count: number };
+    return { userUses: userRow.count, conversationUses: convoRow.count };
   }
 }

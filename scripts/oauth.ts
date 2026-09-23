@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   });
 
   console.log("X OAuth 2.0 user-context (PKCE)");
-  console.log("Scopes: dm.read dm.write tweet.read users.read offline.access");
+  console.log("Scopes:", new URL(authorizeUrl).searchParams.get("scope"));
   console.log("");
   console.log("1. Sign in as the bot account.");
   console.log("2. Open this URL in a browser:\n");

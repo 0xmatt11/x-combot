@@ -16,6 +16,7 @@ help: |
   Public commands:
     !help — this message
     !rules — group rules
+    !boobs — random adult (18+) chest close-up (off unless enabled)
     !ask <question> — ask the LLM (or @botname …)
     !summarize [focus] — summarize the group thread (loads history)
     !analyze [prompt] — answer about the whole conversation
@@ -81,6 +82,15 @@ delete:
   attempt_on_filter: true
   attempt_on_flood: true
   attempt_on_mute: true
+
+# Adult chest image (`!boobs`). Off by default so a moderation deploy does not
+# post NSFW. Set enabled: true or BOOBS_ENABLED=true (env wins). The command
+# ignores extra text so members cannot change the search. See the README.
+boobs:
+  enabled: false
+  rate_limit_per_user: 1
+  rate_limit_per_conversation: 4
+  rate_limit_window_ms: 300000
 
 # LLM group-chat assistant. Full conversation context is opt-in because it
 # paginates GET /2/dm_conversations/:id/dm_events (~30 day retention, pay-per-use

@@ -69,7 +69,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 - **Activity is the realtime path.** `chat.received` (X Activity API) wakes the bot on new Chat messages. The Chat poller keeps running as a slower catch-up when Activity is enabled. Sends, public-key reads, key rotation, and that fallback poll can still return 429/402.
 - **Group DMs ≠ Communities ≠ encrypted Chat.** Communities are unused. Chat is a separate encrypted inbox; see above.
 - **Admin notify DMs are classic 1:1.** `!kick` and filter alerts still use `POST /2/dm_conversations/with/:id/messages`. That message may not appear inside the encrypted Chat inbox.
-- **Chat reactions, edits, and media are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer.
+- **Chat reactions, edits, and media are not moderated.** Only decrypted text messages and group member add/remove events are fed to the command layer. `!boobs` in an encrypted group sends a link, not a Chat media upload.
 - **Paid API access.** DM read/write is not available on a typical free app-only key. You need a developer account, a Project/App with OAuth 2.0 user auth, and a plan that includes DM endpoints. Activity subscriptions for `chat.*` use the same user token and the existing `dm.read` scope.
 
 ## Features
@@ -84,6 +84,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 8. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
 9. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
 10. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. OpenAI-compatible; mockable.
+11. **Adult image** — `!boobs` posts one random 18+ chest close-up. Off unless enabled. Rate-limited. Extra text is rejected so the search query cannot be changed.
 
 ## Commands
 
@@ -91,6 +92,7 @@ Public:
 
 - `!help`
 - `!rules`
+- `!boobs` — one random adult (18+) chest close-up. Disabled until `BOOBS_ENABLED=true` or `boobs.enabled` in YAML. No extra arguments.
 - `!ask <question>` — LLM reply (also `@botname …` or configured wake prefixes)
 - `!summarize [focus]` — load conversation history and summarize
 - `!analyze [prompt]` — load conversation history and answer about the thread
@@ -113,6 +115,44 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
 
 `/` works as an alias for `!`.
 
+## Adult image command
+
+Posts one random **adult (18+)** close-up of a woman's chest into the same group. It is **off** unless you opt in, so a normal moderation process does not start posting NSFW.
+
+```bash
+BOOBS_ENABLED=true
+```
+
+`BOOBS_ENABLED` overrides `boobs.enabled` in `config/default.yaml`. `BOOBS_ENABLED=false` forces it off even when the YAML says true. Defaults: 1 use per user and 4 per conversation per 5 minutes (`boobs.rate_limit_*`). Timestamps are stored in SQLite (`boobs_rate`). Image URLs are not logged (only the host), and API keys are not written to the repo.
+
+The command is exact. `!boobs`, `!BOOBS`, and `/boobs` run it. `!boobs anything` is refused and is **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. This is a text filter, not a vision model.
+
+**Search.** Default provider is Reddit's public `hot.json` for adult chest subreddits (`over_18` posts only). No API key.
+
+```bash
+# optional; reddit is the default
+BOOBS_SEARCH_PROVIDER=reddit
+```
+
+Keyed providers, if Reddit is blocked:
+
+| `BOOBS_SEARCH_PROVIDER` | Key | Request |
+| --- | --- | --- |
+| `serpapi` | `BOOBS_SEARCH_API_KEY` | SerpAPI Google Images, `safe=off`, fixed adult close-up query |
+| `bing` | `BOOBS_SEARCH_API_KEY` | Bing Image Search, `safeSearch=Off`, same query |
+
+The key is sent only to that provider. It is not logged. A missing key makes `!boobs` say so and does not call the API.
+
+**What gets posted.**
+
+| Conversation | Delivery |
+| --- | --- |
+| Classic group DM | Native image. The bot downloads the file (https, max 5 MB, jpeg/png/gif/webp) and uploads it with `POST /2/media/upload/initialize`, `/append`, `/finalize` using `media_category` `dm_image` (or `dm_gif`). The message is `POST /2/dm_conversations/:id/messages` with `attachments: [{ media_id }]` and the text `18+`. That upload needs the `media.write` scope from `npm run oauth`. |
+| Encrypted X Chat (`g…`) | **A direct https image URL as encrypted text**, not a native attachment. `encryptMessage` in this bot sends text. Chat can attach media only after `encryptStream` and `POST /2/chat/media/upload` (`media.write`), which this process does not call. The X client may unfurl the link. |
+| Either, if upload or download fails | The same URL is sent as a text message, including on the encrypted path, so a media failure does not drop the reply. |
+
+Re-run `npm run oauth` after the app allows `media.write` if classic DMs should attach the file instead of linking it. Existing tokens without that scope still post the link.
+
 ## Developer setup
 
 ### 1. X developer App
@@ -127,6 +167,7 @@ Admins (`BOT_OWNER_ID`, `ADMIN_IDS`, or `!admin add` for that group):
    - `tweet.read` — required alongside DM scopes
    - `users.read` — required alongside DM scopes
    - `offline.access` — refresh token so the bot can run longer than ~2 hours
+   - `media.write` — upload an image for `!boobs` in a classic group DM. The app must allow this scope. Without it, that command posts a link instead of a native attachment. Encrypted Chat still posts a link either way.
 6. Copy the OAuth 2.0 **Client ID** and **Client Secret**.
 
 App-only / project bearer tokens will not work.
@@ -164,7 +205,7 @@ On first poll the bot records a watermark and **does not replay 30 days of histo
 
 ### 4. Run against an encrypted X Chat group
 
-Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access` — Chat reads and writes use those user scopes, not an app-only bearer token.
+Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`, and `media.write` — Chat reads and writes use those user scopes, not an app-only bearer token. `media.write` is what lets `!boobs` upload a classic DM image. Chat replies for that command are still a link; see [Adult image command](#adult-image-command).
 
 1. Register the bot's Chat identity once (rate-limited; a 429 stops instead of retrying):
 
@@ -200,7 +241,7 @@ Juicebox realm tokens come from `juicebox_config` on `GET /2/users/{id}/public_k
 
 Polling a large group every 12s, plus `GET /2/dm_events`, is what produces long 429 backoffs. During that wait the bot cannot see new commands. The X Activity API delivers `chat.received` over a persistent stream or a webhook so back-to-back messages do not depend on the poll interval.
 
-This does **not** add OAuth scopes. [Create subscription](https://docs.x.com/x-api/activity/create-x-activity-subscription) requires `dm.read` for `chat.*` and `dm.*`, which `npm run oauth` already requests (`dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`).
+This does **not** add OAuth scopes. [Create subscription](https://docs.x.com/x-api/activity/create-x-activity-subscription) requires `dm.read` for `chat.*` and `dm.*`, which `npm run oauth` already requests (`dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`, `media.write`).
 
 Two delivery mechanisms, both optional, both in this process. The Chat poller stays on as catch-up. When Activity is enabled its interval defaults to `activity.poll_interval_ms` (5 minutes) unless `CHAT_POLL_INTERVAL_MS` is set. They are not exclusive.
 
@@ -337,8 +378,8 @@ npm test
 ## Configuration
 
 - `.env` — credentials and IDs (see `.env.example`), including Activity and `DM_POLL`.
-- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits.
-- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts).
+- `config/default.yaml` — welcome text, rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, `!boobs` enablement and rate limits.
+- SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts), `!boobs` rate-limit timestamps (not image URLs).
 
 Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.
 
@@ -349,6 +390,9 @@ src/
   index.ts            # poll loop, optional Activity stream/webhook
   bot/engine.ts       # ComBot-like actions + LLM dispatch
   bot/parser.ts       # command + wake parsing
+  bot/adult-filter.ts # 18+ text gate for !boobs
+  bot/image-search.ts # reddit / serpapi / bing image search
+  bot/image-fetch.ts  # https image download for DM upload
   bot/flood.ts        # flood window
   bot/filters.ts      # keyword/regex
   llm/                # OpenAI-compatible client, context assembly, history fetch

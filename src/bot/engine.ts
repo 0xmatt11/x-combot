@@ -14,6 +14,14 @@ import { displayName, isGroupConversation, type XClient } from "../x/client.js";
 import type { LlmClient } from "../llm/client.js";
 import { buildLlmMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
+import {
+  containsBannedAgeTerm,
+  imageHost,
+  pickAdultChestImage,
+  redactSecrets,
+  type AdultImageCandidate,
+} from "./adult-filter.js";
+import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import { matchFilters } from "./filters.js";
 import {
   isAdmin,
@@ -52,12 +60,18 @@ export interface EngineActions {
   llm: boolean;
 }
 
+export interface EngineDeps {
+  imageSearch?: ImageSearch;
+  fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
+}
+
 export class ModerationEngine {
   constructor(
     private readonly store: Store,
     private readonly client: XClient,
     private readonly config: BotRuntimeConfig,
     private readonly llmClient?: LlmClient,
+    private readonly deps: EngineDeps = {},
   ) {}
 
   async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
@@ -124,7 +138,7 @@ export class ModerationEngine {
       });
 
     if (command && !llmFromCmd) {
-      await this.handleCommand(event, command, senderIsAdmin, settings, actions);
+      await this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs);
       return actions;
     }
 
@@ -387,6 +401,7 @@ export class ModerationEngine {
     senderIsAdmin: boolean,
     settings: ResolvedConversationConfig,
     actions: EngineActions,
+    nowMs: number,
   ): Promise<void> {
     const conversationId = event.conversationId;
     const senderId = event.senderId!;
@@ -397,6 +412,9 @@ export class ModerationEngine {
         return;
       case "rules":
         await this.reply(conversationId, settings.rules.trim(), actions);
+        return;
+      case "boobs":
+        await this.handleBoobs(event, command.extra, settings, actions, nowMs);
         return;
       default:
         break;
@@ -634,6 +652,113 @@ export class ModerationEngine {
     }
   }
 
+  private async handleBoobs(
+    event: DmEvent,
+    extra: string | undefined,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const senderId = event.senderId!;
+
+    if (!settings.boobsEnabled) {
+      await this.reply(conversationId, "!boobs is disabled on this bot.", actions);
+      return;
+    }
+    if (extra) {
+      if (containsBannedAgeTerm(extra)) {
+        log.warn(`Refused !boobs with unsafe extra text conversation=${conversationId}`);
+        await this.reply(conversationId, "Refused. !boobs does not search custom text.", actions);
+        return;
+      }
+      await this.reply(conversationId, "!boobs does not take extra text.", actions);
+      return;
+    }
+
+    const { userUses, conversationUses } = this.store.recordBoobsUse(
+      conversationId,
+      senderId,
+      nowMs,
+      settings.boobsRateLimitWindowMs,
+    );
+    if (
+      userUses > settings.boobsRateLimitPerUser ||
+      conversationUses > settings.boobsRateLimitPerConversation
+    ) {
+      const minutes = Math.max(1, Math.round(settings.boobsRateLimitWindowMs / 60_000));
+      await this.reply(
+        conversationId,
+        `Slow down — !boobs is limited to ${settings.boobsRateLimitPerUser} per user and ${settings.boobsRateLimitPerConversation} per conversation every ${minutes} min.`,
+        actions,
+      );
+      return;
+    }
+
+    const search = this.deps.imageSearch;
+    if (!search) {
+      await this.reply(conversationId, "Image search is not configured.", actions);
+      return;
+    }
+
+    let candidates: AdultImageCandidate[];
+    try {
+      candidates = await search.searchAdultChestImages();
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : "search failed");
+      log.warn(`!boobs search failed conversation=${conversationId}: ${detail}`);
+      const userMessage =
+        error instanceof ImageSearchError
+          ? error.userMessage
+          : "Image search failed. Try again later.";
+      await this.reply(conversationId, userMessage, actions);
+      return;
+    }
+
+    const picked = pickAdultChestImage(candidates);
+    if (!picked) {
+      await this.reply(conversationId, "No safe adult image came back. Try again later.", actions);
+      return;
+    }
+    await this.deliverAdultImage(conversationId, picked, actions);
+  }
+
+  private async deliverAdultImage(
+    conversationId: string,
+    image: AdultImageCandidate,
+    actions: EngineActions,
+  ): Promise<void> {
+    const host = imageHost(image.url);
+    let fetched: { bytes: Uint8Array; mimeType: string } | undefined;
+    if (this.deps.fetchImage) {
+      try {
+        fetched = await this.deps.fetchImage(image.url);
+      } catch {
+        log.warn(`!boobs image download failed conversation=${conversationId} host=${host}`);
+      }
+    }
+
+    if (fetched && fetched.bytes.byteLength > 0) {
+      try {
+        await this.client.sendImage(conversationId, {
+          url: image.url,
+          bytes: fetched.bytes,
+          mimeType: fetched.mimeType,
+        });
+        actions.replies.push("18+");
+        log.info(`!boobs posted native image conversation=${conversationId} host=${host}`);
+        return;
+      } catch {
+        log.warn(
+          `!boobs native attach failed; posting the image link as text. conversation=${conversationId} host=${host}`,
+        );
+      }
+    }
+
+    await this.reply(conversationId, image.url, actions);
+    log.info(`!boobs posted image link conversation=${conversationId} host=${host}`);
+  }
+
   private async applyWarn(
     event: DmEvent,
     userId: string,
@@ -790,5 +915,6 @@ function formatSettings(settings: ResolvedConversationConfig): string {
     `llm_allow: ${settings.llmAllow}`,
     `llm_context_mode: ${settings.llmContextMode}`,
     `llm_recent_messages: ${settings.llmRecentMessages}`,
+    `boobs_enabled: ${settings.boobsEnabled}`,
   ].join("\n");
 }

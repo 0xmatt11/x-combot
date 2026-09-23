@@ -1,8 +1,16 @@
-import type { DeleteHint, DeleteResult, DmEvent, SendMessageResult, XUser } from "../types.js";
+import type {
+  DeleteHint,
+  DeleteResult,
+  DmEvent,
+  OutboundImage,
+  SendMessageResult,
+  XUser,
+} from "../types.js";
 import type { XClient } from "./client.js";
 
 export class MockXClient implements XClient {
   readonly sent: { conversationId: string; text: string }[] = [];
+  readonly images: { conversationId: string; url: string; mimeType?: string; bytes: number }[] = [];
   readonly direct: { participantId: string; text: string }[] = [];
   readonly deleted: string[] = [];
   readonly events: DmEvent[] = [];
@@ -11,6 +19,8 @@ export class MockXClient implements XClient {
   bot: XUser;
   /** Official delete only succeeds for events owned by the bot user. */
   allowDeleteOthers = false;
+  /** When set, `sendImage` throws so callers fall back to a text link. */
+  failSendImage = false;
   failDeleteIds = new Set<string>();
 
   constructor(bot: XUser = { id: "bot-1", username: "modbot", name: "Mod Bot" }) {
@@ -60,6 +70,22 @@ export class MockXClient implements XClient {
     const dmEventId = `sent-${this.sent.length + 1}`;
     this.sent.push({ conversationId, text });
     return { dmEventId, dmConversationId: conversationId };
+  }
+
+  async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
+    if (this.failSendImage) {
+      throw new Error("native media attach failed");
+    }
+    if (!image.bytes || image.bytes.byteLength === 0) {
+      throw new Error("missing image bytes");
+    }
+    this.images.push({
+      conversationId,
+      url: image.url,
+      mimeType: image.mimeType,
+      bytes: image.bytes.byteLength,
+    });
+    return { dmEventId: `img-${this.images.length}`, dmConversationId: conversationId };
   }
 
   async sendDirectMessage(
