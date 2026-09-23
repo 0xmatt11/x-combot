@@ -25,7 +25,9 @@ export type ParsedCommand =
   | { name: "analyze"; prompt?: string }
   | { name: "boobs"; extra?: string }
   | { name: "ass"; extra?: string }
-  | { name: "booty"; extra?: string };
+  | { name: "booty"; extra?: string }
+  | { name: "xp"; target?: UserRef }
+  | { name: "top" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -58,6 +60,12 @@ const KNOWN_COMMAND_NAMES = new Set([
   "boobs",
   "ass",
   "booty",
+  "xp",
+  "level",
+  "rank",
+  "top",
+  "toplvl",
+  "leaderboard",
 ]);
 
 const COMMAND_RE = /^([!/])([A-Za-z]+)(?:\s+([\s\S]*))?$/;
@@ -196,6 +204,18 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "ass", extra: rest } : { name: "ass" };
     case "booty":
       return rest ? { name: "booty", extra: rest } : { name: "booty" };
+    case "xp":
+    case "level":
+    case "rank": {
+      if (!rest) return { name: "xp" };
+      const { target } = splitTarget(rest);
+      if (!target) return { name: "xp", target: { raw: rest } };
+      return { name: "xp", target };
+    }
+    case "top":
+    case "toplvl":
+    case "leaderboard":
+      return { name: "top" };
     default:
       return undefined;
   }

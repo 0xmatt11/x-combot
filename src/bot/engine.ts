@@ -38,6 +38,23 @@ import {
   type UnknownBangCommand,
   type UserRef,
 } from "./parser.js";
+import {
+  alreadyMaxLevelMessage,
+  alreadyMinLevelMessage,
+  applyXp,
+  formatGrantCooldown,
+  formatLeaderboard,
+  formatXpStatus,
+  grantAnnouncement,
+  levelUpAnnouncement,
+  parseLevelVote,
+  revokeAnnouncement,
+  selfLevelMessage,
+  setLevel,
+  skipsPassiveXp,
+  unresolvedReplyMessage,
+  xpDisabledMessage,
+} from "./xp.js";
 
 const SETTING_KEYS = new Set([
   "welcome_enabled",
@@ -53,6 +70,7 @@ const SETTING_KEYS = new Set([
   "llm_allow",
   "llm_context_mode",
   "llm_recent_messages",
+  "xp_enabled",
 ]);
 
 export interface EngineActions {
@@ -114,6 +132,11 @@ export class ModerationEngine {
       return actions;
     }
 
+    if (event.eventType === "ReactionAdd") {
+      await this.handleReaction(event, settings, actions, nowMs);
+      return actions;
+    }
+
     if (event.eventType !== "MessageCreate") {
       return actions;
     }
@@ -128,6 +151,24 @@ export class ModerationEngine {
       this.config.globalAdminIds,
       convoAdmins,
     );
+
+    this.store.rememberMessageAuthor(event.conversationId, event.id, senderId);
+    if (event.sequenceId) {
+      this.store.rememberMessageAuthor(event.conversationId, event.sequenceId, senderId);
+    }
+
+    const vote = parseLevelVote(event.text);
+    if (vote && event.replyTo && settings.xpEnabled && settings.xpLevelGrantEnabled) {
+      if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
+        actions.muted = true;
+        if (settings.attemptDeleteOnMute) {
+          await this.tryDelete(event.id, actions, event);
+        }
+        return actions;
+      }
+      await this.handleLevelVote(event, vote, senderId, settings, actions, nowMs);
+      return actions;
+    }
 
     const command = parseCommand(event.text);
     const llmFromCmd =
@@ -254,6 +295,10 @@ export class ModerationEngine {
       }
     }
 
+    if (settings.xpEnabled && !skipsPassiveXp(event.text)) {
+      await this.awardActivityXp(event, senderId, settings, actions, nowMs, "message");
+    }
+
     if (!command) {
       this.store.setLastUserMessage(
         event.conversationId,
@@ -264,6 +309,139 @@ export class ModerationEngine {
     }
 
     return actions;
+  }
+
+  private async handleReaction(
+    event: DmEvent,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (!settings.xpEnabled || !settings.xpReactionsEnabled) return;
+    const senderId = event.senderId;
+    if (!senderId) return;
+    const senderIsAdmin = isAdmin(
+      senderId,
+      this.config.ownerId,
+      this.config.globalAdminIds,
+      this.store.listConversationAdmins(event.conversationId),
+    );
+    if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
+      actions.muted = true;
+      return;
+    }
+    await this.awardActivityXp(event, senderId, settings, actions, nowMs, "reaction");
+  }
+
+  private async awardActivityXp(
+    event: DmEvent,
+    senderId: string,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+    kind: "message" | "reaction",
+  ): Promise<void> {
+    const gain = kind === "message" ? settings.xpPerMessage : settings.xpPerReaction;
+    if (gain <= 0) return;
+    const last = this.store.getXpActionAt(event.conversationId, senderId, kind);
+    if (
+      settings.xpCooldownMs > 0 &&
+      last !== undefined &&
+      nowMs - last < settings.xpCooldownMs
+    ) {
+      return;
+    }
+    const current = this.store.getUserXp(event.conversationId, senderId);
+    const next = applyXp(current.xp, gain);
+    this.store.setXpActionAt(event.conversationId, senderId, kind, nowMs);
+    this.store.setUserXp(
+      event.conversationId,
+      senderId,
+      next.xp,
+      event.sender?.username,
+    );
+    if (!next.leveledUp) return;
+    await this.reply(
+      event.conversationId,
+      levelUpAnnouncement(displayName(event.sender, senderId), next.level),
+      actions,
+    );
+  }
+
+  private async handleLevelVote(
+    event: DmEvent,
+    vote: "+" | "-",
+    senderId: string,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (!event.replyTo) return;
+    const targetId = this.resolveReplyUserId(event);
+    if (!targetId) {
+      await this.reply(event.conversationId, unresolvedReplyMessage(), actions);
+      return;
+    }
+    if (targetId === senderId) {
+      await this.reply(event.conversationId, selfLevelMessage(), actions);
+      return;
+    }
+    const targetUser = (await this.client.getUserById(targetId)) ?? { id: targetId };
+    const targetLabel = displayName(targetUser, targetId);
+    const giverLabel = displayName(event.sender, senderId);
+    const last = this.store.getLevelGrantAt(event.conversationId, senderId, targetId);
+    if (
+      last !== undefined &&
+      settings.xpLevelGrantCooldownMs > 0 &&
+      nowMs - last < settings.xpLevelGrantCooldownMs
+    ) {
+      await this.reply(
+        event.conversationId,
+        formatGrantCooldown(targetLabel, settings.xpLevelGrantCooldownMs - (nowMs - last)),
+        actions,
+      );
+      return;
+    }
+    const current = this.store.getUserXp(event.conversationId, targetId);
+    const next = setLevel(current.xp, vote === "+" ? 1 : -1);
+    if (!next.changed) {
+      await this.reply(
+        event.conversationId,
+        vote === "+"
+          ? alreadyMaxLevelMessage(targetLabel)
+          : alreadyMinLevelMessage(targetLabel),
+        actions,
+      );
+      return;
+    }
+    this.store.setUserXp(
+      event.conversationId,
+      targetId,
+      next.xp,
+      targetUser.username,
+    );
+    this.store.setLevelGrantAt(event.conversationId, senderId, targetId, nowMs);
+    await this.reply(
+      event.conversationId,
+      vote === "+"
+        ? grantAnnouncement(giverLabel, targetLabel, next.level)
+        : revokeAnnouncement(giverLabel, targetLabel, next.level),
+      actions,
+    );
+  }
+
+  private resolveReplyUserId(event: DmEvent): string | undefined {
+    const reply = event.replyTo;
+    if (!reply) return undefined;
+    const keys = [reply.sequenceId, reply.eventId].filter(
+      (key): key is string => Boolean(key),
+    );
+    for (const key of keys) {
+      const senderId = this.store.lookupMessageAuthor(event.conversationId, key);
+      if (senderId) return senderId;
+    }
+    if (reply.verified && reply.senderId) return reply.senderId;
+    return undefined;
   }
 
   private async handleLlm(
@@ -508,6 +686,12 @@ export class ModerationEngine {
       case "rules":
         await this.reply(conversationId, settings.rules.trim(), actions);
         return;
+      case "xp":
+        await this.handleXpLookup(event, command.target, settings, actions);
+        return;
+      case "top":
+        await this.handleXpLeaderboard(event, settings, actions);
+        return;
       case "boobs":
       case "ass":
       case "booty":
@@ -726,6 +910,64 @@ export class ModerationEngine {
       default:
         return;
     }
+  }
+
+  private async handleXpLookup(
+    event: DmEvent,
+    target: UserRef | undefined,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (!settings.xpEnabled) {
+      await this.reply(conversationId, xpDisabledMessage(), actions);
+      return;
+    }
+    let user: XUser | undefined;
+    let userId: string;
+    if (target) {
+      user = await this.resolveTarget(target, event);
+      if (!user) {
+        await this.reply(conversationId, "Could not resolve that user.", actions);
+        return;
+      }
+      userId = user.id;
+    } else {
+      userId = event.senderId!;
+      user = event.sender ?? { id: userId };
+    }
+    const row = this.store.getUserXp(conversationId, userId);
+    const rank = this.store.xpRank(conversationId, userId);
+    await this.reply(
+      conversationId,
+      formatXpStatus({ label: displayName(user, userId), xp: row.xp, rank }),
+      actions,
+    );
+  }
+
+  private async handleXpLeaderboard(
+    event: DmEvent,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+  ): Promise<void> {
+    if (!settings.xpEnabled) {
+      await this.reply(event.conversationId, xpDisabledMessage(), actions);
+      return;
+    }
+    const rows = this.store.listXpLeaders(event.conversationId, settings.xpLeaderboardSize);
+    await this.reply(
+      event.conversationId,
+      formatLeaderboard(
+        rows.map((row) => ({
+          label: displayName(
+            row.username ? { id: row.userId, username: row.username } : { id: row.userId },
+            row.userId,
+          ),
+          xp: row.xp,
+        })),
+      ),
+      actions,
+    );
   }
 
   private async handleAdultImage(
@@ -1048,6 +1290,9 @@ function parseSetting(key: string, value: string): ConversationSettings | undefi
     if (!Number.isFinite(n) || n < 0) return undefined;
     return { llm_recent_messages: n };
   }
+  if (normalized === "xp_enabled") {
+    return { xp_enabled: ["1", "true", "on", "yes"].includes(value.toLowerCase()) };
+  }
   return undefined;
 }
 
@@ -1064,5 +1309,6 @@ function formatSettings(settings: ResolvedConversationConfig): string {
     `llm_recent_messages: ${settings.llmRecentMessages}`,
     `boobs_enabled: ${settings.boobsEnabled}`,
     `boobs_vision: ${settings.boobsVision}`,
+    `xp_enabled: ${settings.xpEnabled}`,
   ].join("\n");
 }

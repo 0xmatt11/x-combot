@@ -33,6 +33,28 @@ export interface LlmConfig {
   model?: string;
 }
 
+export interface XpConfig {
+  /** On unless set. `XP_ENABLED` overrides this at startup. */
+  enabled: boolean;
+  /** Passive XP for one chat message after the per-user cooldown. `0` awards nothing. */
+  xp_per_message: number;
+  /** Passive XP for one reaction-add after that action's cooldown. `0` awards nothing. */
+  xp_per_reaction: number;
+  /**
+   * Minimum gap between passive awards for one user, tracked separately for
+   * messages and reactions. `0` means every qualifying action awards XP.
+   */
+  cooldown_ms: number;
+  /** When false, reaction events are ignored even if the pipeline delivers them. */
+  reactions_enabled: boolean;
+  /** Reply with `+` / `-` to give or take one level. Any member; not yourself. */
+  level_grant_enabled: boolean;
+  /** Minimum gap between level changes from the same giver to the same target. `0` disables it. */
+  level_grant_cooldown_ms: number;
+  /** How many rows `!top` prints. Clamped to 1–25. */
+  leaderboard_size: number;
+}
+
 export interface BoobsConfig {
   /** Off unless set. `BOOBS_ENABLED` overrides this at startup. */
   enabled: boolean;
@@ -87,6 +109,7 @@ export interface DefaultsConfig {
   llm?: LlmConfig;
   activity?: ActivityConfig;
   boobs?: BoobsConfig;
+  xp?: XpConfig;
 }
 
 export type ActivityTransport = "stream" | "webhook" | "both";
@@ -116,6 +139,7 @@ export interface ConversationSettings {
   llm_allow?: LlmAllow;
   llm_context_mode?: LlmContextMode;
   llm_recent_messages?: number;
+  xp_enabled?: boolean;
 }
 
 export interface ResolvedConversationConfig {
@@ -153,6 +177,14 @@ export interface ResolvedConversationConfig {
   boobsRateLimitPerUser: number;
   boobsRateLimitPerConversation: number;
   boobsRateLimitWindowMs: number;
+  xpEnabled: boolean;
+  xpPerMessage: number;
+  xpPerReaction: number;
+  xpCooldownMs: number;
+  xpReactionsEnabled: boolean;
+  xpLevelGrantEnabled: boolean;
+  xpLevelGrantCooldownMs: number;
+  xpLeaderboardSize: number;
 }
 
 export interface BotRuntimeConfig {
@@ -172,7 +204,20 @@ export interface XUser {
 export type DmEventType =
   | "MessageCreate"
   | "ParticipantsJoin"
-  | "ParticipantsLeave";
+  | "ParticipantsLeave"
+  | "ReactionAdd";
+
+/**
+ * Who a Chat (or future DM) message is replying to.
+ * `verified` is true only when chat-xdk reported `replyPreviewValidation: "valid"`.
+ * An unverified preview's sender is ignored unless this process already indexed that message.
+ */
+export interface ReplyTarget {
+  senderId?: string;
+  sequenceId?: string;
+  eventId?: string;
+  verified?: boolean;
+}
 
 export interface Mention {
   username: string;
@@ -203,6 +248,10 @@ export interface DmEvent {
    * `POST /2/chat/conversations/:id/messages/delete`. Absent on classic DM events.
    */
   sequenceId?: string;
+  /** Set when this message is a reply and the decrypted preview (or caller) names a target. */
+  replyTo?: ReplyTarget;
+  /** On `ReactionAdd`, the sequence id of the message that was reacted to. */
+  reactionTargetSequenceId?: string;
 }
 
 /** Extra context for delete. Classic DM ignores it; Chat uses the sequence id. */
