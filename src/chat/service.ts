@@ -138,6 +138,10 @@ export class ChatService {
    * "media" and media_type omitted so clients treat it as an image.
    * Throws on failure so the caller can post the https URL as text.
    * Does not use classic DM `dm_image`.
+   *
+   * `encryptMessage` requires a text argument. chat-xdk accepts `""`
+   * (`build_message_content` still emits a payload) and the photo is the
+   * message. A space would be visible message text, so the caption is empty.
    */
   async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
     const bytes = image.bytes;
@@ -158,7 +162,7 @@ export class ChatService {
     const mediaHashKey = await this.http.uploadChatMedia(conversationId, ciphertext);
     let payload;
     try {
-      payload = this.cipher.encryptMessage(conversationId, "18+", {
+      payload = this.cipher.encryptMessage(conversationId, "", {
         conversationKey: latest.key,
         conversationKeyVersion: latest.version,
         attachments: [

@@ -271,9 +271,10 @@ describe("DM image attach", () => {
     expect(calls[1]?.init.body).toBeInstanceOf(FormData);
     const message = JSON.parse(String(calls[3]?.init.body));
     expect(message).toEqual({
-      text: "18+",
       attachments: [{ media_id: "999" }],
     });
+    expect(message.text).toBeUndefined();
+    expect(JSON.stringify(message)).not.toContain("18+");
     expect(String(calls[0]?.init.headers && (calls[0].init.headers as Record<string, string>).Authorization)).toBe(
       "Bearer test-access-token",
     );

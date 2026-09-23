@@ -632,7 +632,7 @@ describe("ChatService.sendImage", () => {
       encrypted.push({ conversationId, text, options });
       return {
         messageId: "mid-img",
-        encryptedContent: "enc:18+",
+        encryptedContent: "enc:",
         encodedEventSignature: "sig",
       };
     };
@@ -652,7 +652,8 @@ describe("ChatService.sendImage", () => {
     expect(Array.from(uploads[0]!)).toEqual(Array.from(bytes));
     expect(Array.from(streamed[0]!)).toEqual(Array.from(key));
     expect(encrypted).toHaveLength(1);
-    expect(encrypted[0]).toMatchObject({ conversationId: "g1", text: "18+" });
+    expect(encrypted[0]).toMatchObject({ conversationId: "g1", text: "" });
+    expect(encrypted[0]?.text).not.toMatch(/18\+/);
     const attachment = encrypted[0]?.options?.attachments?.[0] as ChatMediaAttachment;
     expect(attachment.mediaHashKey).toBe("hash-inline");
     expect(attachment.filename).toBe("image.png");
@@ -662,7 +663,7 @@ describe("ChatService.sendImage", () => {
     expect(attachment.mediaType).toBeUndefined();
     expect(encrypted[0]?.options?.conversationKeyVersion).toBe("99");
     expect(http.sends).toHaveLength(1);
-    expect(http.sends[0]?.encoded_message_create_event).toBe("enc:18+");
+    expect(http.sends[0]?.encoded_message_create_event).toBe("enc:");
     expect(result).toEqual({ dmEventId: "mid-img", dmConversationId: "g1" });
     expect(JSON.stringify(encrypted[0]?.options?.attachments)).not.toContain("media_type");
     expect(JSON.stringify(encrypted[0]?.options?.attachments)).not.toContain("mediaType");

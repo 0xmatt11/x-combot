@@ -69,7 +69,7 @@ describe("chat-xdk WASM boundary", () => {
     expect(streamed.byteLength).toBeGreaterThan(plain.byteLength);
     expect(Buffer.from(streamed).includes(Buffer.from(plain))).toBe(false);
 
-    const withPhoto = cipher.encryptMessage(vectors.event_conversation_id, "18+", {
+    const withPhoto = cipher.encryptMessage(vectors.event_conversation_id, "", {
       conversationKey: key,
       conversationKeyVersion: version!,
       attachments: [
@@ -103,7 +103,7 @@ describe("chat-xdk WASM boundary", () => {
       },
     } as unknown as XdkLike;
     const cipher = wrapCipher(inner);
-    cipher.encryptMessage("g1", "18+", {
+    cipher.encryptMessage("g1", "", {
       conversationKey: new Uint8Array(32).fill(3),
       conversationKeyVersion: "4",
       attachments: [
@@ -118,7 +118,7 @@ describe("chat-xdk WASM boundary", () => {
     });
     expect(seen[0]).toEqual({
       conversationId: "g1",
-      text: "18+",
+      text: "",
       conversationKey: new Uint8Array(32).fill(3),
       conversationKeyVersion: "4",
       attachments: [

@@ -1,7 +1,7 @@
 /**
- * Adult-only gate for `!boobs`. The command never accepts a custom query.
- * These checks reject minor-related words in fixed queries, extra arguments,
- * and result titles or URLs. They are not a vision classifier.
+ * Adult-only gate for `!boobs`, `!ass`, and `!booty`. None of them accept a
+ * custom query. These checks reject minor-related words in fixed queries,
+ * extra arguments, and result titles or URLs. They are not a vision classifier.
  */
 
 export interface AdultImageCandidate {
@@ -54,11 +54,17 @@ const AGE_RULES: { label: string; pattern: RegExp }[] = [
   },
 ];
 
-/** Fixed web-search query. Not user-controlled. Must stay free of banned terms. */
+/** Fixed chest query for `!boobs`. Not user-controlled. Must stay free of banned terms. */
 export const ADULT_CHEST_QUERY = "adult woman breasts close-up crop chest 18+";
+
+/** Fixed butt query for `!ass` and `!booty`. Not the chest phrase, and not user text. */
+export const ADULT_BOOTY_QUERY = "adult woman butt close-up crop booty 18+";
 
 /** Adult subreddits used by the no-key Reddit provider. Chest-focused, 18+ boards. */
 export const ADULT_SUBREDDITS = ["boobs", "cleavage", "BiggerThanYouThought"] as const;
+
+/** Butt-focused 18+ boards for `!ass` and `!booty`. Not the chest list. */
+export const ADULT_BOOTY_SUBREDDITS = ["ass", "pawg", "booty"] as const;
 
 const CLOSE_UP = /\b(close\s*-?\s*up|zoomed(?:\s*-?\s*in)?|zoom|crop(?:ped)?|cleavage|chest)\b/i;
 const FULL_BODY = /\b(full\s*-?\s*body|head\s*-?\s*to\s*-?\s*toe|portrait|selfie|mirror)\b/i;
@@ -111,21 +117,46 @@ export function isFullBodyHint(candidate: AdultImageCandidate): boolean {
   return FULL_BODY.test(cropText(candidate));
 }
 
+const BOOTY_FOCUS =
+  /\b(close\s*-?\s*up|zoomed(?:\s*-?\s*in)?|zoom|crop(?:ped)?|butt|butts|booty|booties|ass|rear|cheeks?)\b/i;
+
+export function isPreferredBootyCrop(candidate: AdultImageCandidate): boolean {
+  const text = cropText(candidate);
+  return BOOTY_FOCUS.test(text) && !FULL_BODY.test(text);
+}
+
 /**
- * Random safe hit, preferring a close-up / chest crop over a full-body or portrait hint.
+ * Random safe hit, preferring `prefer` over a full-body or portrait hint.
  * Returns undefined when every candidate fails the adult gate.
  */
-export function pickAdultChestImage(
+function pickAdultImage(
   candidates: AdultImageCandidate[],
-  random: () => number = Math.random,
+  prefer: (candidate: AdultImageCandidate) => boolean,
+  random: () => number,
 ): AdultImageCandidate | undefined {
   const safe = candidates.filter(isSafeAdultImage);
   if (safe.length === 0) return undefined;
-  const preferred = safe.filter(isPreferredChestCrop);
+  const preferred = safe.filter(prefer);
   const notFullBody = safe.filter((candidate) => !isFullBodyHint(candidate));
   const pool = preferred.length > 0 ? preferred : notFullBody.length > 0 ? notFullBody : safe;
   const index = Math.min(pool.length - 1, Math.max(0, Math.floor(random() * pool.length)));
   return pool[index];
+}
+
+/** Random safe chest hit, preferring a close-up / chest crop. */
+export function pickAdultChestImage(
+  candidates: AdultImageCandidate[],
+  random: () => number = Math.random,
+): AdultImageCandidate | undefined {
+  return pickAdultImage(candidates, isPreferredChestCrop, random);
+}
+
+/** Random safe butt hit, preferring a close-up / booty crop. */
+export function pickAdultBootyImage(
+  candidates: AdultImageCandidate[],
+  random: () => number = Math.random,
+): AdultImageCandidate | undefined {
+  return pickAdultImage(candidates, isPreferredBootyCrop, random);
 }
 
 /** Hostname only, so logs never include a signed image URL. */

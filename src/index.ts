@@ -61,11 +61,11 @@ async function main(): Promise<void> {
     const needsKey = provider === "serpapi" || provider === "bing";
     if (needsKey && !env.boobsSearchApiKey) {
       log.warn(
-        `!boobs is enabled with provider ${provider} but BOOBS_SEARCH_API_KEY is unset.`,
+        `Adult image commands are enabled with provider ${provider} but BOOBS_SEARCH_API_KEY is unset.`,
       );
     } else {
       log.info(
-        `!boobs enabled (provider=${provider}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
+        `Adult image commands enabled (!boobs, !ass, !booty, provider=${provider}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
       );
     }
   }

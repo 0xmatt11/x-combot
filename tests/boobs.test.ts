@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ADULT_BOOTY_QUERY,
+  ADULT_BOOTY_SUBREDDITS,
   ADULT_CHEST_QUERY,
   ADULT_SUBREDDITS,
   containsBannedAgeTerm,
   isSafeAdultImage,
+  pickAdultBootyImage,
   pickAdultChestImage,
   redactSecrets,
   type AdultImageCandidate,
@@ -89,9 +92,15 @@ describe("adult filter", () => {
     expect(containsBannedAgeTerm("15yo")).toBe("underage");
     expect(containsBannedAgeTerm("18 year old adult")).toBeUndefined();
     expect(containsBannedAgeTerm(ADULT_CHEST_QUERY)).toBeUndefined();
+    expect(containsBannedAgeTerm(ADULT_BOOTY_QUERY)).toBeUndefined();
+    expect(ADULT_BOOTY_QUERY).not.toMatch(/breast|chest|boob/i);
     for (const sub of ADULT_SUBREDDITS) {
       expect(containsBannedAgeTerm(sub)).toBeUndefined();
     }
+    for (const sub of ADULT_BOOTY_SUBREDDITS) {
+      expect(containsBannedAgeTerm(sub)).toBeUndefined();
+    }
+    expect(ADULT_BOOTY_SUBREDDITS).not.toEqual(ADULT_SUBREDDITS);
   });
 
   it("drops unsafe results and prefers a close-up over a full-body portrait", () => {
@@ -114,6 +123,16 @@ describe("adult filter", () => {
     expect(pickAdultChestImage([teen])).toBeUndefined();
     expect(pickAdultChestImage([teen, full, close], () => 0)?.url).toBe(SAFE_URL);
     expect(pickAdultChestImage([full], () => 0)?.url).toBe("https://i.redd.it/full.jpg");
+    const standing = candidate({
+      url: "https://i.redd.it/standing.jpg",
+      title: "woman standing",
+    });
+    const booty = candidate({
+      url: "https://i.redd.it/booty.jpg",
+      title: "adult butt close-up",
+    });
+    expect(pickAdultBootyImage([standing, booty], () => 0)?.url).toBe("https://i.redd.it/booty.jpg");
+    expect(pickAdultBootyImage([teen], () => 0)).toBeUndefined();
   });
 
   it("redacts api keys before a log line", () => {
@@ -677,6 +696,66 @@ describe("image search parsers", () => {
   });
 });
 
+describe("!ass / !booty image search", () => {
+  it("uses the butt query on DuckDuckGo and does not send the chest phrase", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.startsWith("https://duckduckgo.com/i.js?")) {
+          return new Response(
+            JSON.stringify({
+              results: [{ image: "https://cdn.example/booty.jpg", title: "adult butt close-up" }],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response('vqd="4-bootytoken123456"', { status: 200 });
+      },
+    });
+    const hits = await search.searchAdultBootyImages();
+    expect(hits.map((hit) => hit.url)).toEqual(["https://cdn.example/booty.jpg"]);
+    const page = new URL(urls[0]!);
+    const script = new URL(urls[1]!);
+    expect(page.searchParams.get("q")).toBe(ADULT_BOOTY_QUERY);
+    expect(script.searchParams.get("q")).toBe(ADULT_BOOTY_QUERY);
+    expect(script.searchParams.get("p")).toBe("-1");
+    expect(`${page.search} ${script.search}`).not.toMatch(/breast|boob/i);
+  });
+
+  it("reads a butt subreddit from the Reddit provider", async () => {
+    const urls: string[] = [];
+    const search = createImageSearch({
+      provider: "reddit",
+      random: () => 0,
+      fetchImpl: async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.includes("gateway.reddit.com")) {
+          return new Response(
+            JSON.stringify({
+              postIds: ["t3_ok"],
+              posts: {
+                t3_ok: { isNSFW: true, title: "adult butt close-up", url: "https://i.redd.it/adult-butt.jpg" },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("blocked", { status: 403 });
+      },
+    });
+    const hits = await search.searchAdultBootyImages();
+    expect(urls[0]).toMatch(
+      /^https:\/\/gateway\.reddit\.com\/desktopapi\/v1\/subreddits\/(ass|pawg|booty)\?sort=hot&allow_over18=1$/,
+    );
+    expect(urls[0]).not.toMatch(/\/(boobs|cleavage|BiggerThanYouThought)\?/);
+    expect(hits.map((hit) => hit.url)).toEqual(["https://i.redd.it/adult-butt.jpg"]);
+    expect(pickAdultBootyImage(hits)?.url).toBe("https://i.redd.it/adult-butt.jpg");
+  });
+});
+
 describe("BOOBS_SEARCH_PROVIDER", () => {
   const previousProvider = process.env.BOOBS_SEARCH_PROVIDER;
   const previousOwner = process.env.BOT_OWNER_ID;
@@ -747,9 +826,16 @@ describe("!boobs engine", () => {
     client.failSendImage = options?.failSendImage ?? false;
     const search = {
       calls: 0,
+      topics: [] as Array<"chest" | "booty">,
       async searchAdultChestImages() {
         search.calls += 1;
+        search.topics.push("chest");
         return options?.hits ?? [candidate({ url: SAFE_URL })];
+      },
+      async searchAdultBootyImages() {
+        search.calls += 1;
+        search.topics.push("booty");
+        return options?.hits ?? [candidate({ url: SAFE_URL, title: "adult butt close-up" })];
       },
     };
     const config = runtime(
@@ -780,14 +866,18 @@ describe("!boobs engine", () => {
     return { engine, client, search };
   }
 
-  it("searches and attaches a native image", async () => {
+  it("searches and attaches a native image with no caption", async () => {
     const { engine, client, search } = setup();
-    await engine.processEvent(message({ id: "b1", senderId: alice.id, text: "!Boobs" }));
+    const actions = await engine.processEvent(
+      message({ id: "b1", senderId: alice.id, text: "!Boobs" }),
+    );
     expect(search.calls).toBe(1);
     expect(client.images).toEqual([
       { conversationId: groupId, url: SAFE_URL, mimeType: "image/jpeg", bytes: 3 },
     ]);
     expect(client.sent).toHaveLength(0);
+    expect(actions.replies).toEqual([]);
+    expect(JSON.stringify(actions.replies)).not.toContain("18+");
   });
 
   it("posts the image URL when native attach fails", async () => {
@@ -894,10 +984,134 @@ describe("!boobs engine", () => {
   it("mentions !boobs in the default !help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!boobs/);
+    expect(loaded.help).toMatch(/!ass/);
+    expect(loaded.help).toMatch(/!booty/);
     expect(loaded.boobs?.enabled).toBe(false);
     expect(loaded.boobs?.rate_limit_per_user).toBe(0);
     expect(loaded.boobs?.rate_limit_per_conversation).toBe(0);
     expect(loaded.boobs?.rate_limit_window_ms).toBe(0);
+  });
+});
+
+describe("!ass and !booty", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  function setup(options?: {
+    enabled?: boolean;
+    failSendImage?: boolean;
+    perUser?: number;
+    windowMs?: number;
+  }) {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.failSendImage = options?.failSendImage ?? false;
+    const search = {
+      calls: 0,
+      topics: [] as Array<"chest" | "booty">,
+      async searchAdultChestImages() {
+        search.calls += 1;
+        search.topics.push("chest");
+        return [candidate({ url: SAFE_URL })];
+      },
+      async searchAdultBootyImages() {
+        search.calls += 1;
+        search.topics.push("booty");
+        return [candidate({ url: "https://i.redd.it/adult-butt.jpg", title: "adult butt close-up" })];
+      },
+    };
+    const engine = new ModerationEngine(
+      store,
+      client,
+      runtime({
+        boobs: {
+          enabled: options?.enabled !== false,
+          rate_limit_per_user: options?.perUser ?? 0,
+          rate_limit_per_conversation: 0,
+          rate_limit_window_ms: options?.windowMs ?? 0,
+        },
+      }),
+      undefined,
+      {
+        imageSearch: search,
+        fetchImage: async () => ({ bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/jpeg" }),
+      },
+    );
+    return { engine, client, search };
+  }
+
+  it("attaches a native image for both aliases with no caption", async () => {
+    const { engine, client, search } = setup();
+    const ass = await engine.processEvent(message({ id: "ass-1", senderId: alice.id, text: "!ass" }));
+    const booty = await engine.processEvent(
+      message({ id: "booty-1", senderId: alice.id, text: "!Booty" }),
+    );
+    expect(search.topics).toEqual(["booty", "booty"]);
+    expect(search.calls).toBe(2);
+    expect(client.images).toEqual([
+      {
+        conversationId: groupId,
+        url: "https://i.redd.it/adult-butt.jpg",
+        mimeType: "image/jpeg",
+        bytes: 3,
+      },
+      {
+        conversationId: groupId,
+        url: "https://i.redd.it/adult-butt.jpg",
+        mimeType: "image/jpeg",
+        bytes: 3,
+      },
+    ]);
+    expect(client.sent).toHaveLength(0);
+    expect(ass.replies).toEqual([]);
+    expect(booty.replies).toEqual([]);
+    expect(JSON.stringify([ass.replies, booty.replies])).not.toContain("18+");
+  });
+
+  it("posts the image URL when native attach fails and still omits an age caption", async () => {
+    const { engine, client } = setup({ failSendImage: true });
+    const actions = await engine.processEvent(
+      message({ id: "ass-link", senderId: alice.id, text: "!booty" }),
+    );
+    expect(client.images).toHaveLength(0);
+    expect(client.sent.map((row) => row.text)).toEqual(["https://i.redd.it/adult-butt.jpg"]);
+    expect(actions.replies).toEqual(["https://i.redd.it/adult-butt.jpg"]);
+    expect(actions.replies.join("\n")).not.toContain("18+");
+  });
+
+  it("refuses extra text and stays off when the shared switch is disabled", async () => {
+    const extra = setup();
+    await extra.engine.processEvent(message({ id: "e1", senderId: alice.id, text: "!ass teen" }));
+    await extra.engine.processEvent(message({ id: "e2", senderId: alice.id, text: "!booty please" }));
+    expect(extra.search.calls).toBe(0);
+    const text = extra.client.sent.map((row) => row.text).join("\n");
+    expect(text).toMatch(/Refused\. !ass does not search custom text/);
+    expect(text).toMatch(/!booty does not take extra text/);
+    expect(text).not.toMatch(/teen/);
+
+    const disabled = setup({ enabled: false });
+    await disabled.engine.processEvent(message({ id: "d1", senderId: alice.id, text: "!ass" }));
+    await disabled.engine.processEvent(message({ id: "d2", senderId: alice.id, text: "!booty" }));
+    expect(disabled.search.calls).toBe(0);
+    expect(disabled.client.sent.map((row) => row.text)).toEqual([
+      "!ass is disabled on this bot.",
+      "!booty is disabled on this bot.",
+    ]);
+  });
+
+  it("shares the !boobs rate-limit window", async () => {
+    const { engine, client, search } = setup({ perUser: 1, windowMs: 60_000 });
+    const now = 5_000_000;
+    await engine.processEvent(message({ id: "r1", senderId: alice.id, text: "!boobs" }), now);
+    await engine.processEvent(message({ id: "r2", senderId: alice.id, text: "!ass" }), now + 1);
+    expect(search.topics).toEqual(["chest"]);
+    expect(client.images).toHaveLength(1);
+    expect(client.sent.map((row) => row.text).join("\n")).toMatch(/Slow down — !ass/);
   });
 });
 
@@ -957,6 +1171,9 @@ describe("RoutedXClient image delivery", () => {
         imageSearch: {
           async searchAdultChestImages() {
             return [candidate({ url: SAFE_URL })];
+          },
+          async searchAdultBootyImages() {
+            return [candidate({ url: SAFE_URL, title: "adult butt close-up" })];
           },
         },
         fetchImage: async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/jpeg" }),

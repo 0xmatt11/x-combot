@@ -85,6 +85,15 @@ describe("parseCommand", () => {
     expect(parseCommand("!boobs please")).toEqual({ name: "boobs", extra: "please" });
   });
 
+  it("parses !ass and !booty as the same command shape with no custom query", () => {
+    expect(parseCommand("!ass")).toEqual({ name: "ass" });
+    expect(parseCommand("!ASS")).toEqual({ name: "ass" });
+    expect(parseCommand("  /booty  ")).toEqual({ name: "booty" });
+    expect(parseCommand("!Booty")).toEqual({ name: "booty" });
+    expect(parseCommand("!ass teen")).toEqual({ name: "ass", extra: "teen" });
+    expect(parseCommand("!booty please")).toEqual({ name: "booty", extra: "please" });
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",
@@ -122,6 +131,8 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!help")).toBeUndefined();
     expect(parseUnknownBang("!ask what now")).toBeUndefined();
     expect(parseUnknownBang("!boobs")).toBeUndefined();
+    expect(parseUnknownBang("!ass")).toBeUndefined();
+    expect(parseUnknownBang("!booty extra")).toBeUndefined();
     expect(parseUnknownBang("!summary focus")).toBeUndefined();
     expect(parseUnknownBang("!delete 12")).toBeUndefined();
     expect(parseUnknownBang("!warn")).toBeUndefined();
