@@ -409,6 +409,20 @@ describe("parseCommand !troll", () => {
   });
 });
 
+describe("parseCommand !linkroast", () => {
+  it("parses on and off without caring about case", () => {
+    expect(parseCommand("!linkroast on")).toEqual({ name: "linkroast", action: "on" });
+    expect(parseCommand("!LINKROAST ON")).toEqual({ name: "linkroast", action: "on" });
+    expect(parseCommand("!LinkRoast Off")).toEqual({ name: "linkroast", action: "off" });
+    expect(parseCommand("/linkroast OFF")).toEqual({ name: "linkroast", action: "off" });
+    expect(parseCommand("!linkroast")).toEqual({ name: "linkroast" });
+    expect(parseCommand("!linkroast later")).toEqual({ name: "linkroast" });
+    expect(parseUnknownBang("!linkroast on")).toBeUndefined();
+    expect(parseUnknownBang("!LINKROAST OFF")).toBeUndefined();
+    expect(parseUnknownBang("!linkroast")).toBeUndefined();
+  });
+});
+
 describe("renderTemplate", () => {
   it("substitutes welcome placeholders", () => {
     expect(renderTemplate("hi @{username} ({user_id})", { username: "alice", user_id: "1" })).toBe(

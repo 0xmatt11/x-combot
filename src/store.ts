@@ -148,6 +148,18 @@ CREATE TABLE IF NOT EXISTS troll_targets (
   last_ms INTEGER NOT NULL DEFAULT 0,
   roast_next INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS linkroast (
+  conversation_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS linkroast_cooldown (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  last_ms INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, user_id)
+);
 `;
 
 export class Store {
@@ -775,6 +787,50 @@ export class Store {
         `UPDATE troll_targets SET last_ms = ?, roast_next = ? WHERE conversation_id = ?`,
       )
       .run(nowMs, roastNext, conversationId);
+  }
+
+  /** Whether `!linkroast` is on for this conversation. */
+  isLinkroastEnabled(conversationId: string): boolean {
+    const row = this.db
+      .prepare("SELECT enabled FROM linkroast WHERE conversation_id = ?")
+      .get(conversationId) as { enabled: number } | undefined;
+    return row?.enabled === 1;
+  }
+
+  /** Turn link roast on or off. Off deletes the row. Cooldowns stay. */
+  setLinkroastEnabled(conversationId: string, enabled: boolean): void {
+    if (!enabled) {
+      this.db.prepare("DELETE FROM linkroast WHERE conversation_id = ?").run(conversationId);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO linkroast (conversation_id, enabled) VALUES (?, 1)
+         ON CONFLICT(conversation_id) DO UPDATE SET enabled = 1`,
+      )
+      .run(conversationId);
+  }
+
+  /** Previous roast time for this sender in this conversation, if any. */
+  getLinkroastLastMs(conversationId: string, userId: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT last_ms FROM linkroast_cooldown
+         WHERE conversation_id = ? AND user_id = ?`,
+      )
+      .get(conversationId, userId) as { last_ms: number } | undefined;
+    return row?.last_ms;
+  }
+
+  /** Record a posted link roast for this sender. */
+  markLinkroastSent(conversationId: string, userId: string, nowMs: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO linkroast_cooldown (conversation_id, user_id, last_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET last_ms = excluded.last_ms`,
+      )
+      .run(conversationId, userId, nowMs);
   }
 }
 

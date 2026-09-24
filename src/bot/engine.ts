@@ -28,6 +28,13 @@ import {
   TROLL_COOLDOWN_MS,
 } from "./troll.js";
 import {
+  buildLinkroastMessages,
+  containsXStatusLink,
+  LINKROAST_COOLDOWN_MS,
+  linkroastFallback,
+  sanitizeLinkroastReply,
+} from "./linkroast.js";
+import {
   ADULT_IMAGE_RETRY_MESSAGE,
   ADULT_VISION_UNAVAILABLE_MESSAGE,
   containsBannedAgeTerm,
@@ -314,6 +321,9 @@ export class ModerationEngine {
       if (command.name !== "troll" && command.name !== "untroll") {
         await this.trollIfTarget(event, senderId, actions, nowMs);
       }
+      if (command.name !== "linkroast") {
+        await this.linkroastIfSpam(event, senderId, actions, nowMs);
+      }
       return actions;
     }
 
@@ -327,6 +337,7 @@ export class ModerationEngine {
       }
       await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
       await this.trollIfTarget(event, senderId, actions, nowMs);
+      await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
     }
 
@@ -348,6 +359,7 @@ export class ModerationEngine {
         nowMs,
       );
       await this.trollIfTarget(event, senderId, actions, nowMs);
+      await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
     }
 
@@ -434,6 +446,7 @@ export class ModerationEngine {
     }
 
     await this.trollIfTarget(event, senderId, actions, nowMs);
+    await this.linkroastIfSpam(event, senderId, actions, nowMs);
 
     if (!command) {
       this.store.setLastUserMessage(
@@ -1086,6 +1099,101 @@ export class ModerationEngine {
     await this.reply(event.conversationId, reply, actions);
   }
 
+  /**
+   * Roast a status/tweet link while `!linkroast` is on in this conversation.
+   * One reply per sender per cooldown. The bot's own messages never reach here.
+   */
+  private async linkroastIfSpam(
+    event: DmEvent,
+    senderId: string,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (!senderId || senderId === this.config.botUserId) return;
+    const text = event.text ?? "";
+    if (!containsXStatusLink(text)) return;
+    if (!this.store.isLinkroastEnabled(event.conversationId)) return;
+    const last = this.store.getLinkroastLastMs(event.conversationId, senderId);
+    if (last !== undefined && nowMs - last < LINKROAST_COOLDOWN_MS) return;
+
+    const label = await this.linkroastLabel(event, senderId);
+    let reply: string;
+    try {
+      reply = await this.composeLinkroast(event, label, text);
+    } catch (error) {
+      log.warn(`Link roast failed conversation=${event.conversationId}`, error);
+      reply = linkroastFallback(label, () => this.nextRandom());
+    }
+    reply = sanitizeLinkroastReply(reply, label, [senderId], () => this.nextRandom());
+    this.store.markLinkroastSent(event.conversationId, senderId, nowMs);
+    await this.reply(event.conversationId, reply, actions);
+  }
+
+  private async composeLinkroast(
+    event: DmEvent,
+    label: string,
+    latest: string,
+  ): Promise<string> {
+    const rng = () => this.nextRandom();
+    if (containsBannedAgeTerm(latest)) {
+      log.info(
+        `Link roast used a template because the message tripped the age filter conversation=${event.conversationId}`,
+      );
+      return linkroastFallback(label, rng);
+    }
+    const settings = this.conversationConfig(event.conversationId);
+    if (!this.llmClient || !settings.llmEnabled) {
+      log.info(
+        `Link roast fell back to a template conversation=${event.conversationId} (llm unavailable)`,
+      );
+      return linkroastFallback(label, rng);
+    }
+    try {
+      const answer = await this.llmClient.complete(buildLinkroastMessages({ label, latest }));
+      return sanitizeLinkroastReply(answer, label, [event.senderId ?? ""], rng);
+    } catch (error) {
+      log.warn(`Link roast completion failed conversation=${event.conversationId}`, error);
+      return linkroastFallback(label, rng);
+    }
+  }
+
+  private async linkroastLabel(event: DmEvent, senderId: string): Promise<string> {
+    const label = await this.chatLabel(event.sender, senderId, event.conversationId);
+    if (!isNumericUserId(label.replace(/^@/, ""))) return label;
+    return "someone";
+  }
+
+  private async handleLinkroast(
+    event: DmEvent,
+    command: { name: "linkroast"; action?: "on" | "off" },
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (command.action === "on") {
+      if (this.store.isLinkroastEnabled(conversationId)) {
+        await this.reply(conversationId, "Link roast is already on.", actions);
+        return;
+      }
+      this.store.setLinkroastEnabled(conversationId, true);
+      await this.reply(
+        conversationId,
+        "Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
+        actions,
+      );
+      return;
+    }
+    if (command.action === "off") {
+      if (!this.store.isLinkroastEnabled(conversationId)) {
+        await this.reply(conversationId, "Link roast is already off.", actions);
+        return;
+      }
+      this.store.setLinkroastEnabled(conversationId, false);
+      await this.reply(conversationId, "Link roast off.", actions);
+      return;
+    }
+    await this.reply(conversationId, "Use !linkroast on or !linkroast off.", actions);
+  }
+
   private async composeTroll(
     event: DmEvent,
     userId: string,
@@ -1402,6 +1510,9 @@ export class ModerationEngine {
         return;
       case "untroll":
         await this.handleUntroll(event, command, actions);
+        return;
+      case "linkroast":
+        await this.handleLinkroast(event, command, actions);
         return;
       case "dice":
         await this.reply(
