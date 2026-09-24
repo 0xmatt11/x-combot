@@ -311,6 +311,7 @@ describe("!voice command", () => {
   }) {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     client.failSendAudio = options?.failSendAudio ?? false;
     const voice = {
@@ -339,6 +340,7 @@ describe("!voice command", () => {
     const mp3 = Uint8Array.from([0xff, 0xfb, 1, 2, 3, 4, 5, 6]);
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     const engine = new ModerationEngine(store, client, runtime(), undefined, {
       voice: createVoiceClient({

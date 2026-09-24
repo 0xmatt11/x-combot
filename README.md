@@ -10,13 +10,13 @@ Telegram's ComBot can kick and delete anyone's messages because Telegram exposes
 
 - Welcomes joins and announces leaves (`@{username} has left`). A voluntary leave and a remove look the same to the API.
 - Public commands: `!help`, `!status`, `!rules`, `!dice`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack` / `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!games`, `!xp` / `!top`, reply `+` / `-`, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll` / `!untroll`, `!linkroast`, `!noor on` / `!noor off`, `!noorabs on` / `!noorabs off`, and a short LLM joke for an unknown `!name`.
-- Admin commands: warn, kick (soft-mute only), mute, delete, notes, per-group settings, admin allowlist.
+- Admin commands: warn, kick (soft-mute only), mute, delete, notes, per-group settings, admin allowlist. `!auth` is owner-only (`BOT_OWNER_ID`): a new encrypted Chat group stays silent until that account sends it.
 - Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. Generation uses the grok.com Imagine page in Chrome (`IMAGINE_BACKEND=browser`, the default). Search is the fallback after a generation miss that is not moderation and not a signed-out session. `BOOBS_IMAGINE_APP` (default off) can attach an already-hosted `imagine-public.x.ai` JPEG between those two, and can mix in a per-command mp4 bank (`!ass`, `!booty`, and `!boobs` each have their own). `!ass` / `!booty` stills can rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. Those banks are static fetches.
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
 - `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one).
 - `!voice <persona> <text>` speaks that line in one of four personas and posts an audio attachment in encrypted Chat. Bare `!voice` shows the menu. Classic group DMs get a short note that Chat is required.
 - Encrypted groups: decrypt with [chat-xdk](https://github.com/xdevplatform/chat-xdk), reply with an encrypted payload, and (when opted in) take `chat.received` from the X Activity API.
-- With a Chat identity and no allowlist, it moderates **every** encrypted group the account is in, including groups it is added to later.
+- With a Chat identity and no allowlist, it **tracks** every encrypted group the account is in, including groups it is added to later. A group first seen after this rule stays quiet until `BOT_OWNER_ID` sends `!auth` in that chat. Groups that already had a Chat watermark are grandfathered and keep being moderated.
 
 ## What X will not do
 
@@ -149,7 +149,15 @@ Discovery in `all` mode:
 - **Inbox.** `GET /2/chat/conversations` lists groups the account is already in. The first pass reads up to 3 pages of 50. Later refreshes read one page. The refresh is **1 minute** without Activity and **10 minutes** when Activity is on. A 404 or 410 disables inbox listing; Activity and already-watermarked groups remain. A 429 or 402 backs off and does not also pull every group's events in that tick.
 - Once more than 8 groups are known, each catch-up tick reads newly seen groups first, then a rotating handful (8 reads per tick). An allowlist, and any set of 8 or fewer, is polled in full every tick.
 
-The first sight of a group **seeds a watermark and does not replay history**. Send `!help` after the bot has seen the group. Restarting does not replay: known groups are remembered from `chat_events:<id>` watermarks. Allowlist mode polls the allowlist only; remembered ids outside that list are not picked up.
+The first sight of a group **seeds a watermark and does not replay history**. Restarting does not replay: known groups are remembered from `chat_events:<id>` watermarks. Allowlist mode polls the allowlist only; remembered ids outside that list are not picked up.
+
+### Authorizing a new encrypted group
+
+Seeing a group is not the same as moderating it. On a new encrypted Chat group the bot still seeds `chat_events:<id>` so older messages are not replayed, and Activity push plus the catch-up poll keep running. It does not welcome, announce leaves, run bang commands, call the LLM, post media banks, apply filters or flood mutes, award XP, or send Noor alerts in that chat until the owner authorizes it. Other people's messages, and the owner's messages other than `!auth`, get no reply.
+
+Send `!auth` from the account whose numeric id is `BOT_OWNER_ID` (Matt). The text is case-insensitive and may have surrounding whitespace (`!AUTH`, `  !auth  `). `!auth please` and `/auth` do not count. `ADMIN_IDS` and users added with `!admin add` cannot authorize a group, and the bot does not answer them. After a successful `!auth`, the bot confirms in that chat and moderates it like any other group. The id is stored in SQLite `chat_authorizations` and survives restarts.
+
+**Groups already being moderated are grandfathered.** The first time the database is opened after this rule, every existing `chat_events:<g…>` watermark is copied into `chat_authorizations`. A watermark written after that one-time pass does not authorize the group. That keeps current chats working without locking the owner out. Classic group DMs are not gated.
 
 ### Key rotation
 
@@ -277,12 +285,13 @@ Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2
 | `!linkroast on` | Roast people who paste an X/Twitter status link in this chat until `!linkroast off`. One roast per person about every 45 seconds. See [Link roast](#link-roast) |
 | `!noor on` / `!noor off` | Noor alert for @noorrietje. Relays each new post with her status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. A photo post also attaches an Imagine troll remix. `!Noor ON` matches. See [Noor alert](#noor-alert) |
 | `!noorabs on` / `!noorabs off` | When a Noor alert fires, append `but look at muh pretty abs` and an Imagine close-up of a skinny adult woman's tanned abs. Needs `!noor on`. See [Noor alert](#noor-alert) |
-| `!<made-up>` | One- or two-sentence witty LLM line when the LLM is allowed. Silent when it is off, unconfigured, admin-only, rate-limited, or the completion fails. `!status`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!linkroast`, `!noor`, `!noorabs`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!games`, `!slots`, `!blackjack`, `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, and `!trivia` are real commands and do not take this path |
+| `!<made-up>` | One- or two-sentence witty LLM line when the LLM is allowed. Silent when it is off, unconfigured, admin-only, rate-limited, or the completion fails. `!status`, `!auth`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!linkroast`, `!noor`, `!noorabs`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!games`, `!slots`, `!blackjack`, `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, and `!trivia` are real commands and do not take this path |
 
-Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself.
+Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself. `!auth` is not an admin command: only `BOT_OWNER_ID` can send it, and only to unlock a new encrypted Chat group.
 
 | Command | Behavior |
 | --- | --- |
+| `!auth` | Owner only (`BOT_OWNER_ID`). Exact `!auth` (any case, optional surrounding spaces) authorizes a new encrypted Chat group and confirms in chat. Anyone else is ignored, including `ADMIN_IDS`. Groups that already had a Chat watermark are already authorized. Classic group DMs do not need it. See [Authorizing a new encrypted group](#authorizing-a-new-encrypted-group) |
 | `!warn @user [reason]` | Count a warning. At the limit: soft-mute and notify admins |
 | `!warns @user` | Show the count |
 | `!unwarn @user` | Remove one warning |

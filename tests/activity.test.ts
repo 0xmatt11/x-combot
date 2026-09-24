@@ -213,6 +213,7 @@ describe("Activity intake", () => {
   it("decrypts a mocked chat.received event and runs the command layer", async () => {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(GROUP);
     const cipher = new FakeCipher();
     cipher.events.set("b64-help", {
       type: "message",
@@ -241,6 +242,7 @@ describe("Activity intake", () => {
   it("moderates every encrypted group when no allowlist is set", async () => {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat("g999");
     const cipher = new FakeCipher();
     cipher.events.set("b64-help", {
       type: "message",

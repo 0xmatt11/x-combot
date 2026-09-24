@@ -433,6 +433,7 @@ describe("engine Imagine and search dedupe", () => {
   }) {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     client.failSendImage = options?.failSendImage ?? false;
     client.failSendVideo = options?.failSendVideo ?? false;
@@ -983,6 +984,7 @@ describe("!imagine command", () => {
   }) {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     client.failSendImage = options?.failSendImage ?? false;
     const imagine = {

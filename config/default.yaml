@@ -70,6 +70,7 @@ help: |
     !games — grouped catalog of the games above
 
   Admin commands:
+    !auth — owner only (BOT_OWNER_ID). A new encrypted Chat group stays silent until that account sends exact !auth (any case, optional surrounding spaces). !auth please does not count. Other people are ignored. Groups already watermarked before this rule are already authorized. Classic group DMs do not need it
     Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.
     !warn @user [reason] — add a warning
     !warns @user — show warning count

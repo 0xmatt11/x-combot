@@ -3,8 +3,9 @@ import { canonicalChatGroupId, isChatGroupId } from "./ids.js";
 export type ChatListenMode = "all" | "allowlist";
 
 /**
- * `all` moderates every encrypted group (`g…`) this account is in.
- * `allowlist` moderates only `allow`. `deny` always wins.
+ * `all` accepts every encrypted group (`g…`) this account is in.
+ * `allowlist` accepts only `allow`. `deny` always wins.
+ * Acceptance still waits for `!auth` unless the group was grandfathered.
  * Classic DMs and 1:1 Chat ids are never accepted.
  */
 export interface ChatListenPolicy {

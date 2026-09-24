@@ -84,7 +84,7 @@ export class ChatPoller {
     );
     if (this.policy.mode === "all") {
       log.info(
-        "New encrypted Chat groups are moderated without CHAT_CONVERSATION_IDS. The first sight of a group seeds a watermark and does not replay history. If decrypt fails because this account joined before its public key was registered, run `npm run chat:rotate -- <g…id> --confirm`.",
+        "New encrypted Chat groups are tracked without CHAT_CONVERSATION_IDS. The first sight of a group seeds a watermark and does not replay history. The bot stays quiet in that chat until BOT_OWNER_ID sends !auth. Groups already watermarked when this rule was added stay authorized. If decrypt fails because this account joined before its public key was registered, run `npm run chat:rotate -- <g…id> --confirm`.",
       );
     }
     void this.tick();
@@ -108,7 +108,7 @@ export class ChatPoller {
     if (this.store.getWatermark(key)) return;
     this.store.setWatermark(key, eventId);
     log.info(
-      `Seeded Chat watermark for ${conversationId} at ${eventId} from Activity; older messages will not be replayed.`,
+      `Seeded Chat watermark for ${conversationId} at ${eventId} from Activity; older messages will not be replayed. This chat stays quiet until the owner sends !auth.`,
     );
   }
 
@@ -170,7 +170,7 @@ export class ChatPoller {
     this.ids.add(conversationId);
     this.pending.add(conversationId);
     log.info(
-      `Moderating encrypted Chat group ${conversationId}. First sight seeds a watermark and does not replay older messages.`,
+      `Tracking encrypted Chat group ${conversationId}. First sight seeds a watermark and does not replay older messages. Commands stay off until the owner sends !auth, unless this group was already authorized.`,
     );
     return true;
   }
@@ -265,8 +265,8 @@ export class ChatPoller {
       this.store.setWatermark(key, pulled.newestId ?? "empty");
       log.info(
         pulled.newestId
-          ? `Seeded Chat watermark for ${conversationId} at ${pulled.newestId}; historical messages will not be replayed. Send !help again after startup.`
-          : `Seeded empty Chat watermark for ${conversationId}.`,
+          ? `Seeded Chat watermark for ${conversationId} at ${pulled.newestId}; historical messages will not be replayed. This chat stays quiet until the owner sends !auth.`
+          : `Seeded empty Chat watermark for ${conversationId}. This chat stays quiet until the owner sends !auth.`,
       );
       return { sawNew: false, seeded: true };
     }

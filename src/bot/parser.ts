@@ -62,7 +62,8 @@ export type ParsedCommand =
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "noor"; mode?: "on" | "off" }
   | { name: "noorabs"; mode?: "on" | "off" }
-  | { name: "status" };
+  | { name: "status" }
+  | { name: "auth" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -142,6 +143,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "noor",
   "noorabs",
   "status",
+  "auth",
 ]);
 
 /**
@@ -368,9 +370,21 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseNoorAbs(rest);
     case "status":
       return { name: "status" };
+    case "auth":
+      if (bang.prefix !== "!" || rest) return undefined;
+      return { name: "auth" };
     default:
       return undefined;
   }
+}
+
+/**
+ * Exact `!auth` for a new encrypted Chat group. Case-insensitive, optional
+ * surrounding whitespace. Extra words and the `/auth` alias do not count.
+ */
+export function isChatAuthMessage(text: string | undefined | null): boolean {
+  if (!text) return false;
+  return /^!auth$/i.test(text.trim());
 }
 
 export function parseUserRef(raw: string): UserRef | undefined {
