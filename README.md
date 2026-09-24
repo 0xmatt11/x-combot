@@ -11,7 +11,7 @@ Telegram's ComBot can kick and delete anyone's messages because Telegram exposes
 - Welcomes joins and announces leaves (`@{username} has left`). A voluntary leave and a remove look the same to the API.
 - Public commands: `!help`, `!status`, `!rules`, `!dice`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack` / `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!games`, `!xp` / `!top`, reply `+` / `-`, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll` / `!untroll`, `!linkroast`, `!noor on` / `!noor off`, `!noorabs on` / `!noorabs off`, and a short LLM joke for an unknown `!name`.
 - Admin commands: warn, kick (soft-mute only), mute, delete, notes, per-group settings, admin allowlist. `!auth` is owner-only (`BOT_OWNER_ID`): a new encrypted Chat group stays silent until that account sends it.
-- Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. Generation uses the grok.com Imagine page in Chrome (`IMAGINE_BACKEND=browser`, the default). Search is the fallback after a generation miss that is not moderation and not a signed-out session. `BOOBS_IMAGINE_APP` (default off) can attach an already-hosted `imagine-public.x.ai` JPEG between those two, and can mix in a per-command mp4 bank (`!ass`, `!booty`, and `!boobs` each have their own). `!ass` / `!booty` stills can rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. Those banks are static fetches.
+- Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. They use the saved imagine-public bank (`BOOBS_IMAGINE_APP` and the `BOOBS_IMAGINE_PUBLIC_*` URL lists), including each command's mp4 bank. `!ass` / `!booty` stills rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. If that bank is empty or exhausted, image search runs. They do not open grok.com/imagine and they do not call api.x.ai image generation. `!imagine` and `!video` still use the Chrome session.
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
 - `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one).
 - `!voice <persona> <text>` speaks that line in one of four personas and posts an audio attachment in encrypted Chat. Bare `!voice` shows the menu. Classic group DMs get a short note that Chat is required.
@@ -276,8 +276,8 @@ Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2
 | `!ask <question>` | LLM reply. Also `@botname …` and the wake prefixes in YAML |
 | `!summarize [focus]` | Load history and summarize |
 | `!analyze [prompt]` | Load history and answer about the thread |
-| `!boobs` | One chest / cleavage photo. Off unless enabled. No extra arguments. See [Adult photos](#adult-photos) |
-| `!ass` / `!booty` / `!booties` | One butt photo. Same switch, rate limit, and media path as `!boobs`. No caption |
+| `!boobs` | One chest / cleavage photo or clip from the saved imagine-public bank. Off unless enabled. Does not open grok.com/imagine. No extra arguments. See [Adult photos](#adult-photos) |
+| `!ass` / `!booty` / `!booties` | One butt photo or clip from that same saved bank. Same switch, rate limit, and media path as `!boobs`. No caption |
 | `!imagine <prompt>` | One image from that prompt on grok.com/imagine (Chrome session). Stays on when `!boobs` is off. See [Imagine](#imagine) |
 | `!video <prompt>` | One short video from that prompt on grok.com/imagine. Takes a few minutes. See [Video](#video) |
 | `!voice` | Menu of four personas. `!voice sexy <text>` (or `1`, `dude` / `2`, `scared` / `3`, `horny` / `4`) speaks that line. See [Voice](#voice) |
@@ -416,23 +416,17 @@ BOOBS_ENABLED=true
 
 `BOOBS_ENABLED` overrides `boobs.enabled`. `BOOBS_ENABLED=false` forces them off even when the YAML says true. That flag does not gate `!imagine`. Rate limits default to unlimited (`0`). A positive per-user or per-conversation count is enforced only together with a positive `rate_limit_window_ms`. Those timestamps live in `boobs_rate` and are shared by the three adult commands. They do not apply to `!imagine`. Image URLs are not logged (only the host).
 
-**Grok Imagine in the browser is the default** (`IMAGINE_BACKEND=browser`). Adult commands that would have called image generation open https://grok.com/imagine in the shared Chrome profile instead of `POST`ing `https://api.x.ai/v1/images/generations`. The adult prompt is still a fixed tasteful pin-up for that command (cleavage / chest, or butt from behind), plus one pose line and a framing token. Caller text is never included. The page's image bytes are posted as an inline photo. A URL text message is used only when that upload fails and a real file URL exists.
+**Adult commands do not call Imagine.** `!boobs`, `!ass`, `!booty`, and `!booties` never open https://grok.com/imagine and never `POST` `https://api.x.ai/v1/images/generations`. `BOOBS_IMAGE_PROVIDER` is still parsed (`imagine`, aliases `grok` and `grok-imagine`, or `search`) so an existing `.env` does not fail startup, and it does not turn generation back on. A signed-out Chrome session and a content-moderation reply belong to `!imagine` and `!video`, not to these commands.
 
-`IMAGINE_BACKEND=api` restores the console client. That client `POST`s `https://api.x.ai/v1/images/generations` with `Authorization: Bearer`, `n: 1`, and `response_format: "url"`. The key is `XAI_API_KEY`. If that is unset, the grok LLM stack is used: `LLM_PROVIDER` is `grok` or `xai`, or `LLM_BASE_URL` / `OPENAI_BASE_URL` contains `api.x.ai`, and then `LLM_API_KEY`, else `OPENAI_API_KEY`. Browser mode does not use that key for images or video. `!voice` still does.
+`IMAGINE_BACKEND` still chooses the backend for `!imagine` and `!video` only. `browser` (the default) uses the shared Chrome profile. `api` keeps the console client, which `POST`s `https://api.x.ai/v1/images/generations` with `Authorization: Bearer`, `n: 1`, and `response_format: "url"`. The key is `XAI_API_KEY`. If that is unset, the grok LLM stack is used: `LLM_PROVIDER` is `grok` or `xai`, or `LLM_BASE_URL` / `OPENAI_BASE_URL` contains `api.x.ai`, and then `LLM_API_KEY`, else `OPENAI_API_KEY`. Browser mode does not use that key for images or video. `!voice` still does. Adult commands do not use either backend.
 
-| `BOOBS_IMAGE_PROVIDER` | Adult commands |
-| --- | --- |
-| unset | Imagine. Browser mode does not need an API key. API mode uses Imagine when a key exists, otherwise search |
-| `imagine` (aliases `grok`, `grok-imagine`) | Imagine. In API mode a missing key falls back to search. A non-moderation failure falls back to the public CDN (when configured) and then search. Content moderation is explained in the chat and does not search. A signed-out or unwired browser session is explained in the chat and does not search or call the API |
-| `search` | Skip Imagine and use the search cascade |
+`BOOBS_IMAGINE_MODEL` defaults to `grok-imagine-image-quality`. Any `grok-imagine-image…` id is accepted, including `grok-imagine-image` and `grok-imagine-image-2.0`. A bad id fails startup. `BOOBS_IMAGINE_ASPECT_RATIO` is optional. Omit it and the model chooses. Accepted values: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `2:1`, `1:2`, `19.5:9`, `9:19.5`, `20:9`, `9:20`, `21:9`, `5:2`, `auto`. A bad ratio fails startup. These variables are env-only. They are not in `config/default.yaml`. They apply to `!imagine` when `IMAGINE_BACKEND=api`. Adult commands do not send a prompt.
 
-`BOOBS_IMAGINE_MODEL` defaults to `grok-imagine-image-quality`. Any `grok-imagine-image…` id is accepted, including `grok-imagine-image` and `grok-imagine-image-2.0`. A bad id fails startup. `BOOBS_IMAGINE_ASPECT_RATIO` is optional. Omit it and the model chooses. Accepted values: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `2:1`, `1:2`, `19.5:9`, `9:19.5`, `20:9`, `9:20`, `21:9`, `5:2`, `auto`. A bad ratio fails startup. These three variables are env-only. They are not in `config/default.yaml`.
+The last 8 posted image URLs and byte hashes in a conversation are skipped, for the saved bank and for search. That memory is in-process, per conversation, shared with `!imagine`, and is not written to SQLite or the log. A restart clears it.
 
-If the generated URL or byte hash matches one of the last 8 images posted in that conversation, the bot tries Imagine once more, then falls back to search. That memory is in-process, per conversation, shared with `!imagine`, and is not written to SQLite or the log. A restart clears it.
+Saved-bank files skip the search text filter and the vision check. Search hits still use both.
 
-Imagine results skip the search text filter and the vision check, because the prompt is fixed.
-
-**Imagine public CDN (optional, default off).** `BOOBS_IMAGINE_APP` does not change the reliable path: Imagine first (browser or API, matching `IMAGINE_BACKEND`), then the search cascade. The flag does not open grok.com and does not log in. It only `GET`s JPEG URLs you already pasted. When it is `true`, a command that did not get a generated image can attach a JPEG the operator already has on the public CDN:
+**Imagine public CDN (the adult photo source when the flag is on).** `BOOBS_IMAGINE_APP` defaults to off. The flag does not open grok.com and does not log in. It only `GET`s JPEG and mp4 URLs you already pasted. When it is `true`, an adult command tries that saved bank first:
 
 | Variable | Command |
 | --- | --- |
@@ -447,7 +441,7 @@ Each still must be `https://imagine-public.x.ai/imagine-public/images/<uuid>.jpg
 
 The three video variables are separate banks. A call builds one pool from that command's stills plus that command's videos and picks uniformly at random. `!ass` does not play a `!booty` clip. Each entry is an https mp4: `imagine-public.x.ai` with no query, or any other https host whose path ends in `.mp4` (a query string is allowed, the same shape `!video` downloads). Lists use the same comma, whitespace, newline, and `#` comment rules. A bad entry fails startup.
 
-A JPEG is uploaded on the existing photo path (classic `dm_image`, or Chat `encryptStream` plus `POST /2/chat/media/upload`). An mp4 is downloaded with the same helper as `!video` and posted with Chat `sendVideo` (`media_type` 3). Classic group DMs cannot attach mp4, so a video draw is skipped and another pool item is tried. A failed download or upload does the same and does not post the mp4 URL as text. There is no caption and no `18+` label. The pool is tried only after Imagine misses (browser mode: a failure other than content moderation or a signed-out session; API mode: no key, or a failure other than content moderation) and before search. A moderation rejection is still explained in the chat and does not use these URLs or search. A signed-out browser session is also explained and does not use these URLs, search, or the API. A URL or byte hash already in that conversation's last 8 posts is skipped and another item is tried. A download that is not a JPEG, or not an mp4, is skipped the same way. If the pool for that command is empty, or every candidate is skipped, the command continues to search. Startup logs the chest still, the booty still count, and the three video counts. `!imagine` and `!video` ignore the flag and these variables.
+A JPEG is uploaded on the existing photo path (classic `dm_image`, or Chat `encryptStream` plus `POST /2/chat/media/upload`). An mp4 is downloaded with the same helper as `!video` and posted with Chat `sendVideo` (`media_type` 3). Classic group DMs cannot attach mp4, so a video draw is skipped and another pool item is tried. A failed download or upload does the same and does not post the mp4 URL as text. There is no caption and no `18+` label. The pool is the first step for these commands. It does not wait on Imagine, and a grok.com moderation or signed-out session does not apply here. A URL or byte hash already in that conversation's last 8 posts is skipped and another item is tried. A download that is not a JPEG, or not an mp4, is skipped the same way. If the pool for that command is empty, or every candidate is skipped, the command continues to search. Startup logs the chest still, the booty still count, and the three video counts. `!imagine` and `!video` ignore the flag and these variables.
 
 `config/booty-bank.example.txt` is a copy-paste list. The process does not load it. On deploy set:
 
@@ -456,9 +450,9 @@ BOOBS_IMAGINE_APP=true
 BOOBS_IMAGINE_PUBLIC_BOOTY_URLS="<paste config/booty-bank.example.txt>"
 ```
 
-Those CDN addresses show up on grok.com/imagine after you sign in and pass the age gate. Copy the image address into the env vars above. The bank stays a static HTTPS GET. Generation is separate: the browser worker in [Imagine](#imagine) opens that page with the shared Chrome profile. The bank does not.
+Those CDN addresses show up on grok.com/imagine after you sign in and pass the age gate. Copy the image address into the env vars above. The bank stays a static HTTPS GET. `!imagine` and `!video` are separate: the browser worker in [Imagine](#imagine) opens that page with the shared Chrome profile. Adult commands do not.
 
-**Search cascade.** Used when Imagine is off (`BOOBS_IMAGE_PROVIDER=search`), API mode has no key, or Imagine fails for a reason other than content moderation or a signed-out browser session. A moderation rejection is posted in the chat with five softer prompts and does not search. Default search provider is DuckDuckGo. No API key. It loads a `vqd` token from `https://duckduckgo.com/?q=…`, then `https://duckduckgo.com/i.js` with safesearch off (`p=-1`). The query is the fixed phrase for that command (no `18+`). If DuckDuckGo fails, returns no direct image URLs, or returns nothing that passes the text filter, the bot tries keyless Bing HTML (`https://www.bing.com/images/async`, `adlt=off`), then Reddit. Bing HTML does not use the Azure Image Search API or `BOOBS_SEARCH_API_KEY`. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. After the filter, URLs and downloaded byte hashes from the last 8 posts in that conversation are dropped.
+**Search cascade.** Used when the saved bank is off, empty, or every candidate was skipped. Adult commands do not call Imagine, so this path does not post a content-moderation reply and does not stop for a signed-out browser session. Those replies still belong to `!imagine` and `!video`. Default search provider is DuckDuckGo. No API key. It loads a `vqd` token from `https://duckduckgo.com/?q=…`, then `https://duckduckgo.com/i.js` with safesearch off (`p=-1`). The query is the fixed phrase for that command (no `18+`). If DuckDuckGo fails, returns no direct image URLs, or returns nothing that passes the text filter, the bot tries keyless Bing HTML (`https://www.bing.com/images/async`, `adlt=off`), then Reddit. Bing HTML does not use the Azure Image Search API or `BOOBS_SEARCH_API_KEY`. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. After the filter, URLs and downloaded byte hashes from the last 8 posts in that conversation are dropped.
 
 Reddit reads `gateway.reddit.com` listings (`sort=hot`, `allow_over18=1`) for that command's fixed subreddits and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. The subreddit name stays with the hit so a short title from that board still counts as on-topic. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud IPs.
 
@@ -473,13 +467,13 @@ On the search path, titles, snippets, and URLs that mention minors, teen, lolita
 
 A missing key on `serpapi` or `bing` makes the command say so and does not call the API. DuckDuckGo, the Bing HTML fallback, and Reddit do not use that key.
 
-**Vision** is off by default and applies only to search hits. `BOOBS_VISION=true` or `boobs.vision: true` (env wins) downloads a few candidates and asks the configured LLM whether the image matches the command and shows no genitalia. A reject, error, or timeout skips that image. If none pass, the user is asked to try again. With the flag off, no search image is sent to the model. Imagine bytes are not sent to that check.
+**Vision** is off by default and applies only to search hits. `BOOBS_VISION=true` or `boobs.vision: true` (env wins) downloads a few candidates and asks the configured LLM whether the image matches the command and shows no genitalia. A reject, error, or timeout skips that image. If none pass, the user is asked to try again. With the flag off, no search image is sent to the model. Saved-bank bytes are not sent to that check.
 
 | Conversation | Delivery |
 | --- | --- |
 | Classic group DM | Download (https, max 5 MB, jpeg/png/gif/webp) and upload with `POST /2/media/upload` (`media_category` `dm_image` or `dm_gif`). The message is attachments only, no `text` field, so there is no caption. Needs `media.write`. |
 | Encrypted Chat (`g…`) | Inline photo. Bytes are `encryptStream`'d, uploaded via `POST /2/chat/media/upload`, then referenced from `encryptMessage` as `attachment_type: "media"` with `media_type` omitted so clients render a photo, not a file. The encrypted text is an empty string and is not shown as a caption. |
-| Either, if upload or download fails and a URL exists | The image URL is sent as a text message. A bytes-only Imagine result with no URL cannot fall back to a link. |
+| Search, if upload or download fails and a URL exists | The image URL is sent as a text message. A saved-bank upload that fails tries the next bank item and does not post the CDN URL as text. |
 
 ## Imagine
 
@@ -516,9 +510,9 @@ npm run imagine:browser -- --mode image --prompt "a red cube on a white table"
 
 That writes one file under the temp directory and prints the path. It still needs the Chrome session above.
 
-`IMAGINE_BACKEND=api` keeps the old client for an emergency. It needs `XAI_API_KEY` (or the grok LLM key stack). With no key the bot says image generation needs `XAI_API_KEY`. The client uses the same model and aspect ratio as adult API generations (`BOOBS_IMAGINE_MODEL`, `BOOBS_IMAGINE_ASPECT_RATIO`). The temporary URL is downloaded and uploaded as an inline photo.
+`IMAGINE_BACKEND=api` keeps the old client for an emergency. It needs `XAI_API_KEY` (or the grok LLM key stack). With no key the bot says image generation needs `XAI_API_KEY`. The client uses `BOOBS_IMAGINE_MODEL` and `BOOBS_IMAGINE_ASPECT_RATIO`. The temporary URL is downloaded and uploaded as an inline photo. Adult commands do not use this client.
 
-In either backend the image has no caption. If an upload fails and a file URL exists, the bot posts the URL. A bytes-only result with no file URL cannot fall back to a link. If Imagine blocks the image for content moderation, the bot says so in the same chat and suggests five softer prompts (from the chat model when LLM replies are enabled, otherwise a local rewrite). Other generation failures say to try again. `!imagine` does not fall back to web search. `!boobs`, `!ass`, and `!booty` use that same moderation reply and skip search. A signed-out browser session on those adult commands is also said in the chat and skips the public CDN, search, and the API.
+In either backend the image has no caption. If an upload fails and a file URL exists, the bot posts the URL. A bytes-only result with no file URL cannot fall back to a link. If Imagine blocks the image for content moderation, the bot says so in the same chat and suggests five softer prompts (from the chat model when LLM replies are enabled, otherwise a local rewrite). Other generation failures say to try again. `!imagine` does not fall back to web search. `!boobs`, `!ass`, and `!booty` do not call Imagine, so they do not use that moderation reply and a signed-out browser session does not block their saved bank or search.
 
 A blank `!imagine` replies with a one-line example. Prompts are trimmed and sent as written; this bot does not cap their length. If generation rejects a prompt for length, the bot says it is too long. Prompts that mention minors are refused and are not sent. A result whose URL or byte hash matches one of the last 8 images in that conversation is generated once more; a second repeat fails the command.
 
@@ -653,10 +647,10 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `IMAGINE_BROWSER_TIMEOUT_MS` | Wait override for image and video, milliseconds, at least 1000 |
 | `XP_ENABLED` | Overrides `xp.enabled` |
 | `BOOBS_ENABLED`, `BOOBS_VISION` | Adult commands, and the vision check on search hits only |
-| `BOOBS_IMAGE_PROVIDER` | `imagine` or `search`. Unset means Imagine. Browser mode does not need an xAI key |
-| `BOOBS_IMAGINE_MODEL` | Default `grok-imagine-image-quality`. Also used by `!imagine` |
-| `BOOBS_IMAGINE_ASPECT_RATIO` | Optional. Omit it and the model chooses. Also used by `!imagine` |
-| `BOOBS_IMAGINE_APP` | Default off. Optional public-CDN JPEG for adult commands. Does not drive grok.com |
+| `BOOBS_IMAGE_PROVIDER` | Still parsed (`imagine` or `search`). Adult commands ignore it and use the saved bank, then search. It does not open grok.com/imagine |
+| `BOOBS_IMAGINE_MODEL` | Default `grok-imagine-image-quality`. Used by `!imagine` when `IMAGINE_BACKEND=api`. Adult commands do not send it |
+| `BOOBS_IMAGINE_ASPECT_RATIO` | Optional. Omit it and the model chooses. Used by `!imagine` in API mode. Adult commands do not send it |
+| `BOOBS_IMAGINE_APP` | Default off. When on, adult commands fetch the saved public-CDN bank before search. Does not drive grok.com |
 | `BOOBS_IMAGINE_PUBLIC_URL` | `!boobs` JPEG on `imagine-public.x.ai`. Used only when the app flag is on |
 | `BOOBS_IMAGINE_PUBLIC_BOOTY_URL` | One `!ass` / `!booty` JPEG on the same host. Used only when the app flag is on |
 | `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS` | Bank of those JPEGs, comma- or whitespace-separated. Merged with the single URL. Two or more rotate at random |

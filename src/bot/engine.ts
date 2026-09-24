@@ -70,7 +70,6 @@ import {
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import {
-  adultImaginePrompt,
   formatImagineModerationReply,
   imaginePromptRejection,
   ImagineError,
@@ -78,11 +77,9 @@ import {
   IMAGINE_UNAVAILABLE_MESSAGE,
   isImagineGenerationApiUrl,
   isImagineModerationError,
-  isImagineSessionError,
   normalizeImaginePrompt,
   suggestSofterImaginePrompts,
   type AdultImageCommand,
-  type AdultImageProviderName,
   type ImagineBackend,
   type ImagineGenerator,
   type ImagineImage,
@@ -229,7 +226,7 @@ export interface EngineDeps {
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
   adultVision?: AdultVisionJudge;
-  /** Shared Grok Imagine client for `!imagine` and the adult commands. */
+  /** Grok Imagine client for `!imagine` only. Adult commands do not call it. */
   imagine?: ImagineGenerator;
   /** Grok Imagine video client for `!video`. Same key as `imagine`. */
   video?: VideoGenerator;
@@ -238,16 +235,12 @@ export interface EngineDeps {
   /** xAI text-to-speech for `!voice`. Same key as `imagine`. */
   voice?: VoiceGenerator;
   /**
-   * Adult commands only. Unset means Imagine when `imagine` is set, otherwise search.
-   * `!imagine` always uses the Imagine client.
-   */
-  adultImageProvider?: AdultImageProviderName;
-  /**
-   * Optional already-hosted Imagine public JPEGs and mp4s. Tried after API
-   * Imagine misses and before search. Absent means that step is off.
+   * Saved imagine-public stills and mp4s for `!boobs`, `!ass`, and `!booty`.
+   * Tried first. An empty or exhausted bank falls through to search.
+   * Absent means that step is off. Does not open grok.com.
    * `bootyUrls` is the shared `!ass` / `!booty` still bank; a single `bootyUrl`
    * still works. Video lists are command-specific and mix with those stills.
-   * `!imagine` does not use this.
+   * `!imagine` and `!video` do not use this.
    */
   imaginePublic?: ImaginePublicUrls;
   /** Last posted image URLs and content hashes. Defaults to an in-memory window. */
@@ -2511,22 +2504,14 @@ export class ModerationEngine {
       }
     }
 
-    const provider = this.adultProvider();
-    if (provider === "imagine" && this.deps.imagine) {
-      const posted = await this.tryAdultImagine(conversationId, command, actions, label);
-      if (posted) return;
-      log.warn(`${label} Imagine unavailable; trying the next adult image source conversation=${conversationId}`);
-    }
-
+    // Saved bank only. These commands do not open grok.com/imagine and do not
+    // call the Imagine generate client (browser or api.x.ai). An empty or
+    // exhausted bank falls through to search.
     if (await this.tryImaginePublic(conversationId, command, actions, label)) return;
 
     const search = this.deps.imageSearch;
     if (!search) {
-      await this.reply(
-        conversationId,
-        provider === "imagine" ? IMAGINE_FAILED_MESSAGE : "Image search is not configured.",
-        actions,
-      );
+      await this.reply(conversationId, "Image search is not configured.", actions);
       return;
     }
 
@@ -2803,50 +2788,6 @@ export class ModerationEngine {
     await this.reply(conversationId, userMessage, actions);
   }
 
-  /**
-   * One fresh Imagine image for an adult command. A repeated URL or byte hash
-   * is tried once more. Content moderation is explained in the conversation
-   * and does not fall back to search. A signed-out browser session is also
-   * explained and does not fall back to search or the API. Any other failure
-   * returns false so the public CDN and then search can run.
-   */
-  private async tryAdultImagine(
-    conversationId: string,
-    command: AdultImageCommand,
-    actions: EngineActions,
-    label: string,
-  ): Promise<boolean> {
-    const imagine = this.deps.imagine;
-    if (!imagine) return false;
-    let sawRecent = false;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let generated: ImagineImage;
-      const prompt = adultImaginePrompt(command, () => this.nextRandom());
-      try {
-        generated = await imagine.generate(prompt);
-      } catch (error) {
-        const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
-        log.warn(`${label} Imagine failed conversation=${conversationId}: ${detail}`);
-        if (isImagineModerationError(error) || isImagineSessionError(error)) {
-          await this.replyImagineFailure(conversationId, prompt, error, actions);
-          return true;
-        }
-        return false;
-      }
-      const outcome = await this.postGeneratedImage(conversationId, generated, actions, label);
-      if (outcome === "posted") return true;
-      if (outcome === "recent") {
-        sawRecent = true;
-        continue;
-      }
-      return false;
-    }
-    if (sawRecent) {
-      log.warn(`${label} Imagine repeated a recent image conversation=${conversationId}`);
-    }
-    return false;
-  }
-
   private async postGeneratedImage(
     conversationId: string,
     image: ImagineImage,
@@ -2921,13 +2862,13 @@ export class ModerationEngine {
   }
 
   /**
-   * Attach one item from the operator's still bank mixed with that command's
-   * mp4 bank. A JPEG uses the existing photo path. An mp4 is downloaded and
-   * sent with `sendVideo` in encrypted Chat. Classic DMs cannot attach mp4,
-   * so a video draw is skipped. A recent URL, a repeated byte hash, a bad
-   * download, or a failed upload tries another candidate. The source URL is
-   * not posted as text. A miss returns false so search can run. This does
-   * not call grok.com.
+   * First step for `!boobs`, `!ass`, and `!booty`. Attach one item from the
+   * operator's still bank mixed with that command's mp4 bank. A JPEG uses the
+   * existing photo path. An mp4 is downloaded and sent with `sendVideo` in
+   * encrypted Chat. Classic DMs cannot attach mp4, so a video draw is skipped.
+   * A recent URL, a repeated byte hash, a bad download, or a failed upload
+   * tries another candidate. The source URL is not posted as text. A miss
+   * returns false so search can run. This does not call grok.com or api.x.ai.
    */
   private async tryImaginePublic(
     conversationId: string,
@@ -3072,11 +3013,6 @@ export class ModerationEngine {
       );
       return undefined;
     }
-  }
-
-  private adultProvider(): AdultImageProviderName {
-    if (this.deps.adultImageProvider) return this.deps.adultImageProvider;
-    return this.deps.imagine ? "imagine" : "search";
   }
 
   private nextRandom(): number {

@@ -26,8 +26,8 @@ help: |
     !help — this message
     !status — health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     !rules — group rules
-    !boobs — chest / cleavage photo or clip (off unless enabled)
-    !ass / !booty / !booties — butt photo or clip (same switch as !boobs)
+    !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty (off unless enabled; does not open grok.com/imagine)
+    !ass / !booty / !booties — butt photo or clip from that same saved bank (same switch as !boobs; does not open grok.com/imagine)
     !imagine <prompt> — image from grok.com/imagine in the signed-in Chrome session (not the xAI API)
     !video <prompt> — short video from grok.com/imagine in that same Chrome session (takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
@@ -158,14 +158,16 @@ xp:
 
 # Adult images (`!boobs`, and `!ass` / `!booty` / `!booties`). Off by default so a moderation
 # deploy does not post NSFW. One switch covers all of them: enabled: true or
-# BOOBS_ENABLED=true (env wins). The default Imagine path is the grok.com/imagine
-# Chrome session (IMAGINE_BACKEND=browser). IMAGINE_BACKEND=api uses the xAI
-# image API when a key is set. BOOBS_IMAGE_PROVIDER=search keeps the DuckDuckGo
-# cascade (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are
-# off-topic, keyless Bing HTML (adlt=off) runs next, then Reddit. Search
-# also skips the last few posted URLs and image hashes in that conversation.
+# BOOBS_ENABLED=true (env wins). These commands use the saved imagine-public
+# bank (BOOBS_IMAGINE_APP and the BOOBS_IMAGINE_PUBLIC_* URL lists), then the
+# search cascade if that bank is empty. They do not open grok.com/imagine and
+# they do not call api.x.ai image generation. !imagine and !video still use
+# the Chrome session (IMAGINE_BACKEND=browser). Search is DuckDuckGo by default
+# (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are off-topic,
+# keyless Bing HTML (adlt=off) runs next, then Reddit. Search also skips the
+# last few posted URLs and image hashes in that conversation.
 # The command ignores extra text so members cannot change the prompt. See the README.
-# !imagine <prompt> uses the same Imagine path and does not use this switch.
+# !imagine <prompt> uses the Imagine path and does not use this switch.
 # Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
 # count is enforced only when rate_limit_window_ms is also positive.
 # vision: optional download + LLM check (chest/butt subject, no genitalia).

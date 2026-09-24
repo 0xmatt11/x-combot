@@ -124,33 +124,23 @@ async function main(): Promise<void> {
   const video = userFacing.video;
   if (imageChoice.imagineKeyMissing) {
     log.warn(
-      "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine, !video, and !voice stay off until XAI_API_KEY is set (or the grok LLM key stack).",
+      "BOOBS_IMAGE_PROVIDER=imagine does not generate !boobs, !ass, or !booty. Those commands use the saved imagine-public bank, then image search. !imagine, !video, and !voice stay off until XAI_API_KEY is set (or the grok LLM key stack).",
     );
   }
   if (defaults.boobs?.enabled) {
     const needsKey = searchProvider === "serpapi" || searchProvider === "bing";
     if (needsKey && !env.boobsSearchApiKey) {
       log.warn(
-        imageChoice.provider === "search"
-          ? `Adult image commands are enabled with provider ${searchProvider} but BOOBS_SEARCH_API_KEY is unset.`
-          : `Adult image search fallback uses ${searchProvider} but BOOBS_SEARCH_API_KEY is unset.`,
+        `Adult image search fallback uses ${searchProvider} but BOOBS_SEARCH_API_KEY is unset.`,
       );
     }
-    if (!(needsKey && !env.boobsSearchApiKey && imageChoice.provider === "search")) {
-      const source =
-        imageChoice.provider === "imagine"
-          ? backend === "browser"
-            ? "imagine browser grok.com/imagine"
-            : `imagine model=${imagineModel}`
-          : `search ${searchProvider}`;
-      log.info(
-        `Adult image commands enabled (!boobs, !ass, !booty, provider=${source}, vision=${defaults.boobs.vision === true ? "on" : "off"}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
-      );
-    }
+    log.info(
+      `Adult image commands enabled (!boobs, !ass, !booty, saved bank then search ${searchProvider}, vision=${defaults.boobs.vision === true ? "on" : "off"}). They do not call grok.com/imagine or api.x.ai image generation. Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
+    );
   }
   if (backend === "browser") {
     log.info(
-      "Imagine backend=browser. !imagine, !video, and adult Imagine images use https://grok.com/imagine. api.x.ai image and video generations are off.",
+      "Imagine backend=browser. !imagine and !video use https://grok.com/imagine. Adult photo commands do not. api.x.ai image and video generations are off.",
     );
     if (env.imagineBrowserCdpUrl) {
       log.info("Imagine browser attaches to the signed-in Chrome over CDP.");
@@ -183,13 +173,13 @@ async function main(): Promise<void> {
     const boobsVideos = env.boobsImaginePublicBoobsVideoUrls?.length ?? 0;
     if (!chest && bootyCount === 0 && assVideos + bootyVideos + boobsVideos === 0) {
       log.warn(
-        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG or video URL is set. Adult commands stay on Imagine, then search. The bank is a static file list, not an api.x.ai generation.",
+        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG or video URL is set. Adult commands use image search. The bank is a static file list, not an api.x.ai generation.",
       );
     } else {
       const booty =
         bootyCount === 0 ? "unset" : bootyCount === 1 ? "1 url" : `${bootyCount} urls`;
       log.info(
-        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}, assVideos=${assVideos}, bootyVideos=${bootyVideos}, boobsVideos=${boobsVideos}). Static fetch after Imagine misses and before search.`,
+        `Imagine public CDN is the adult photo source (chest=${chest ? "set" : "unset"}, booty=${booty}, assVideos=${assVideos}, bootyVideos=${bootyVideos}, boobsVideos=${boobsVideos}). Static fetch before search. Adult commands do not call grok.com/imagine.`,
       );
     }
   }
@@ -253,7 +243,6 @@ async function main(): Promise<void> {
       video,
       fetchVideo: fetchGeneratedVideo,
       voice,
-      adultImageProvider: imageChoice.provider,
       adultVision: llmClient?.completeVision
         ? createAdultVisionJudge({
             completeVision: (prompt, image) => llmClient.completeVision!(prompt, image),

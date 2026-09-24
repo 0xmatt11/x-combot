@@ -19,7 +19,8 @@ import {
 } from "./video.js";
 
 /**
- * User-facing image and video generation.
+ * User-facing image and video generation for `!imagine` and `!video`.
+ * Adult commands do not use this module.
  * `browser` (the default) drives https://grok.com/imagine and does not call
  * api.x.ai `/v1/images/generations` or `/v1/videos`. `api` keeps those clients.
  */
