@@ -9,6 +9,7 @@ import type {
   DmEvent,
   Mention,
   OutboundImage,
+  OutboundVideo,
   SendMessageResult,
   TokenSet,
   XUser,
@@ -202,6 +203,14 @@ export class LiveXClient implements XClient {
       dmConversationId: payload.data.dm_conversation_id,
       dmEventId: payload.data.dm_event_id,
     };
+  }
+
+  /**
+   * Classic group DMs upload `dm_image` / `dm_gif` only. An mp4 is not attached
+   * here; `!video` posts the temporary URL instead.
+   */
+  async sendVideo(_conversationId: string, _video: OutboundVideo): Promise<SendMessageResult> {
+    throw new Error("Classic group DMs cannot attach an mp4.");
   }
 
   private async uploadDmImage(

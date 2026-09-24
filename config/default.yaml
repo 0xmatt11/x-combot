@@ -27,6 +27,7 @@ help: |
     !boobs — chest / cleavage photo (off unless enabled)
     !ass / !booty — butt photo (same switch as !boobs)
     !imagine <prompt> — generate an image with Grok Imagine (needs an xAI key)
+    !video <prompt> — generate a short video with Grok Imagine (needs an xAI key; takes a few minutes)
     !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
     !top — level leaderboard (!toplvl)
     Reply + or - to a message — give or take one level (not your own)

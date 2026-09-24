@@ -295,6 +295,16 @@ export interface OutboundImage {
   mimeType?: string;
 }
 
+/** Video bytes to attach. Classic DMs cannot take mp4; encrypted Chat uses media_type 3. */
+export interface OutboundVideo {
+  /** Temporary https URL. Do not log this. */
+  url: string;
+  bytes?: Uint8Array;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+}
+
 export interface DeleteResult {
   deleted: boolean;
   error?: string;

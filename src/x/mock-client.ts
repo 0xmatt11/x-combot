@@ -3,6 +3,7 @@ import type {
   DeleteResult,
   DmEvent,
   OutboundImage,
+  OutboundVideo,
   SendMessageResult,
   XUser,
 } from "../types.js";
@@ -11,6 +12,14 @@ import type { XClient } from "./client.js";
 export class MockXClient implements XClient {
   readonly sent: { conversationId: string; text: string }[] = [];
   readonly images: { conversationId: string; url: string; mimeType?: string; bytes: number }[] = [];
+  readonly videos: {
+    conversationId: string;
+    url: string;
+    mimeType?: string;
+    bytes: number;
+    width?: number;
+    height?: number;
+  }[] = [];
   readonly direct: { participantId: string; text: string }[] = [];
   readonly deleted: string[] = [];
   readonly events: DmEvent[] = [];
@@ -21,6 +30,8 @@ export class MockXClient implements XClient {
   allowDeleteOthers = false;
   /** When set, `sendImage` throws so callers fall back to a text link. */
   failSendImage = false;
+  /** When set, `sendVideo` throws so callers fall back to the temporary URL. */
+  failSendVideo = false;
   failDeleteIds = new Set<string>();
 
   constructor(bot: XUser = { id: "bot-1", username: "modbot", name: "Mod Bot" }) {
@@ -86,6 +97,24 @@ export class MockXClient implements XClient {
       bytes: image.bytes.byteLength,
     });
     return { dmEventId: `img-${this.images.length}`, dmConversationId: conversationId };
+  }
+
+  async sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult> {
+    if (this.failSendVideo) {
+      throw new Error("native video attach failed");
+    }
+    if (!video.bytes || video.bytes.byteLength === 0) {
+      throw new Error("missing video bytes");
+    }
+    this.videos.push({
+      conversationId,
+      url: video.url,
+      mimeType: video.mimeType,
+      bytes: video.bytes.byteLength,
+      width: video.width,
+      height: video.height,
+    });
+    return { dmEventId: `vid-${this.videos.length}`, dmConversationId: conversationId };
   }
 
   async sendDirectMessage(

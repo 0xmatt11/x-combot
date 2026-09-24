@@ -59,19 +59,22 @@ export interface DecryptEventsResult {
 }
 
 /**
- * Inline Chat photo. `mediaType` omitted (or `1`) renders in the bubble.
+ * Inline Chat media. `mediaType` omitted (or `1`) renders as a photo.
  * Do not set a file/document type.
  */
 export interface ChatMediaAttachment {
   mediaHashKey: string;
   width: number;
   height: number;
-  /** Plaintext image size in bytes. */
+  /** Plaintext media size in bytes. */
   filesizeBytes: number;
   filename: string;
   /** Omit for an inline image. `1` image, `2` gif, `3` video. */
   mediaType?: number;
 }
+
+/** `media_type` for an inline Chat video. Images omit this field. */
+export const CHAT_MEDIA_TYPE_VIDEO = 3;
 
 export interface EncryptMessageOptions {
   conversationKey?: Uint8Array;

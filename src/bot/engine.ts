@@ -46,6 +46,19 @@ import {
   type ImagineImage,
 } from "./imagine.js";
 import {
+  formatVideoReadyMessage,
+  isVideoModerationError,
+  normalizeVideoPrompt,
+  VIDEO_FAILED_MESSAGE,
+  VIDEO_MODERATED_INTRO,
+  VIDEO_STARTED_MESSAGE,
+  VIDEO_UNAVAILABLE_MESSAGE,
+  videoPromptRejection,
+  VideoError,
+  type GeneratedVideo,
+  type VideoGenerator,
+} from "./video.js";
+import {
   createRecentImageMemory,
   imageContentHash,
   type RecentImageMemory,
@@ -118,6 +131,10 @@ export interface EngineDeps {
   adultVision?: AdultVisionJudge;
   /** Shared Grok Imagine client for `!imagine` and the adult commands. */
   imagine?: ImagineGenerator;
+  /** Grok Imagine video client for `!video`. Same key as `imagine`. */
+  video?: VideoGenerator;
+  /** Download a temporary mp4 for Chat upload. Absent means post the URL. */
+  fetchVideo?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
   /**
    * Adult commands only. Unset means Imagine when `imagine` is set, otherwise search.
    * `!imagine` always uses the Imagine client.
@@ -132,6 +149,11 @@ export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
   /** Users we have already resolved to a handle or display name. */
   private readonly namedUsers = new Map<string, XUser>();
+  /**
+   * `!video` keeps generating after the ack so a multi-minute poll does not
+   * stall moderation. Tests await this before reading the finished reply.
+   */
+  private readonly backgroundWork = new Set<Promise<void>>();
 
   constructor(
     private readonly store: Store,
@@ -887,6 +909,9 @@ export class ModerationEngine {
       case "imagine":
         await this.handleImagine(event, command.prompt, actions);
         return;
+      case "video":
+        await this.handleVideo(event, command.prompt, actions);
+        return;
       case "dice":
         await this.reply(
           conversationId,
@@ -1325,6 +1350,118 @@ export class ModerationEngine {
       log.warn(`!imagine repeated a recent image conversation=${conversationId}`);
     }
     await this.reply(conversationId, IMAGINE_FAILED_MESSAGE, actions);
+  }
+
+  /**
+   * Ack immediately, then generate in the background. The poller must keep
+   * moving while xAI renders a clip. `waitForBackgroundWork` joins that work.
+   */
+  private async handleVideo(event: DmEvent, prompt: string, actions: EngineActions): Promise<void> {
+    const conversationId = event.conversationId;
+    const normalized = normalizeVideoPrompt(prompt);
+    if (!normalized.ok) {
+      await this.reply(conversationId, videoPromptRejection(normalized.reason), actions);
+      return;
+    }
+    const video = this.deps.video;
+    if (!video) {
+      await this.reply(conversationId, VIDEO_UNAVAILABLE_MESSAGE, actions);
+      return;
+    }
+    await this.reply(conversationId, VIDEO_STARTED_MESSAGE, actions);
+    this.enqueueBackground(() => this.finishVideo(conversationId, normalized.prompt, video, actions));
+  }
+
+  /** Wait until in-flight `!video` jobs have posted a clip or an error. */
+  async waitForBackgroundWork(): Promise<void> {
+    while (this.backgroundWork.size > 0) {
+      await Promise.allSettled([...this.backgroundWork]);
+    }
+  }
+
+  private enqueueBackground(work: () => Promise<void>): void {
+    const job = Promise.resolve()
+      .then(work)
+      .catch((error: unknown) => {
+        const detail = redactSecrets(error instanceof Error ? error.message : "video failed");
+        log.warn(`!video background failed: ${detail}`);
+      });
+    this.backgroundWork.add(job);
+    void job.finally(() => {
+      this.backgroundWork.delete(job);
+    });
+  }
+
+  private async finishVideo(
+    conversationId: string,
+    prompt: string,
+    video: VideoGenerator,
+    actions: EngineActions,
+  ): Promise<void> {
+    let generated: GeneratedVideo;
+    try {
+      generated = await video.generate(prompt);
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : "video failed");
+      log.warn(`!video failed conversation=${conversationId}: ${detail}`);
+      await this.replyVideoFailure(conversationId, prompt, error, actions);
+      return;
+    }
+    await this.postGeneratedVideo(conversationId, generated, actions);
+  }
+
+  private async postGeneratedVideo(
+    conversationId: string,
+    video: GeneratedVideo,
+    actions: EngineActions,
+  ): Promise<void> {
+    if (isChatGroupId(conversationId) && this.deps.fetchVideo) {
+      let fetched: { bytes: Uint8Array; mimeType: string } | undefined;
+      try {
+        fetched = await this.deps.fetchVideo(video.url);
+      } catch {
+        log.warn(`!video download failed conversation=${conversationId} host=${imageHost(video.url)}`);
+      }
+      if (fetched && fetched.bytes.byteLength > 0) {
+        try {
+          await this.client.sendVideo(conversationId, {
+            url: video.url,
+            bytes: fetched.bytes,
+            mimeType: fetched.mimeType,
+            width: video.width,
+            height: video.height,
+          });
+          log.info(`!video posted native video conversation=${conversationId} host=${imageHost(video.url)}`);
+          return;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          log.warn(
+            `!video native attach failed; posting the temporary link. conversation=${conversationId} host=${imageHost(video.url)} (${detail})`,
+          );
+        }
+      }
+    }
+    await this.reply(conversationId, formatVideoReadyMessage(video.url), actions);
+    log.info(`!video posted video link conversation=${conversationId} host=${imageHost(video.url)}`);
+  }
+
+  private async replyVideoFailure(
+    conversationId: string,
+    prompt: string,
+    error: unknown,
+    actions: EngineActions,
+  ): Promise<void> {
+    if (isVideoModerationError(error)) {
+      const suggestions = await suggestSofterImaginePrompts(prompt, this.suggestionComplete(conversationId));
+      await this.reply(
+        conversationId,
+        formatImagineModerationReply(suggestions, VIDEO_MODERATED_INTRO),
+        actions,
+      );
+      return;
+    }
+    const userMessage = error instanceof VideoError ? error.userMessage : VIDEO_FAILED_MESSAGE;
+    await this.reply(conversationId, userMessage, actions);
   }
 
   /**

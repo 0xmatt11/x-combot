@@ -14,6 +14,14 @@ import {
   resolveAdultImageProvider,
   resolveImagineApiKey,
 } from "./bot/imagine.js";
+import {
+  createVideoClient,
+  DEFAULT_VIDEO_ASPECT_RATIO,
+  DEFAULT_VIDEO_DURATION,
+  DEFAULT_VIDEO_MODEL,
+  DEFAULT_VIDEO_RESOLUTION,
+  fetchGeneratedVideo,
+} from "./bot/video.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
 import { startActivityStream } from "./chat/activity-stream.js";
 import {
@@ -93,7 +101,7 @@ async function main(): Promise<void> {
     : undefined;
   if (imageChoice.imagineKeyMissing) {
     log.warn(
-      "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine stays off until XAI_API_KEY is set (or the grok LLM key stack).",
+      "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine and !video stay off until XAI_API_KEY is set (or the grok LLM key stack).",
     );
   }
   if (defaults.boobs?.enabled) {
@@ -115,6 +123,24 @@ async function main(): Promise<void> {
   }
   if (imagine) {
     log.info(`!imagine enabled (model=${imagineModel}).`);
+  }
+  const videoModel = env.videoImagineModel ?? DEFAULT_VIDEO_MODEL;
+  const videoDuration = env.videoImagineDuration ?? DEFAULT_VIDEO_DURATION;
+  const videoAspect = env.videoImagineAspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
+  const videoResolution = env.videoImagineResolution ?? DEFAULT_VIDEO_RESOLUTION;
+  const video = imagineKey
+    ? createVideoClient({
+        apiKey: imagineKey,
+        model: videoModel,
+        duration: videoDuration,
+        aspectRatio: videoAspect,
+        resolution: videoResolution,
+      })
+    : undefined;
+  if (video) {
+    log.info(
+      `!video enabled (model=${videoModel}, duration=${videoDuration}s, aspect=${videoAspect}, resolution=${videoResolution}).`,
+    );
   }
 
   const llmClient = buildLlmClient(env, defaults);
@@ -154,6 +180,8 @@ async function main(): Promise<void> {
       }),
       fetchImage: fetchAdultImage,
       imagine,
+      video,
+      fetchVideo: fetchGeneratedVideo,
       adultImageProvider: imageChoice.provider,
       adultVision: llmClient?.completeVision
         ? createAdultVisionJudge({

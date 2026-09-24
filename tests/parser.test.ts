@@ -115,6 +115,20 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!imagine a cat")).toBeUndefined();
   });
 
+  it("parses !video and keeps the prompt text", () => {
+    expect(parseCommand("!video a paper boat in the rain")).toEqual({
+      name: "video",
+      prompt: "a paper boat in the rain",
+    });
+    expect(parseCommand("  /VIDEO   a paper boat  ")).toEqual({
+      name: "video",
+      prompt: "a paper boat",
+    });
+    expect(parseCommand("!video")).toEqual({ name: "video", prompt: "" });
+    expect(parseCommand("!video   ")).toEqual({ name: "video", prompt: "" });
+    expect(parseUnknownBang("!video a boat")).toBeUndefined();
+  });
+
   it("parses !ass and !booty as the same command shape with no custom query", () => {
     expect(parseCommand("!ass")).toEqual({ name: "ass" });
     expect(parseCommand("!ASS")).toEqual({ name: "ass" });
