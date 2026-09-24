@@ -2016,6 +2016,8 @@ export class ModerationEngine {
         return;
       }
       case "status":
+        // Same owner gate as !auth. Admins and everyone else are ignored.
+        if (senderId !== this.config.ownerId) return;
         await this.reply(conversationId, this.statusReport(conversationId, settings, nowMs), actions);
         return;
       case "rules":

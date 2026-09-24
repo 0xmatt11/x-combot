@@ -24,7 +24,6 @@ rules: |
 help: |
   Public commands. Every reply tags you and, in encrypted Chat, replies to your message:
     !help — this message
-    !status — health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     !rules — group rules
     !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty. Tags you and replies to your command (off unless enabled; does not open grok.com/imagine)
     !ass / !booty / !booties — butt photo or clip from that same saved bank. Same tag and reply (same switch as !boobs; does not open grok.com/imagine)
@@ -71,6 +70,7 @@ help: |
 
   Admin commands:
     !auth — owner only (BOT_OWNER_ID). A new encrypted Chat group stays silent until that account sends exact !auth (any case, optional surrounding spaces). !auth please does not count. Other people are ignored. Groups already watermarked before this rule are already authorized. Classic group DMs do not need it
+    !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.
     !warn @user [reason] — add a warning
     !warns @user — show warning count
