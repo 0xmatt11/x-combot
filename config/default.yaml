@@ -24,8 +24,9 @@ help: |
   Public commands:
     !help — this message
     !rules — group rules
-    !boobs — random chest / cleavage photo (off unless enabled)
-    !ass / !booty — random butt photo (same switch as !boobs)
+    !boobs — chest / cleavage photo (off unless enabled)
+    !ass / !booty — butt photo (same switch as !boobs)
+    !imagine <prompt> — generate an image with Grok Imagine (needs an xAI key)
     !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
     !top — level leaderboard (!toplvl)
     Reply + or - to a message — give or take one level (not your own)
@@ -121,10 +122,13 @@ xp:
 
 # Adult images (`!boobs`, and `!ass` / `!booty`). Off by default so a moderation
 # deploy does not post NSFW. One switch covers all three: enabled: true or
-# BOOBS_ENABLED=true (env wins). Search defaults to DuckDuckGo with no API key
-# (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are off-topic,
-# keyless Bing HTML (adlt=off) runs next, then Reddit. Neither needs an API key.
-# The command ignores extra text so members cannot change the search. See the README.
+# BOOBS_ENABLED=true (env wins). When XAI_API_KEY (or the grok LLM key) is set,
+# the default source is Grok Imagine. BOOBS_IMAGE_PROVIDER=search keeps the
+# DuckDuckGo cascade (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits
+# are off-topic, keyless Bing HTML (adlt=off) runs next, then Reddit. Search
+# also skips the last few posted URLs and image hashes in that conversation.
+# The command ignores extra text so members cannot change the prompt. See the README.
+# !imagine <prompt> uses the same Imagine client and does not use this switch.
 # Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
 # count is enforced only when rate_limit_window_ms is also positive.
 # vision: optional download + LLM check (chest/butt subject, no genitalia).

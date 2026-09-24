@@ -4,6 +4,7 @@ import {
   type AdultImageCandidate,
   type AdultTopicId,
 } from "./adult-filter.js";
+import { imageContentHash } from "./recent-images.js";
 
 /**
  * Optional vision gate for `!boobs`, `!ass`, and `!booty`.
@@ -34,6 +35,8 @@ export interface AdultImageSelection {
   fetched?: AdultVisionImage;
   /** Vision was requested and no judge is configured. */
   unavailable?: boolean;
+  /** Set when bytes were hashed while skipping a recent image. */
+  contentHash?: string;
 }
 
 export function adultVisionPrompt(topic: AdultTopicId): string {
@@ -81,8 +84,10 @@ export function createAdultVisionJudge(model: AdultVisionModel): AdultVisionJudg
 }
 
 /**
- * Text-ranked pick. When `vision` is set, download up to a few candidates and
- * keep the first one the model accepts. A vision failure skips that candidate.
+ * Text-ranked pick. Recent URLs are left out. When `vision` is set, download
+ * up to a few candidates and keep the first one the model accepts. A vision
+ * failure skips that candidate. When recent content hashes are supplied, bytes
+ * that match one of them are skipped too.
  */
 export async function selectAdultImage(options: {
   candidates: AdultImageCandidate[];
@@ -92,16 +97,29 @@ export async function selectAdultImage(options: {
   judge?: AdultVisionJudge;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   maxAttempts?: number;
+  excludeUrls?: ReadonlySet<string>;
+  excludeHashes?: ReadonlySet<string>;
+  contentHash?: (bytes: Uint8Array) => string;
 }): Promise<AdultImageSelection> {
   const random = options.random ?? Math.random;
-  const ranked = rankAdultImages(options.candidates, options.topic, random);
-  if (!options.vision) {
+  const excludeUrls = options.excludeUrls;
+  const ranked = rankAdultImages(options.candidates, options.topic, random).filter(
+    (candidate) => !excludeUrls?.has(candidate.url),
+  );
+  const hashGate = Boolean(options.excludeHashes && options.excludeHashes.size > 0);
+  if (!options.vision && !hashGate) {
     return { image: ranked[0] };
   }
-  if (!options.judge || !options.fetchImage) {
+  if (options.vision && (!options.judge || !options.fetchImage)) {
     return { unavailable: true };
   }
-  const limit = Math.max(1, options.maxAttempts ?? ADULT_VISION_MAX_ATTEMPTS);
+  if (!options.fetchImage) {
+    return { image: ranked[0] };
+  }
+  const hashOf = options.contentHash ?? imageContentHash;
+  const limit = options.vision
+    ? Math.max(1, options.maxAttempts ?? ADULT_VISION_MAX_ATTEMPTS)
+    : ranked.length;
   for (const candidate of ranked.slice(0, limit)) {
     let fetched: AdultVisionImage | undefined;
     try {
@@ -110,13 +128,16 @@ export async function selectAdultImage(options: {
       fetched = undefined;
     }
     if (!fetched || fetched.bytes.byteLength === 0) continue;
+    const contentHash = hashGate ? hashOf(fetched.bytes) : undefined;
+    if (contentHash && options.excludeHashes?.has(contentHash)) continue;
+    if (!options.vision) return { image: candidate, fetched, contentHash };
     let verdict: AdultVisionVerdict;
     try {
-      verdict = await options.judge.judgeAdultImage(options.topic, fetched);
+      verdict = await options.judge!.judgeAdultImage(options.topic, fetched);
     } catch {
       verdict = "error";
     }
-    if (verdict === "match") return { image: candidate, fetched };
+    if (verdict === "match") return { image: candidate, fetched, contentHash };
   }
   return {};
 }

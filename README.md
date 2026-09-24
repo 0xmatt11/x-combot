@@ -85,7 +85,7 @@ There is still **no documented remove-member endpoint** on Chat (only add member
 9. **Admin allowlist** — `BOT_OWNER_ID` (human owner) is always admin; `BOT_USER_ID` is the OAuth'd bot account, not an admin by itself; `ADMIN_IDS` is global; `!admin add` is per group.
 10. **Per-conversation config** — `!set` stores YAML-overridable settings keyed by `dm_conversation_id`.
 11. **LLM assistant** — `!ask` / `@botname …`, plus `!summarize` / `!analyze` that load group history. An unknown `!command` gets a short witty reply (no history) when the LLM is allowed. OpenAI-compatible; mockable.
-12. **Adult image** — `!boobs` posts one random chest / cleavage photo. `!ass` and `!booty` post one random butt photo and share that switch. Off unless enabled. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the search query cannot be changed. An optional vision check (`BOOBS_VISION`) is off by default.
+12. **Adult image** — `!boobs` posts one chest / cleavage photo. `!ass` and `!booty` post one butt photo and share that switch. Off unless enabled. With an xAI key, Grok Imagine generates a fresh image; otherwise the bot searches and skips recently posted URLs. Not rate-limited unless a positive cap and window are set. Extra text is rejected so the prompt cannot be changed. An optional vision check (`BOOBS_VISION`) is off by default and applies to search hits.
 13. **XP / levels** — messages (and Chat reactions, when those events arrive) earn XP on a ComBot-like curve. Crossing a level posts `@handle leveled up to level N!`. Reply `+` or `-` to give or take one level. `!xp` / `!level` / `!rank` and `!top`. On by default. See [XP and levels](#xp-and-levels).
 14. **Games** — anyone in the group can play. Games start with `!dice` (1d6, or notation like `!dice 2d20`).
 
@@ -95,8 +95,9 @@ Public:
 
 - `!help`
 - `!rules`
-- `!boobs` — one random chest / cleavage photo. Disabled until `BOOBS_ENABLED=true` or `boobs.enabled` in YAML. No extra arguments.
-- `!ass` / `!booty` — one random butt photo. Same enable flag, rate limit, and media attach as `!boobs`. No extra arguments. The image has no caption.
+- `!boobs` — one chest / cleavage photo. Disabled until `BOOBS_ENABLED=true` or `boobs.enabled` in YAML. No extra arguments.
+- `!ass` / `!booty` — one butt photo. Same enable flag, rate limit, and media attach as `!boobs`. No extra arguments. The image has no caption.
+- `!imagine <prompt>` — one image from that prompt via Grok Imagine. Needs an xAI key. No caption. See [Imagine command](#imagine-command).
 - `!xp` — your level, XP, and rank in this conversation. `!level` and `!rank` are the same command. `!xp @user` looks up someone else. `/xp` works too.
 - `!top` — leaderboard by XP (`!toplvl` and `!leaderboard` are aliases). Default 10 rows.
 - Reply `+` or `-` — give or take one level from the person you replied to. Not yourself. Any member. Does nothing if the message is not a reply.
@@ -206,7 +207,13 @@ Anyone in the group can play. There is no admin gate. Games start with `!dice`.
 
 ## Adult image command
 
-Posts one random close-up into the same group. `!boobs` searches a woman's chest or cleavage. `!ass` and `!booty` are aliases of each other and search a woman's butt from behind, with their own fixed query and subreddit list. The search phrases are mild (no `18+` or porn wording). All three are **off** unless you opt in, so a normal moderation process does not start posting these images. None of them send an age-label caption with the image.
+Posts one image into the same group. `!boobs` is a woman's chest or cleavage. `!ass` and `!booty` are aliases of each other and are a woman's butt from behind. All three are **off** unless you opt in, so a normal moderation process does not start posting these images. None of them send a caption, and none of them include an `18+` label.
+
+When an xAI key is available (`XAI_API_KEY`, or the grok LLM key stack: `LLM_API_KEY` then `OPENAI_API_KEY` when `LLM_PROVIDER` is `grok` / `xai` or the base URL is `api.x.ai`), the default source is **Grok Imagine**. The bot `POST`s `https://api.x.ai/v1/images/generations` with `Authorization: Bearer` and a fixed tasteful pin-up prompt for that command (cleavage / chest, or butt from behind). The prompt is never text from the command. Each call adds a new pose and framing token, and the API returns a new temporary URL, so the bot does not recycle one image. That URL is downloaded and posted as an inline photo the same way a search hit is. A URL text message is used only when the upload fails.
+
+`BOOBS_IMAGE_PROVIDER=search` skips Imagine. `BOOBS_IMAGE_PROVIDER=imagine` (alias `grok`) forces Imagine, and still uses search when the key is missing or the request fails. Unset means Imagine when a key is present, otherwise search. `BOOBS_IMAGINE_MODEL` defaults to `grok-imagine-image-quality` (also `grok-imagine-image` and `grok-imagine-image-2.0`). `BOOBS_IMAGINE_ASPECT_RATIO` is optional (`3:4`, `2:3`, `1:1`, `auto`, and the other ratios in the xAI docs). Omit it and the model chooses.
+
+Search, when it runs, remembers the last 8 posted image URLs and content hashes for that conversation in this process and will not post those again. A different conversation has its own window.
 
 ```bash
 BOOBS_ENABLED=true
@@ -214,9 +221,9 @@ BOOBS_ENABLED=true
 
 `BOOBS_ENABLED` overrides `boobs.enabled` in `config/default.yaml`. `BOOBS_ENABLED=false` forces it off even when the YAML says true. That one flag gates `!boobs`, `!ass`, and `!booty`. They have no rate limit by default: `boobs.rate_limit_per_user`, `boobs.rate_limit_per_conversation`, and `boobs.rate_limit_window_ms` are `0` (unlimited). A positive count is enforced only together with a positive window; those timestamps go in SQLite (`boobs_rate`) and are shared by all three commands. They are not written while the commands are unlimited. Image URLs are not logged (only the host), and API keys are not written to the repo.
 
-The commands are exact. `!boobs`, `!BOOBS`, and `/boobs` run the chest search. `!ass` and `!booty` (any case, `!` or `/`) run the butt search. `!boobs anything`, `!ass anything`, and `!booty anything` are refused and are **not** used as a search query. Titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. Each hit must also name the command's body part (chest, cleavage, breasts, and similar for `!boobs`; butt, booty, hips, from behind, and similar for `!ass` / `!booty`). Genital wording (pussy, vagina, labia, crotch, nude spread, and similar) and obvious junk such as chairs are dropped. If nothing on-topic is left, the bot says to try again instead of posting a random hit. That text filter always runs. Vision is a separate, optional check.
+The commands are exact. `!boobs`, `!BOOBS`, and `/boobs` run the chest prompt. `!ass` and `!booty` (any case, `!` or `/`) run the butt prompt. `!boobs anything`, `!ass anything`, and `!booty anything` are refused and are **not** used as a prompt or search query. On the search path, titles, snippets, and URLs that mention minors, teen, lolita, schoolgirl, or similar are dropped. Each hit must also name the command's body part (chest, cleavage, breasts, and similar for `!boobs`; butt, booty, hips, from behind, and similar for `!ass` / `!booty`). Genital wording (pussy, vagina, labia, crotch, nude spread, and similar) and obvious junk such as chairs are dropped. If nothing on-topic is left, the bot says to try again instead of posting a random hit. That text filter always runs for search. Vision is a separate, optional check on search hits. Imagine results skip that text filter because the prompt is fixed.
 
-**Search.** Default provider is DuckDuckGo. No API key. It follows the same keyless image search as the Python `ddgs` library: fetch `https://duckduckgo.com/?q=…` and read the `vqd` token, then `https://duckduckgo.com/i.js` with `o=json` and safesearch off (`p=-1`). The query is the fixed phrase for that command (cleavage / chest, or butt from behind). It is never text from the command, and it does not include `18+`. Each hit uses that result's direct `image` URL. Titles, sources, and URLs still go through the same text filter as the other providers.
+**Search (fallback).** Used when Imagine is off, the key is missing, or Imagine fails. Default search provider is DuckDuckGo. No API key. It follows the same keyless image search as the Python `ddgs` library: fetch `https://duckduckgo.com/?q=…` and read the `vqd` token, then `https://duckduckgo.com/i.js` with `o=json` and safesearch off (`p=-1`). The query is the fixed phrase for that command (cleavage / chest, or butt from behind). It is never text from the command, and it does not include `18+`. Each hit uses that result's direct `image` URL. Titles, sources, and URLs still go through the same text filter as the other providers. After the filter, URLs and downloaded byte hashes from the last 8 posts in that conversation are dropped.
 
 If DuckDuckGo fails, returns no direct image URLs, or returns nothing that passes the text filter, the bot tries keyless Bing HTML image search, then Reddit. Bing HTML is `https://www.bing.com/images/async` with `adlt=off` (adult content allowed). It does not use the Azure Bing Image Search API or `BOOBS_SEARCH_API_KEY`. Each hit is the result's direct `murl`, not the Bing thumbnail. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. Reddit reads the desktop listing at `gateway.reddit.com` for that command's fixed subreddits (`sort=hot`, `allow_over18=1`) and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. The subreddit name is kept with the hit so a short title from that board still counts as on-topic. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud and datacenter IPs.
 
@@ -229,7 +236,7 @@ BOOBS_SEARCH_PROVIDER=duckduckgo
 
 | `BOOBS_SEARCH_PROVIDER` | Key | Request |
 | --- | --- | --- |
-| `duckduckgo` (default) | none | DuckDuckGo `i.js` (`p=-1`), then keyless Bing HTML (`adlt=off`), then Reddit |
+| `duckduckgo` (default search) | none | DuckDuckGo `i.js` (`p=-1`), then keyless Bing HTML (`adlt=off`), then Reddit |
 | `reddit` | none | `gateway.reddit.com` listings, then `hot.json` |
 | `serpapi` | `BOOBS_SEARCH_API_KEY` | SerpAPI Google Images, `safe=off`, same query |
 | `bing` | `BOOBS_SEARCH_API_KEY` | Azure Bing Image Search API, `safeSearch=Off`, same query |
@@ -246,6 +253,14 @@ A key is sent only to SerpAPI or the Azure Bing Image Search API (`BOOBS_SEARCH_
 
 Re-run `npm run oauth` after the app allows `media.write` if classic DMs should attach the file instead of linking it. Existing tokens without that scope still post the link.
 
+## Imagine command
+
+`!imagine a neon cat in a cyberpunk alley` generates one image from that prompt and posts it in the same group. `/imagine` works the same way. The prompt is trimmed and sent as written to the same Grok Imagine client as the adult commands (`POST https://api.x.ai/v1/images/generations`). It does not use the search cascade, and it stays available when `!boobs` is off.
+
+It needs `XAI_API_KEY`, or the grok LLM key stack described above. Model and aspect ratio are `BOOBS_IMAGINE_MODEL` and `BOOBS_IMAGINE_ASPECT_RATIO`. The image has no caption. The temporary URL is downloaded and uploaded as an inline photo (classic DM `dm_image`, encrypted Chat inline photo). If that upload fails, the bot posts the URL. If generation fails, it says to try again. It does not fall back to web search.
+
+A blank `!imagine` replies with a one-line example. Prompts longer than 800 characters are refused. Prompts that mention minors are refused and are not sent to the API.
+
 ## Developer setup
 
 ### 1. X developer App
@@ -260,7 +275,7 @@ Re-run `npm run oauth` after the app allows `media.write` if classic DMs should 
    - `tweet.read` — required alongside DM scopes
    - `users.read` — required alongside DM scopes
    - `offline.access` — refresh token so the bot can run longer than ~2 hours
-   - `media.write` — upload an image for `!boobs` (classic DM `dm_image` and encrypted Chat `/2/chat/media/upload`). The app must allow this scope. Without it, that command falls back to posting a link.
+   - `media.write` — upload an image for `!boobs` and `!imagine` (classic DM `dm_image` and encrypted Chat `/2/chat/media/upload`). The app must allow this scope. Without it, those commands fall back to posting a link.
 6. Copy the OAuth 2.0 **Client ID** and **Client Secret**.
 
 App-only / project bearer tokens will not work.
@@ -298,7 +313,7 @@ On first poll the bot records a watermark and **does not replay 30 days of histo
 
 ### 4. Run against an encrypted X Chat group
 
-Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`, and `media.write` — Chat reads and writes use those user scopes, not an app-only bearer token. `media.write` is what lets `!boobs` upload a classic DM image and an encrypted Chat photo. Encrypted Chat replies for that command are inline photos when media upload succeeds; see [Adult image command](#adult-image-command).
+Do this **in addition to** the OAuth steps above, as the bot account. Scopes stay `dm.read`, `dm.write`, `tweet.read`, `users.read`, `offline.access`, and `media.write` — Chat reads and writes use those user scopes, not an app-only bearer token. `media.write` is what lets `!boobs` and `!imagine` upload a classic DM image and an encrypted Chat photo. Encrypted Chat replies for those commands are inline photos when media upload succeeds; see [Adult image command](#adult-image-command).
 
 1. Give the process an identity once. Pick the path that matches the account.
 
@@ -488,7 +503,7 @@ Then in a group DM:
 
 **Unknown bang commands**
 
-A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, `!xp`, `!top`, `!dice`, and the rest of the list above) stay on their own path. `!warn` with no @user is still that command: it uses a reply target or asks who, and it does not become a joke. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
+A message that matches the same bang parser as other commands (`!name` or `/name`, letters only, optional arguments) but is **not** a registered command gets a short witty reply about that made-up name. `!diediesillygoat` and `!banana please` qualify. Plain text with no leading `!` or `/` does not. Registered commands (`!help`, `!warn`, `!ask`, `!boobs`, `!ass`, `!booty`, `!imagine`, `!xp`, `!top`, `!dice`, and the rest of the list above) stay on their own path. `!warn` with no @user is still that command: it uses a reply target or asks who, and it does not become a joke. `@bot` mentions, configured wake prefixes, and `!ask` / `!summarize` / `!analyze` still use the normal assistant path.
 
 The joke uses a dedicated prompt. It does **not** load group history, so it does not spend X read quota the way `!summarize` does. The invented command token and any arguments are included so the reply can riff on them. The model is asked for one or two group-chat sentences, with no actionable harmful advice, and the posted text is cut to `llm.max_reply_chars`.
 
@@ -525,7 +540,7 @@ npm test
 ## Configuration
 
 - `.env` — credentials and IDs (see `.env.example`), including Activity and `DM_POLL`.
-- `config/default.yaml` — welcome text, leave text (`leave.enabled`, on by default), rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, adult-image enablement (`!boobs`, `!ass`, `!booty`) and the optional `boobs.vision` check (`BOOBS_VISION`, default off). Those rate limits default to unlimited (`0`).
+- `config/default.yaml` — welcome text, leave text (`leave.enabled`, on by default), rules, flood window, warn limit, filters, poll interval, Chat idle cap, Activity catch-up interval, LLM context/rate limits, adult-image enablement (`!boobs`, `!ass`, `!booty`) and the optional `boobs.vision` check (`BOOBS_VISION`, default off). Those rate limits default to unlimited (`0`). Imagine model and aspect ratio are env-only (`BOOBS_IMAGINE_MODEL`, `BOOBS_IMAGINE_ASPECT_RATIO`, `BOOBS_IMAGE_PROVIDER`).
 - SQLite (`data/bot.sqlite` by default) — warns, notes, mutes, flood timestamps, per-conversation settings, processed event IDs, LLM rate-limit timestamps (not prompts). Optional adult-image rate-limit timestamps (not image URLs) are stored only when a positive cap and window are configured. `!ass` and `!booty` share that window with `!boobs`.
 
 Core moderation logic talks to an `XClient` interface. Tests use `MockXClient` and `MockLlmClient`. Production uses a thin `LiveXClient` over `fetch` to `https://api.x.com` and an OpenAI-compatible client for chat completions.
@@ -540,6 +555,8 @@ src/
   bot/games/          # group games; dice is the first
   bot/adult-filter.ts # topic, genital, and age text gate for !boobs, !ass, and !booty
   bot/adult-vision.ts # optional LLM vision check (BOOBS_VISION, default off)
+  bot/imagine.ts      # Grok Imagine client, adult prompts, !imagine prompt checks
+  bot/recent-images.ts # last N posted URLs and hashes for search fallback
   bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
   bot/image-fetch.ts  # https image download for DM upload
   bot/flood.ts        # flood window
