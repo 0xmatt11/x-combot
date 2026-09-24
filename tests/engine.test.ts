@@ -79,6 +79,29 @@ describe("ModerationEngine", () => {
     expect(client.sent[0]?.text).toBe("Welcome @alice!");
   });
 
+  it("welcomes a joiner known only by id, and never prints that id", async () => {
+    const { engine, client } = setup();
+    const snowflake = "1712950172873809920";
+    await engine.processEvent({
+      id: "join-id",
+      eventType: "ParticipantsJoin",
+      conversationId: groupId,
+      participantIds: [alice.id],
+      participants: [{ id: alice.id }],
+      mentions: [],
+    });
+    await engine.processEvent({
+      id: "join-unknown",
+      eventType: "ParticipantsJoin",
+      conversationId: groupId,
+      participantIds: [snowflake],
+      participants: [{ id: snowflake }],
+      mentions: [],
+    });
+    expect(client.sent.map((row) => row.text)).toEqual(["Welcome @alice!", "Welcome someone!"]);
+    expect(client.sent.some((row) => row.text.includes(snowflake))).toBe(false);
+  });
+
   it("announces a classic ParticipantsLeave with the @handle", async () => {
     const { engine, client } = setup();
     const actions = await engine.processEvent({
@@ -258,7 +281,7 @@ describe("ModerationEngine", () => {
     expect(client.sent.map((row) => row.text)).toEqual(["Be nice."]);
   });
 
-  it("falls back to the user id when a leaver lookup fails", async () => {
+  it("says someone when a leaver cannot be resolved", async () => {
     const { engine, client } = setup();
     client.getUserById = async () => {
       throw new Error("rate limited");
@@ -271,7 +294,8 @@ describe("ModerationEngine", () => {
       participants: [],
       mentions: [],
     });
-    expect(client.sent[0]?.text).toBe("@u-ghost has left");
+    expect(client.sent[0]?.text).toBe("someone has left");
+    expect(client.sent[0]?.text).not.toContain("u-ghost");
   });
 
   it("ignores a leave in a one-to-one conversation", async () => {
@@ -393,12 +417,14 @@ describe("ModerationEngine", () => {
 });
 
 describe("leave announcement text", () => {
-  it("uses the @handle, the display name, or the id", () => {
+  it("uses the @handle, the display name, or someone", () => {
     expect(leaveAnnouncementText(alice)).toBe("@alice has left");
     expect(leaveAnnouncementText({ id: "9", name: "Nine" }, "{name} has left")).toBe(
       "Nine has left",
     );
-    expect(leaveAnnouncementText({ id: "9" })).toBe("@9 has left");
+    expect(leaveAnnouncementText({ id: "9", name: "Nine" })).toBe("Nine has left");
+    expect(leaveAnnouncementText({ id: "1712950172873809920" })).toBe("someone has left");
+    expect(leaveAnnouncementText({ id: "1712950172873809920" })).not.toContain("1712950172873809920");
   });
 
   it("loads leave announcements on by default", () => {
