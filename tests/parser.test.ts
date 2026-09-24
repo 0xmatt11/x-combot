@@ -152,8 +152,12 @@ describe("parseCommand", () => {
     expect(parseCommand("!ASS")).toEqual({ name: "ass" });
     expect(parseCommand("  /booty  ")).toEqual({ name: "booty" });
     expect(parseCommand("!Booty")).toEqual({ name: "booty" });
+    expect(parseCommand("!booties")).toEqual({ name: "booty" });
+    expect(parseCommand("!BOOTIES")).toEqual({ name: "booty" });
     expect(parseCommand("!ass teen")).toEqual({ name: "ass", extra: "teen" });
     expect(parseCommand("!booty please")).toEqual({ name: "booty", extra: "please" });
+    expect(parseCommand("!booties please")).toEqual({ name: "booty", extra: "please" });
+    expect(parseUnknownBang("!booties")).toBeUndefined();
   });
 
   it("parses xp, level, rank, and the leaderboard aliases", () => {

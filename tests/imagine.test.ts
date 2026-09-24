@@ -417,7 +417,8 @@ describe("engine Imagine and search dedupe", () => {
     sameBytes?: boolean;
     perUser?: number;
     windowMs?: number;
-    imaginePublic?: { chestUrl?: string; bootyUrl?: string };
+    imaginePublic?: { chestUrl?: string; bootyUrl?: string; bootyUrls?: readonly string[] };
+    random?: () => number;
     fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
   }) {
     const store = new Store(":memory:");
@@ -479,7 +480,7 @@ describe("engine Imagine and search dedupe", () => {
       imaginePublic: options?.imaginePublic,
       adultImageProvider: options?.provider,
       recentImages: createRecentImageMemory(options?.recentLimit ?? 8),
-      random: () => 0,
+      random: options?.random ?? (() => 0),
     });
     return { engine, client, search, imagine };
   }
@@ -615,6 +616,71 @@ describe("engine Imagine and search dedupe", () => {
     await engine.processEvent(message({ id: "search-chest", text: "!boobs" }));
     expect(search.calls).toBe(1);
     expect(client.images.map((row) => row.url)).toEqual([booty, URL_A]);
+  });
+
+  it("rotates a booty bank across !booty, !ass, and !booties, then searches", async () => {
+    const first = "https://imagine-public.x.ai/imagine-public/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg";
+    const second = "https://imagine-public.x.ai/imagine-public/images/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jpg";
+    const third = "https://imagine-public.x.ai/imagine-public/images/cccccccc-cccc-4ccc-8ccc-cccccccccccc.jpg";
+    const { engine, client, search } = setup({
+      provider: "search",
+      imaginePublic: { bootyUrls: [first, second, third] },
+    });
+    await engine.processEvent(message({ id: "bank-1", text: "!booty" }));
+    await engine.processEvent(message({ id: "bank-2", text: "!ass" }));
+    await engine.processEvent(message({ id: "bank-3", text: "!booties" }));
+    expect(search.calls).toBe(0);
+    expect(client.images.map((row) => row.url)).toEqual([first, second, third]);
+    expect(client.sent).toHaveLength(0);
+
+    await engine.processEvent(message({ id: "bank-4", text: "!booty" }));
+    expect(search.calls).toBe(1);
+    expect(client.images.map((row) => row.url)).toEqual([first, second, third, URL_B]);
+  });
+
+  it("picks a later booty URL when random is high, and skips a repeated hash", async () => {
+    const first = "https://imagine-public.x.ai/imagine-public/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg";
+    const second = "https://imagine-public.x.ai/imagine-public/images/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jpg";
+    const shared = Uint8Array.from([4, 4, 4]);
+    const high = setup({
+      provider: "search",
+      imaginePublic: { bootyUrls: [first, second] },
+      random: () => 0.75,
+    });
+    await high.engine.processEvent(message({ id: "roll-1", text: "!booty" }));
+    expect(high.client.images.map((row) => row.url)).toEqual([second]);
+    expect(high.search.calls).toBe(0);
+
+    const repeated = setup({
+      provider: "search",
+      imaginePublic: { bootyUrls: [first, second] },
+      fetchImage: async (url) =>
+        url === first || url === second
+          ? { bytes: shared, mimeType: "image/jpeg" }
+          : { bytes: bytesForUrl(url), mimeType: "image/jpeg" },
+    });
+    await repeated.engine.processEvent(message({ id: "hash-1", text: "!ass" }));
+    await repeated.engine.processEvent(message({ id: "hash-2", text: "!booty" }));
+    expect(repeated.client.images.map((row) => row.url)).toEqual([first, URL_B]);
+    expect(repeated.search.calls).toBe(1);
+  });
+
+  it("tries the next booty URL when one download is not a JPEG, and leaves !boobs on the chest URL", async () => {
+    const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const first = "https://imagine-public.x.ai/imagine-public/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg";
+    const second = "https://imagine-public.x.ai/imagine-public/images/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jpg";
+    const { engine, client, search } = setup({
+      provider: "search",
+      imaginePublic: { chestUrl: chest, bootyUrls: [first, second] },
+      fetchImage: async (url) =>
+        url === first
+          ? { bytes: Uint8Array.from([1]), mimeType: "image/png" }
+          : { bytes: bytesForUrl(url), mimeType: "image/jpeg" },
+    });
+    await engine.processEvent(message({ id: "bad-1", text: "!booty" }));
+    await engine.processEvent(message({ id: "chest-1", text: "!boobs" }));
+    expect(search.calls).toBe(0);
+    expect(client.images.map((row) => row.url)).toEqual([second, chest]);
   });
 
   it("falls back to search when Imagine fails and skips Imagine when search is selected", async () => {

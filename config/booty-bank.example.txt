@@ -1,0 +1,29 @@
+# Temporary !ass / !booty / !booties bank. The process does not read this file.
+# Deploy with BOOBS_IMAGINE_APP=true and a quoted BOOBS_IMAGINE_PUBLIC_BOOTY_URLS
+# set to these https lines (commas or whitespace also work). One bad URL fails startup.
+https://imagine-public.x.ai/imagine-public/images/02d68b4d-5b16-48d4-a0cf-c0d50dd20c86.jpg
+https://imagine-public.x.ai/imagine-public/images/14f6c382-5964-440b-87ac-668134a31545.jpg
+https://imagine-public.x.ai/imagine-public/images/1df80c7d-2a05-49b9-b66b-e4527d260132.jpg
+https://imagine-public.x.ai/imagine-public/images/1f8a4709-fe16-4d5d-b1b9-9e5b8829a44e.jpg
+https://imagine-public.x.ai/imagine-public/images/2e76e68d-eff2-40fc-ae40-e20c6671b1ba.jpg
+https://imagine-public.x.ai/imagine-public/images/4585319e-3660-4857-8df3-560f25d006e7.jpg
+https://imagine-public.x.ai/imagine-public/images/48dd837c-caa2-4d6c-bcaf-dfaa8fc6065d.jpg
+https://imagine-public.x.ai/imagine-public/images/49cab794-7d13-43c9-8572-a436213e2b5a.jpg
+https://imagine-public.x.ai/imagine-public/images/632e13b5-8509-456c-973e-32f19c0825c8.jpg
+https://imagine-public.x.ai/imagine-public/images/6f1bb6c6-5ad3-4f40-a4b2-d6895f727e9d.jpg
+https://imagine-public.x.ai/imagine-public/images/75477962-c5c8-44d5-9f28-282ea6e1f79b.jpg
+https://imagine-public.x.ai/imagine-public/images/7b68afed-8801-47b5-aead-1dd656c31d4d.jpg
+https://imagine-public.x.ai/imagine-public/images/7bc264f3-f335-4cd0-91dc-4a192d5f73e4.jpg
+https://imagine-public.x.ai/imagine-public/images/850b0b53-8ef0-495e-9517-e9673eebc2cb.jpg
+https://imagine-public.x.ai/imagine-public/images/8b0e998f-9f33-4380-94e3-2600a811b118.jpg
+https://imagine-public.x.ai/imagine-public/images/8b8611bd-02cd-4578-bb07-603d42fb78d2.jpg
+https://imagine-public.x.ai/imagine-public/images/93e366cf-fdce-4b0a-bc07-bd03d8c7abea.jpg
+https://imagine-public.x.ai/imagine-public/images/ae681bd0-78e3-4aa0-92f1-5b3732c5d6d2.jpg
+https://imagine-public.x.ai/imagine-public/images/b003acf9-43e3-4132-8a4a-9656f8c1c00c.jpg
+https://imagine-public.x.ai/imagine-public/images/b8754c53-be09-440b-bb40-16d8e96045ec.jpg
+https://imagine-public.x.ai/imagine-public/images/c16b5642-c33b-4ada-a0ee-ac9e24d768b5.jpg
+https://imagine-public.x.ai/imagine-public/images/d6d5df04-a80e-484e-85b3-1b7ea23fe446.jpg
+https://imagine-public.x.ai/imagine-public/images/eb4fa2ea-0696-440f-b05e-b3835f2fd371.jpg
+https://imagine-public.x.ai/imagine-public/images/ebd8c878-1960-4e58-8b03-fca726016377.jpg
+https://imagine-public.x.ai/imagine-public/images/f51a3a1b-553f-4086-a441-4ef5d354497c.jpg
+https://imagine-public.x.ai/imagine-public/images/f969bc89-3224-4ef7-8ca9-d34a516ffd7f.jpg

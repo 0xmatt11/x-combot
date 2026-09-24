@@ -7,7 +7,10 @@ import {
   type AdultImageProviderName,
   type ImagineAspectRatio,
 } from "./bot/imagine.js";
-import { parseImaginePublicImageUrl } from "./bot/imagine-public.js";
+import {
+  parseImaginePublicImageUrl,
+  parseImaginePublicImageUrlList,
+} from "./bot/imagine-public.js";
 import {
   normalizeVideoAspectRatio,
   normalizeVideoDuration,
@@ -79,6 +82,18 @@ function optionalImaginePublicUrl(name: string): string | undefined {
     );
   }
   return url;
+}
+
+function optionalImaginePublicUrlList(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || !raw.trim()) return undefined;
+  const { urls, invalid } = parseImaginePublicImageUrlList(raw);
+  if (invalid.length > 0) {
+    throw new Error(
+      `${name} must be https JPEG URLs on imagine-public.x.ai (/imagine-public/images/<uuid>.jpg, no query), separated by commas or whitespace`,
+    );
+  }
+  return urls.length > 0 ? urls : undefined;
 }
 
 function optionalImagineAspectRatio(name: string): ImagineAspectRatio | undefined {
@@ -245,6 +260,11 @@ export interface Env {
   boobsImaginePublicUrl?: string;
   /** `!ass` / `!booty` JPEG on imagine-public.x.ai. Ignored unless `boobsImagineApp` is true. */
   boobsImaginePublicBootyUrl?: string;
+  /**
+   * Extra `!ass` / `!booty` JPEGs. Comma- or whitespace-separated.
+   * Merged with `boobsImaginePublicBootyUrl`. Ignored unless `boobsImagineApp` is true.
+   */
+  boobsImaginePublicBootyUrls?: string[];
   /** Video model id. Unset uses `grok-imagine-video-1.5`. */
   videoImagineModel?: string;
   /** Clip length in seconds (1–15). Unset uses 5. */
@@ -313,6 +333,7 @@ export function loadEnv(requireOwner = true): Env {
     boobsImagineApp: optionalBool("BOOBS_IMAGINE_APP"),
     boobsImaginePublicUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_URL"),
     boobsImaginePublicBootyUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_BOOTY_URL"),
+    boobsImaginePublicBootyUrls: optionalImaginePublicUrlList("BOOBS_IMAGINE_PUBLIC_BOOTY_URLS"),
     videoImagineModel: optionalVideoModel("VIDEO_IMAGINE_MODEL"),
     videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),

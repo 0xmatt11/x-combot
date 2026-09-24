@@ -1,9 +1,22 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { fetchImaginePublicImage, parseImaginePublicImageUrl } from "../src/bot/imagine-public.js";
+import {
+  fetchImaginePublicImage,
+  imaginePublicUrlsFor,
+  parseImaginePublicImageUrl,
+  parseImaginePublicImageUrlList,
+  pickImaginePublicUrl,
+} from "../src/bot/imagine-public.js";
 import { loadEnv } from "../src/env.js";
 
 const JPEG =
   "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+const JPEG_B =
+  "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
+const JPEG_C =
+  "https://imagine-public.x.ai/imagine-public/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg";
 
 describe("imagine-public JPEG URL", () => {
   it("accepts a public https JPEG and canonicalizes it", () => {
@@ -56,12 +69,92 @@ describe("imagine-public JPEG URL", () => {
   });
 });
 
+describe("booty image bank", () => {
+  it("parses a comma, space, or newline list and drops duplicates", () => {
+    const mixed = [
+      `  ${JPEG} `,
+      JPEG_B,
+      JPEG_C.replace(".jpg", ".JPEG").replace("aaaaaaaa", "AAAAAAAA"),
+      JPEG,
+    ].join(", \n");
+    const parsed = parseImaginePublicImageUrlList(
+      `# comment only\n${mixed}\n# trailing note`,
+    );
+    expect(parsed.invalid).toEqual([]);
+    expect(parsed.urls).toEqual([
+      JPEG,
+      JPEG_B,
+      "https://imagine-public.x.ai/imagine-public/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg",
+    ]);
+    expect(parseImaginePublicImageUrlList(undefined)).toEqual({ urls: [], invalid: [] });
+    expect(parseImaginePublicImageUrlList("  \n , ")).toEqual({ urls: [], invalid: [] });
+  });
+
+  it("reports a token that is not a public JPEG", () => {
+    const parsed = parseImaginePublicImageUrlList(`${JPEG}, https://cdn.example/a.jpg`);
+    expect(parsed.urls).toEqual([JPEG]);
+    expect(parsed.invalid).toEqual(["https://cdn.example/a.jpg"]);
+    expect(parseImaginePublicImageUrlList(`${JPEG}?sig=1`)?.invalid).toEqual([`${JPEG}?sig=1`]);
+  });
+
+  it("merges the single booty URL into the bank and leaves chest alone", () => {
+    expect(
+      imaginePublicUrlsFor(
+        { bootyUrls: [JPEG, JPEG_B], bootyUrl: JPEG_C },
+        "ass",
+      ),
+    ).toEqual([JPEG, JPEG_B, JPEG_C]);
+    expect(
+      imaginePublicUrlsFor(
+        { bootyUrls: [JPEG_B], bootyUrl: JPEG_B.replace(".jpg", ".jpeg") },
+        "booty",
+      ),
+    ).toEqual([JPEG_B]);
+    expect(imaginePublicUrlsFor({ bootyUrl: JPEG }, "booty")).toEqual([JPEG]);
+    expect(
+      imaginePublicUrlsFor({ chestUrl: JPEG, bootyUrls: [JPEG_B, JPEG_C] }, "boobs"),
+    ).toEqual([JPEG]);
+    expect(imaginePublicUrlsFor(undefined, "ass")).toEqual([]);
+  });
+
+  it("picks uniformly and does not roll a one-item list", () => {
+    const urls = [JPEG, JPEG_B, JPEG_C];
+    expect(pickImaginePublicUrl(urls, () => 0)).toBe(JPEG);
+    expect(pickImaginePublicUrl(urls, () => 0.34)).toBe(JPEG_B);
+    expect(pickImaginePublicUrl(urls, () => 0.67)).toBe(JPEG_C);
+    expect(pickImaginePublicUrl(urls, () => 0.999)).toBe(JPEG_C);
+    expect(pickImaginePublicUrl(urls, () => 1)).toBe(JPEG_C);
+    expect(pickImaginePublicUrl([], () => 0)).toBeUndefined();
+
+    let calls = 0;
+    expect(
+      pickImaginePublicUrl([JPEG], () => {
+        calls += 1;
+        return 0.9;
+      }),
+    ).toBe(JPEG);
+    expect(calls).toBe(0);
+  });
+
+  it("accepts every URL in the checked-in example bank", () => {
+    const file = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../config/booty-bank.example.txt",
+    );
+    const parsed = parseImaginePublicImageUrlList(readFileSync(file, "utf8"));
+    expect(parsed.invalid).toEqual([]);
+    expect(parsed.urls).toHaveLength(26);
+    expect(new Set(parsed.urls).size).toBe(26);
+  });
+});
+
 describe("BOOBS_IMAGINE_APP", () => {
   const previous = {
     owner: process.env.BOT_OWNER_ID,
     app: process.env.BOOBS_IMAGINE_APP,
     chest: process.env.BOOBS_IMAGINE_PUBLIC_URL,
     booty: process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URL,
+    bank: process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS,
   };
 
   afterEach(() => {
@@ -69,6 +162,7 @@ describe("BOOBS_IMAGINE_APP", () => {
     restore("BOOBS_IMAGINE_APP", previous.app);
     restore("BOOBS_IMAGINE_PUBLIC_URL", previous.chest);
     restore("BOOBS_IMAGINE_PUBLIC_BOOTY_URL", previous.booty);
+    restore("BOOBS_IMAGINE_PUBLIC_BOOTY_URLS", previous.bank);
   });
 
   it("stays off unless set, and rejects a URL that is not a public JPEG", () => {
@@ -76,9 +170,11 @@ describe("BOOBS_IMAGINE_APP", () => {
     delete process.env.BOOBS_IMAGINE_APP;
     delete process.env.BOOBS_IMAGINE_PUBLIC_URL;
     delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URL;
+    delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS;
     expect(loadEnv(true).boobsImagineApp).toBeUndefined();
     expect(loadEnv(true).boobsImaginePublicUrl).toBeUndefined();
     expect(loadEnv(true).boobsImaginePublicBootyUrl).toBeUndefined();
+    expect(loadEnv(true).boobsImaginePublicBootyUrls).toBeUndefined();
 
     process.env.BOOBS_IMAGINE_APP = "false";
     expect(loadEnv(true).boobsImagineApp).toBe(false);
@@ -100,6 +196,33 @@ describe("BOOBS_IMAGINE_APP", () => {
     expect(() => loadEnv(true)).toThrow(/BOOBS_IMAGINE_PUBLIC_URL/);
     process.env.BOOBS_IMAGINE_PUBLIC_URL = `${JPEG}?X-Amz-Signature=secret`;
     expect(() => loadEnv(true)).toThrow(/no query/);
+  });
+
+  it("loads a booty URL list and still accepts the single booty URL", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    process.env.BOOBS_IMAGINE_APP = "true";
+    delete process.env.BOOBS_IMAGINE_PUBLIC_URL;
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URL = JPEG;
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS = `${JPEG_B}, ${JPEG_C}\n${JPEG_B.replace(".jpg", ".JPEG")}`;
+    const env = loadEnv(true);
+    expect(env.boobsImaginePublicBootyUrl).toBe(JPEG);
+    expect(env.boobsImaginePublicBootyUrls).toEqual([JPEG_B, JPEG_C]);
+    expect(
+      imaginePublicUrlsFor(
+        {
+          bootyUrl: env.boobsImaginePublicBootyUrl,
+          bootyUrls: env.boobsImaginePublicBootyUrls,
+        },
+        "booty",
+      ),
+    ).toEqual([JPEG_B, JPEG_C, JPEG]);
+
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS = " \n , ";
+    expect(loadEnv(true).boobsImaginePublicBootyUrls).toBeUndefined();
+    expect(loadEnv(true).boobsImaginePublicBootyUrl).toBe(JPEG);
+
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS = `${JPEG_B} https://cdn.example/a.jpg`;
+    expect(() => loadEnv(true)).toThrow(/BOOBS_IMAGINE_PUBLIC_BOOTY_URLS/);
   });
 });
 
