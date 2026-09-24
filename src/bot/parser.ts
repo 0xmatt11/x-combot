@@ -30,7 +30,11 @@ export type ParsedCommand =
   | { name: "video"; prompt: string }
   | { name: "xp"; target?: UserRef }
   | { name: "top" }
-  | { name: "dice"; notation?: string };
+  | { name: "dice"; notation?: string }
+  | { name: "rps"; choice?: string }
+  | { name: "coinflip"; call?: string }
+  | { name: "eightball"; question?: string }
+  | { name: "games" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -72,9 +76,19 @@ const KNOWN_COMMAND_NAMES = new Set([
   "toplvl",
   "leaderboard",
   "dice",
+  "rps",
+  "coinflip",
+  "flip",
+  "8ball",
+  "eightball",
+  "games",
 ]);
 
-const COMMAND_RE = /^([!/])([A-Za-z]+)(?:\s+([\s\S]*))?$/;
+/**
+ * Command token is a word that contains at least one letter, so `!dice` and
+ * `!8ball` both match. A bare number does not. A hyphen still does not.
+ */
+const COMMAND_RE = /^([!/])([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)(?:\s+([\s\S]*))?$/;
 const USERNAME_RE = /^@?([A-Za-z0-9_]{1,15})$/;
 const SNOWFLAKE_RE = /^[0-9]{1,19}$/;
 
@@ -228,6 +242,16 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "top" };
     case "dice":
       return rest ? { name: "dice", notation: rest } : { name: "dice" };
+    case "rps":
+      return rest ? { name: "rps", choice: rest } : { name: "rps" };
+    case "coinflip":
+    case "flip":
+      return rest ? { name: "coinflip", call: rest } : { name: "coinflip" };
+    case "8ball":
+    case "eightball":
+      return rest ? { name: "eightball", question: rest } : { name: "eightball" };
+    case "games":
+      return { name: "games" };
     default:
       return undefined;
   }

@@ -38,6 +38,10 @@ help: |
 
   Games:
     !dice [NdM] — roll dice (default 1d6; also !dice 2d20, !dice d20, !dice 1d6+2)
+    !rps rock|paper|scissors — rock-paper-scissors
+    !coinflip [heads|tails] — flip a coin (!flip)
+    !8ball <question> — magic 8-ball (!eightball)
+    !games — full list; more games are listed there
 
   Admin commands:
     Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.

@@ -64,7 +64,14 @@ import {
   type RecentImageMemory,
 } from "./recent-images.js";
 import { matchFilters } from "./filters.js";
-import { diceReply, resolveDiceRoller } from "./games/index.js";
+import {
+  coinflipReply,
+  diceReply,
+  eightBallReply,
+  gamesMenu,
+  resolveDiceRoller,
+  rpsReply,
+} from "./games/index.js";
 import {
   isAdmin,
   isLlmCommandName,
@@ -786,6 +793,7 @@ export class ModerationEngine {
    * Same resolution as a leave announcement: use the profile on the event
    * when it already has a username, otherwise `GET /2/users/:id`.
    * Encrypted Chat messages usually arrive with only the numeric sender id.
+   * Dice and the other instant games share this label.
    */
   private async diceRoller(event: DmEvent): Promise<string> {
     return resolveDiceRoller(event, (userId) => this.lookupDiceUser(userId));
@@ -795,7 +803,7 @@ export class ModerationEngine {
     try {
       return await this.client.getUserById(userId);
     } catch (error) {
-      log.warn(`Could not look up user ${userId} for a dice roll`, error);
+      log.warn(`Could not look up user ${userId} for a game`, error);
       return undefined;
     }
   }
@@ -918,6 +926,30 @@ export class ModerationEngine {
           diceReply(command.notation, await this.diceRoller(event)),
           actions,
         );
+        return;
+      case "rps":
+        await this.reply(
+          conversationId,
+          rpsReply(command.choice, await this.diceRoller(event)),
+          actions,
+        );
+        return;
+      case "coinflip":
+        await this.reply(
+          conversationId,
+          coinflipReply(command.call, await this.diceRoller(event)),
+          actions,
+        );
+        return;
+      case "eightball":
+        await this.reply(
+          conversationId,
+          eightBallReply(command.question, await this.diceRoller(event)),
+          actions,
+        );
+        return;
+      case "games":
+        await this.reply(conversationId, gamesMenu(), actions);
         return;
       default:
         break;
