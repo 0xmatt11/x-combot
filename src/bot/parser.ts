@@ -35,7 +35,14 @@ export type ParsedCommand =
   | { name: "coinflip"; call?: string }
   | { name: "eightball"; question?: string }
   | { name: "games" }
-  | { name: "minesweeper"; args?: string };
+  | { name: "minesweeper"; args?: string }
+  | { name: "wordle"; guess?: string }
+  | { name: "anagram"; guess?: string }
+  | { name: "scramble"; guess?: string }
+  | { name: "guess"; guess?: string }
+  | { name: "higherlower"; call?: string }
+  | { name: "wouldyourather"; choice?: string }
+  | { name: "truthordare"; mode?: string };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -84,6 +91,13 @@ const KNOWN_COMMAND_NAMES = new Set([
   "eightball",
   "games",
   "minesweeper",
+  "wordle",
+  "anagram",
+  "scramble",
+  "guess",
+  "higherlower",
+  "wouldyourather",
+  "truthordare",
 ]);
 
 /**
@@ -256,6 +270,20 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "games" };
     case "minesweeper":
       return rest ? { name: "minesweeper", args: rest } : { name: "minesweeper" };
+    case "wordle":
+      return rest ? { name: "wordle", guess: rest } : { name: "wordle" };
+    case "anagram":
+      return rest ? { name: "anagram", guess: rest } : { name: "anagram" };
+    case "scramble":
+      return rest ? { name: "scramble", guess: rest } : { name: "scramble" };
+    case "guess":
+      return rest ? { name: "guess", guess: rest } : { name: "guess" };
+    case "higherlower":
+      return rest ? { name: "higherlower", call: rest } : { name: "higherlower" };
+    case "wouldyourather":
+      return rest ? { name: "wouldyourather", choice: rest } : { name: "wouldyourather" };
+    case "truthordare":
+      return rest ? { name: "truthordare", mode: rest } : { name: "truthordare" };
     default:
       return undefined;
   }

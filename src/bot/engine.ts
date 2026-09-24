@@ -65,13 +65,20 @@ import {
 } from "./recent-images.js";
 import { matchFilters } from "./filters.js";
 import {
+  anagramReply,
   coinflipReply,
   diceReply,
   eightBallReply,
   gamesMenu,
+  guessReply,
+  higherLowerReply,
   minesweeperReply,
   resolveDiceRoller,
   rpsReply,
+  scrambleReply,
+  truthOrDareReply,
+  wordleReply,
+  wouldYouRatherReply,
 } from "./games/index.js";
 import {
   isAdmin,
@@ -794,7 +801,7 @@ export class ModerationEngine {
    * Same resolution as a leave announcement: use the profile on the event
    * when it already has a username, otherwise `GET /2/users/:id`.
    * Encrypted Chat messages usually arrive with only the numeric sender id.
-   * Dice, minesweeper, and the other games share this label.
+   * Dice, minesweeper, and the word/solo games share this label.
    */
   private async diceRoller(event: DmEvent): Promise<string> {
     return resolveDiceRoller(event, (userId) => this.lookupDiceUser(userId));
@@ -957,6 +964,91 @@ export class ModerationEngine {
           conversationId,
           minesweeperReply(conversationId, command.args, await this.diceRoller(event), {
             now: nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "wordle":
+        await this.reply(
+          conversationId,
+          wordleReply({
+            conversationId,
+            guess: command.guess,
+            player: await this.diceRoller(event),
+            nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "anagram":
+        await this.reply(
+          conversationId,
+          anagramReply({
+            conversationId,
+            guess: command.guess,
+            player: await this.diceRoller(event),
+            nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "scramble":
+        await this.reply(
+          conversationId,
+          scrambleReply({
+            conversationId,
+            guess: command.guess,
+            player: await this.diceRoller(event),
+            nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "guess":
+        await this.reply(
+          conversationId,
+          guessReply({
+            conversationId,
+            guess: command.guess,
+            player: await this.diceRoller(event),
+            nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "higherlower":
+        await this.reply(
+          conversationId,
+          higherLowerReply({
+            conversationId,
+            call: command.call,
+            player: await this.diceRoller(event),
+            nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "wouldyourather":
+        await this.reply(
+          conversationId,
+          wouldYouRatherReply({
+            conversationId,
+            choice: command.choice,
+            player: await this.diceRoller(event),
+            voterKey: senderId,
+            nowMs,
+          }),
+          actions,
+        );
+        return;
+      case "truthordare":
+        await this.reply(
+          conversationId,
+          truthOrDareReply({
+            conversationId,
+            mode: command.mode,
+            player: await this.diceRoller(event),
+            nowMs,
           }),
           actions,
         );

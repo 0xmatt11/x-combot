@@ -184,6 +184,33 @@ describe("parseCommand", () => {
     expect(parseCommand("!minesweeper f C2")).toEqual({ name: "minesweeper", args: "f C2" });
   });
 
+  it("parses word and solo games", () => {
+    expect(parseCommand("!wordle")).toEqual({ name: "wordle" });
+    expect(parseCommand("/WORDLE crane")).toEqual({ name: "wordle", guess: "crane" });
+    expect(parseCommand("!anagram diamond")).toEqual({ name: "anagram", guess: "diamond" });
+    expect(parseCommand("!scramble")).toEqual({ name: "scramble" });
+    expect(parseCommand("!guess 12")).toEqual({ name: "guess", guess: "12" });
+    expect(parseCommand("/higherlower higher")).toEqual({
+      name: "higherlower",
+      call: "higher",
+    });
+    expect(parseCommand("!wouldyourather B")).toEqual({
+      name: "wouldyourather",
+      choice: "B",
+    });
+    expect(parseCommand("!truthordare truth")).toEqual({
+      name: "truthordare",
+      mode: "truth",
+    });
+    expect(parseUnknownBang("!wordle crane")).toBeUndefined();
+    expect(parseUnknownBang("!anagram")).toBeUndefined();
+    expect(parseUnknownBang("!scramble frog")).toBeUndefined();
+    expect(parseUnknownBang("!guess")).toBeUndefined();
+    expect(parseUnknownBang("!higherlower")).toBeUndefined();
+    expect(parseUnknownBang("!wouldyourather")).toBeUndefined();
+    expect(parseUnknownBang("!truthordare dare")).toBeUndefined();
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",
