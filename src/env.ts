@@ -7,6 +7,7 @@ import {
   type AdultImageProviderName,
   type ImagineAspectRatio,
 } from "./bot/imagine.js";
+import { parseImaginePublicImageUrl } from "./bot/imagine-public.js";
 import {
   normalizeVideoAspectRatio,
   normalizeVideoDuration,
@@ -66,6 +67,18 @@ function optionalImagineModel(name: string): string | undefined {
     );
   }
   return model;
+}
+
+function optionalImaginePublicUrl(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const url = parseImaginePublicImageUrl(value);
+  if (!url) {
+    throw new Error(
+      `${name} must be an https JPEG on imagine-public.x.ai (/imagine-public/images/<uuid>.jpg, no query)`,
+    );
+  }
+  return url;
 }
 
 function optionalImagineAspectRatio(name: string): ImagineAspectRatio | undefined {
@@ -222,6 +235,16 @@ export interface Env {
   boobsImagineModel?: string;
   /** Optional Imagine aspect ratio. Unset lets the model choose. */
   boobsImagineAspectRatio?: ImagineAspectRatio;
+  /**
+   * When true, adult commands may attach an already-hosted imagine-public
+   * JPEG after API Imagine misses and before search. Default off.
+   * Does not open grok.com.
+   */
+  boobsImagineApp?: boolean;
+  /** `!boobs` JPEG on imagine-public.x.ai. Ignored unless `boobsImagineApp` is true. */
+  boobsImaginePublicUrl?: string;
+  /** `!ass` / `!booty` JPEG on imagine-public.x.ai. Ignored unless `boobsImagineApp` is true. */
+  boobsImaginePublicBootyUrl?: string;
   /** Video model id. Unset uses `grok-imagine-video-1.5`. */
   videoImagineModel?: string;
   /** Clip length in seconds (1–15). Unset uses 5. */
@@ -287,6 +310,9 @@ export function loadEnv(requireOwner = true): Env {
     boobsImageProvider: optionalAdultImageProvider("BOOBS_IMAGE_PROVIDER"),
     boobsImagineModel: optionalImagineModel("BOOBS_IMAGINE_MODEL"),
     boobsImagineAspectRatio: optionalImagineAspectRatio("BOOBS_IMAGINE_ASPECT_RATIO"),
+    boobsImagineApp: optionalBool("BOOBS_IMAGINE_APP"),
+    boobsImaginePublicUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_URL"),
+    boobsImaginePublicBootyUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_BOOTY_URL"),
     videoImagineModel: optionalVideoModel("VIDEO_IMAGINE_MODEL"),
     videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),

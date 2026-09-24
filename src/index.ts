@@ -14,6 +14,7 @@ import {
   resolveAdultImageProvider,
   resolveImagineApiKey,
 } from "./bot/imagine.js";
+import type { ImaginePublicUrls } from "./bot/imagine-public.js";
 import {
   createVideoClient,
   DEFAULT_VIDEO_ASPECT_RATIO,
@@ -125,6 +126,26 @@ async function main(): Promise<void> {
   if (imagine) {
     log.info(`!imagine enabled (model=${imagineModel}).`);
   }
+  const imaginePublic: ImaginePublicUrls | undefined =
+    env.boobsImagineApp === true
+      ? {
+          chestUrl: env.boobsImaginePublicUrl,
+          bootyUrl: env.boobsImaginePublicBootyUrl,
+        }
+      : undefined;
+  if (env.boobsImagineApp === true) {
+    const chest = Boolean(env.boobsImaginePublicUrl);
+    const booty = Boolean(env.boobsImaginePublicBootyUrl);
+    if (!chest && !booty) {
+      log.warn(
+        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG URL is set. !boobs, !ass, and !booty stay on API Imagine and search. This build does not drive grok.com.",
+      );
+    } else {
+      log.info(
+        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty ? "set" : "unset"}). Used after API Imagine misses and before search. grok.com is not automated.`,
+      );
+    }
+  }
   const videoModel = env.videoImagineModel ?? DEFAULT_VIDEO_MODEL;
   const videoDuration = env.videoImagineDuration ?? DEFAULT_VIDEO_DURATION;
   const videoAspect = env.videoImagineAspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
@@ -191,6 +212,7 @@ async function main(): Promise<void> {
       }),
       fetchImage: fetchAdultImage,
       imagine,
+      imaginePublic,
       video,
       fetchVideo: fetchGeneratedVideo,
       voice,

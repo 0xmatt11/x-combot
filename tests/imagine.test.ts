@@ -417,6 +417,8 @@ describe("engine Imagine and search dedupe", () => {
     sameBytes?: boolean;
     perUser?: number;
     windowMs?: number;
+    imaginePublic?: { chestUrl?: string; bootyUrl?: string };
+    fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
   }) {
     const store = new Store(":memory:");
     stores.push(store);
@@ -467,11 +469,14 @@ describe("engine Imagine and search dedupe", () => {
           },
     ), undefined, {
       imageSearch: search,
-      fetchImage: async (url) => ({
-        bytes: options?.sameBytes ? Uint8Array.from([7, 7, 7]) : bytesForUrl(url),
-        mimeType: "image/jpeg",
-      }),
+      fetchImage:
+        options?.fetchImage ??
+        (async (url) => ({
+          bytes: options?.sameBytes ? Uint8Array.from([7, 7, 7]) : bytesForUrl(url),
+          mimeType: "image/jpeg",
+        })),
       imagine: options?.imagine === false ? undefined : imagine,
+      imaginePublic: options?.imaginePublic,
       adultImageProvider: options?.provider,
       recentImages: createRecentImageMemory(options?.recentLimit ?? 8),
       random: () => 0,
@@ -509,6 +514,106 @@ describe("engine Imagine and search dedupe", () => {
       expect(prompt).not.toMatch(/cleavage/i);
       expect(prompt).not.toMatch(/18\+/);
     }
+  });
+
+  it("attaches a configured imagine-public JPEG when API Imagine misses, with no caption", async () => {
+    const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
+    const posted = setup({
+      provider: "imagine",
+      failGenerate: true,
+      imaginePublic: { chestUrl: chest, bootyUrl: booty },
+    });
+    const actions = await posted.engine.processEvent(message({ id: "pub-1", text: "!boobs" }));
+    expect(posted.imagine.prompts).toHaveLength(1);
+    expect(posted.search.calls).toBe(0);
+    expect(posted.client.images).toEqual([
+      { conversationId: groupId, url: chest, mimeType: "image/jpeg", bytes: 2 },
+    ]);
+    expect(posted.client.sent).toHaveLength(0);
+    expect(actions.replies).toEqual([]);
+    expect(JSON.stringify(actions.replies)).not.toContain("18+");
+
+    const ass = await posted.engine.processEvent(message({ id: "pub-ass", text: "!ass" }));
+    expect(posted.search.calls).toBe(0);
+    expect(posted.client.images.map((row) => row.url)).toEqual([chest, booty]);
+    expect(posted.client.sent).toHaveLength(0);
+    expect(ass.replies).toEqual([]);
+    expect(JSON.stringify(ass.replies)).not.toContain("18+");
+  });
+
+  it("keeps API Imagine ahead of a configured public JPEG and does not search", async () => {
+    const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const { engine, client, search, imagine } = setup({
+      provider: "imagine",
+      imaginePublic: { chestUrl: chest },
+    });
+    await engine.processEvent(message({ id: "api-first", text: "!boobs" }));
+    expect(imagine.prompts).toHaveLength(1);
+    expect(search.calls).toBe(0);
+    expect(client.images.map((row) => row.url)).toEqual(["https://imgen.x.ai/fresh-1.jpg"]);
+  });
+
+  it("searches when the public JPEG is missing, already posted, or not a JPEG", async () => {
+    const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const missing = setup({ provider: "imagine", failGenerate: true, imaginePublic: {} });
+    await missing.engine.processEvent(message({ id: "miss-1", text: "!boobs" }));
+    expect(missing.search.calls).toBe(1);
+    expect(missing.client.images.map((row) => row.url)).toEqual([URL_A]);
+
+    const notJpeg = setup({
+      provider: "imagine",
+      failGenerate: true,
+      imaginePublic: { chestUrl: chest },
+      fetchImage: async (url) =>
+        url.includes("imagine-public")
+          ? { bytes: Uint8Array.from([1]), mimeType: "image/png" }
+          : { bytes: bytesForUrl(url), mimeType: "image/jpeg" },
+    });
+    await notJpeg.engine.processEvent(message({ id: "png-1", text: "!boobs" }));
+    expect(notJpeg.search.calls).toBe(1);
+    expect(notJpeg.client.images.map((row) => row.url)).toEqual([URL_A]);
+
+    const repeat = setup({
+      provider: "imagine",
+      failGenerate: true,
+      imaginePublic: { chestUrl: chest },
+    });
+    await repeat.engine.processEvent(message({ id: "rep-1", text: "!boobs" }));
+    await repeat.engine.processEvent(message({ id: "rep-2", text: "!boobs" }));
+    expect(repeat.search.calls).toBe(1);
+    expect(repeat.client.images.map((row) => row.url)).toEqual([chest, URL_A]);
+  });
+
+  it("does not use the public JPEG when API Imagine blocks the image", async () => {
+    const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const { engine, client, search } = setup({
+      provider: "imagine",
+      failGenerate: "moderated",
+      imaginePublic: { chestUrl: chest },
+    });
+    await engine.processEvent(message({ id: "mod-public", text: "!boobs" }));
+    expect(search.calls).toBe(0);
+    expect(client.images).toHaveLength(0);
+    expect(client.sent[0]?.text).toMatch(/blocked by content moderation/i);
+    expect(client.sent.map((row) => row.text).join("\n")).not.toContain(chest);
+  });
+
+  it("uses the public JPEG before search when Imagine is not selected", async () => {
+    const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
+    const { engine, client, search, imagine } = setup({
+      provider: "search",
+      imaginePublic: { bootyUrl: booty },
+    });
+    const actions = await engine.processEvent(message({ id: "search-public", text: "!booty" }));
+    expect(imagine.prompts).toHaveLength(0);
+    expect(search.calls).toBe(0);
+    expect(client.images.map((row) => row.url)).toEqual([booty]);
+    expect(client.sent).toHaveLength(0);
+    expect(actions.replies).toEqual([]);
+    await engine.processEvent(message({ id: "search-chest", text: "!boobs" }));
+    expect(search.calls).toBe(1);
+    expect(client.images.map((row) => row.url)).toEqual([booty, URL_A]);
   });
 
   it("falls back to search when Imagine fails and skips Imagine when search is selected", async () => {
