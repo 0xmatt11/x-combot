@@ -11,6 +11,7 @@ export {
   diceRollerLabel,
   formatDiceRoll,
   parseDiceNotation,
+  resolveDiceRoller,
   rollDice,
 } from "./dice.js";
-export type { DiceParseResult, DiceRoll, DiceSpec, Rng } from "./dice.js";
+export type { DiceIdentity, DiceParseResult, DiceRoll, DiceSpec, Rng } from "./dice.js";

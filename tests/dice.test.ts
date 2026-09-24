@@ -9,6 +9,7 @@ import {
   diceRollerLabel,
   formatDiceRoll,
   parseDiceNotation,
+  resolveDiceRoller,
   rollDice,
   type DiceSpec,
 } from "../src/bot/games/index.js";
@@ -156,16 +157,92 @@ describe("rollDice", () => {
     expect(diceReply("2d6+2", "@alice", () => 0)).toBe("🎲 @alice rolled 1, 1 +2 (total 4)");
     expect(diceReply("2d20", "Ada", () => 0)).toBe("🎲 Ada rolled 1, 1 (total 2)");
     expect(diceReply("", "  ", () => 0)).toBe("🎲 someone rolled a 1");
+    expect(diceReply("d6", "1712950172873809920", () => 0)).toBe("🎲 someone rolled a 1");
     expect(diceReply("nope", "@alice")).toBe(DICE_HELP);
   });
 
-  it("uses @handle or display name and never a raw user id", () => {
-    expect(diceRollerLabel({ username: "alice", name: "Alice" })).toBe("@alice");
-    expect(diceRollerLabel({ username: "@bob" })).toBe("@bob");
-    expect(diceRollerLabel({ name: "Ada" })).toBe("Ada");
+  it("uses @username, then a display name, and never a raw user id", () => {
+    const snowflake = "1712950172873809920";
+    expect(diceRollerLabel({ id: snowflake, username: "HisHandle", name: "Matt" })).toBe(
+      "@HisHandle",
+    );
+    expect(diceRollerLabel({ id: snowflake, username: "@HisHandle" })).toBe("@HisHandle");
+    expect(diceRollerLabel({ id: "u-ada", name: "Ada" })).toBe("Ada");
     expect(diceRollerLabel({ name: "  " })).toBe("someone");
-    expect(diceRollerLabel({})).toBe("someone");
+    expect(diceRollerLabel({ id: snowflake })).toBe("someone");
+    expect(diceRollerLabel({ id: "99" })).toBe("someone");
+    expect(diceRollerLabel({ id: snowflake, username: snowflake, name: snowflake })).toBe(
+      "someone",
+    );
     expect(diceRollerLabel(undefined)).toBe("someone");
+  });
+});
+
+describe("resolveDiceRoller", () => {
+  const snowflake = "1712950172873809920";
+
+  it("uses the username already on the sender and does not look them up", async () => {
+    const lookup = vi.fn();
+    await expect(
+      resolveDiceRoller(
+        {
+          senderId: snowflake,
+          sender: { id: snowflake, username: "HisHandle", name: "Matt" },
+        },
+        lookup,
+      ),
+    ).resolves.toBe("@HisHandle");
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("uses a display name when that is the only human label", async () => {
+    await expect(
+      resolveDiceRoller(
+        { senderId: "u-ada", sender: { id: "u-ada", name: "Ada" } },
+        async () => ({ id: "u-ada", name: "Ada" }),
+      ),
+    ).resolves.toBe("Ada");
+  });
+
+  it("looks up a sender that only has an id and prefers @username", async () => {
+    await expect(
+      resolveDiceRoller({ senderId: snowflake, sender: { id: snowflake } }, async (id) => ({
+        id,
+        username: "HisHandle",
+        name: "Matt",
+      })),
+    ).resolves.toBe("@HisHandle");
+    await expect(
+      resolveDiceRoller({ senderId: snowflake }, async (id) => ({
+        id,
+        name: "Matt",
+      })),
+    ).resolves.toBe("Matt");
+  });
+
+  it("says someone when the only identity is an unresolved id", async () => {
+    await expect(
+      resolveDiceRoller({ senderId: snowflake, sender: { id: snowflake } }, async () => ({
+        id: snowflake,
+      })),
+    ).resolves.toBe("someone");
+    await expect(resolveDiceRoller({ senderId: "99" }, async () => undefined)).resolves.toBe(
+      "someone",
+    );
+  });
+
+  it("says someone when the sender is missing", async () => {
+    const lookup = vi.fn();
+    await expect(resolveDiceRoller({}, lookup)).resolves.toBe("someone");
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("keeps a display name already on the event when lookup fails", async () => {
+    await expect(
+      resolveDiceRoller({ senderId: snowflake, sender: { id: snowflake, name: "Matt" } }, async () => {
+        throw new Error("429");
+      }),
+    ).resolves.toBe("Matt");
   });
 });
 
@@ -230,6 +307,55 @@ describe("!dice command", () => {
       "🎲 someone rolled a 4",
     ]);
     expect(client.sent.some((row) => row.text.includes("99"))).toBe(false);
+  });
+
+  it("resolves a Chat sender who is only a numeric id on the event", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { engine, client } = setup();
+    const snowflake = "1712950172873809920";
+    const matt: XUser = { id: snowflake, username: "HisHandle", name: "Matt" };
+    const named: XUser = { id: "u-ada", name: "Ada" };
+    client.addUser(matt);
+    client.addUser(named);
+
+    await engine.processEvent(
+      message({ id: "d6", senderId: matt.id, sender: undefined, text: "!dice" }),
+    );
+    await engine.processEvent(
+      message({ id: "d7", senderId: named.id, sender: undefined, text: "!dice" }),
+    );
+    await engine.processEvent(
+      message({
+        id: "d8",
+        senderId: "1860000000000000001",
+        sender: undefined,
+        text: "!dice",
+      }),
+    );
+
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "🎲 @HisHandle rolled a 1",
+      "🎲 Ada rolled a 1",
+      "🎲 someone rolled a 1",
+    ]);
+    for (const row of client.sent) {
+      expect(row.text).not.toContain(snowflake);
+      expect(row.text).not.toContain("1860000000000000001");
+    }
+  });
+
+  it("does not reply when the event has no sender at all", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent({
+      id: "d10",
+      eventType: "MessageCreate",
+      conversationId: groupId,
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      text: "!dice",
+    });
+    expect(client.sent).toEqual([]);
   });
 
   it("lists !dice under games in the default help text", () => {

@@ -31,7 +31,7 @@ import {
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import { matchFilters } from "./filters.js";
-import { diceReply, diceRollerLabel } from "./games/index.js";
+import { diceReply, resolveDiceRoller } from "./games/index.js";
 import {
   isAdmin,
   isLlmCommandName,
@@ -682,6 +682,24 @@ export class ModerationEngine {
     }
   }
 
+  /**
+   * Same resolution as a leave announcement: use the profile on the event
+   * when it already has a username, otherwise `GET /2/users/:id`.
+   * Encrypted Chat messages usually arrive with only the numeric sender id.
+   */
+  private async diceRoller(event: DmEvent): Promise<string> {
+    return resolveDiceRoller(event, (userId) => this.lookupDiceUser(userId));
+  }
+
+  private async lookupDiceUser(userId: string): Promise<XUser | undefined> {
+    try {
+      return await this.client.getUserById(userId);
+    } catch (error) {
+      log.warn(`Could not look up user ${userId} for a dice roll`, error);
+      return undefined;
+    }
+  }
+
   private async resolveLeaver(user: XUser): Promise<XUser> {
     if (user.username) return user;
     try {
@@ -747,7 +765,7 @@ export class ModerationEngine {
       case "dice":
         await this.reply(
           conversationId,
-          diceReply(command.notation, diceRollerLabel(event.sender)),
+          diceReply(command.notation, await this.diceRoller(event)),
           actions,
         );
         return;

@@ -60,22 +60,61 @@ export function rollDice(spec: DiceSpec, rng: Rng = Math.random): DiceRoll {
   return { spec, rolls, total: subtotal + spec.modifier };
 }
 
+export type DiceIdentity = {
+  id?: string;
+  username?: string;
+  name?: string;
+};
+
 /**
- * `@handle` when a username is known, otherwise the display name.
- * A missing name becomes "someone". The numeric API user id is never used.
+ * `@username` when a handle is known, otherwise the human display name.
+ * "someone" only when neither is known. A numeric API user id is not a name.
  */
-export function diceRollerLabel(user: { username?: string; name?: string } | undefined): string {
+export function diceRollerLabel(user: DiceIdentity | undefined): string {
   const username = user?.username?.trim();
-  if (username) return username.startsWith("@") ? username : `@${username}`;
+  if (username) {
+    const bare = username.replace(/^@/, "");
+    if (bare && !isSnowflake(bare)) {
+      return username.startsWith("@") ? username : `@${username}`;
+    }
+  }
   const name = user?.name?.trim();
-  if (name) return name;
+  if (name && !isSnowflake(name)) return name;
   return "someone";
 }
 
-/** A blank label becomes "someone". */
+/**
+ * Chat events often carry only `senderId` until the profile is loaded.
+ * Look the sender up the same way leave announcements and mod targets do,
+ * then label the roll. A username already on the event skips the lookup.
+ */
+export async function resolveDiceRoller(
+  event: { sender?: DiceIdentity; senderId?: string },
+  lookup: (userId: string) => Promise<DiceIdentity | undefined>,
+): Promise<string> {
+  const sender = event.sender;
+  const onEvent = diceRollerLabel(sender);
+  const username = sender?.username?.trim().replace(/^@/, "");
+  if (username && !isSnowflake(username)) return onEvent;
+
+  const userId = event.senderId?.trim() || sender?.id?.trim();
+  if (!userId) return onEvent;
+
+  try {
+    const resolved = await lookup(userId);
+    const fromLookup = diceRollerLabel(resolved);
+    if (fromLookup !== "someone") return fromLookup;
+  } catch {
+    return onEvent;
+  }
+  return onEvent;
+}
+
+/** A blank label, or a bare snowflake id, becomes "someone". */
 export function formatDiceRoll(roll: DiceRoll, roller: string): string {
   const { spec, rolls, total } = roll;
-  const who = roller.trim() || "someone";
+  const trimmed = roller.trim();
+  const who = !trimmed || isSnowflake(trimmed) ? "someone" : trimmed;
   const only = rolls[0];
   if (rolls.length === 1 && spec.modifier === 0 && only !== undefined) {
     return `🎲 ${who} rolled ${article(only)} ${only}`;
@@ -128,6 +167,11 @@ function rollFace(sides: number, rng: Rng): number {
   if (face < 1) return 1;
   if (face > sides) return sides;
   return face;
+}
+
+/** Modern X user ids are long digit strings. Handles and display names are not. */
+function isSnowflake(value: string): boolean {
+  return /^\d{15,}$/.test(value);
 }
 
 function article(n: number): "a" | "an" {
