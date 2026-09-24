@@ -2,6 +2,8 @@ import fs from "node:fs";
 import { loadDefaults, normalizeBoobsConfig, normalizeXpConfig } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
+import { NoorAlertPoller } from "./bot/noor-poller.js";
+import { normalizeNoorUsername } from "./bot/noor.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
@@ -132,20 +134,26 @@ async function main(): Promise<void> {
           chestUrl: env.boobsImaginePublicUrl,
           bootyUrl: env.boobsImaginePublicBootyUrl,
           bootyUrls: env.boobsImaginePublicBootyUrls,
+          assVideoUrls: env.boobsImaginePublicAssVideoUrls,
+          bootyVideoUrls: env.boobsImaginePublicBootyVideoUrls,
+          boobsVideoUrls: env.boobsImaginePublicBoobsVideoUrls,
         }
       : undefined;
   if (env.boobsImagineApp === true) {
     const chest = imaginePublicUrlsFor(imaginePublic, "boobs").length > 0;
     const bootyCount = imaginePublicUrlsFor(imaginePublic, "ass").length;
-    if (!chest && bootyCount === 0) {
+    const assVideos = env.boobsImaginePublicAssVideoUrls?.length ?? 0;
+    const bootyVideos = env.boobsImaginePublicBootyVideoUrls?.length ?? 0;
+    const boobsVideos = env.boobsImaginePublicBoobsVideoUrls?.length ?? 0;
+    if (!chest && bootyCount === 0 && assVideos + bootyVideos + boobsVideos === 0) {
       log.warn(
-        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG URL is set. !boobs, !ass, and !booty stay on API Imagine and search. This build does not drive grok.com.",
+        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG or video URL is set. !boobs, !ass, and !booty stay on API Imagine and search. This build does not drive grok.com.",
       );
     } else {
       const booty =
         bootyCount === 0 ? "unset" : bootyCount === 1 ? "1 url" : `${bootyCount} urls`;
       log.info(
-        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}). Used after API Imagine misses and before search. grok.com is not automated.`,
+        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}, assVideos=${assVideos}, bootyVideos=${bootyVideos}, boobsVideos=${boobsVideos}). Used after API Imagine misses and before search. grok.com is not automated.`,
       );
     }
   }
@@ -206,6 +214,7 @@ async function main(): Promise<void> {
       ownerId: env.botOwnerId,
       globalAdminIds: env.adminIds,
       defaults,
+      noorUsername: env.noorUsername,
     },
     llmClient,
     {
@@ -273,6 +282,10 @@ async function main(): Promise<void> {
       )
     : undefined;
   chatPoller?.start();
+  const noorHandle = normalizeNoorUsername(env.noorUsername);
+  log.info(`Noor alert watches @${noorHandle} when a chat sends !noor on.`);
+  const noorPoller = new NoorAlertPoller(engine);
+  noorPoller.start();
 
   const activityRuntime = chatService
     ? await startActivityRuntime({
@@ -302,6 +315,7 @@ async function main(): Promise<void> {
     log.info("Shutting down");
     poller.stop();
     chatPoller?.stop();
+    noorPoller.stop();
     activityRuntime?.stop();
     void activityRuntime?.webhook?.close();
     store.close();

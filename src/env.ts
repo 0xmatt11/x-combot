@@ -10,6 +10,7 @@ import {
 import {
   parseImaginePublicImageUrl,
   parseImaginePublicImageUrlList,
+  parseImaginePublicVideoUrlList,
 } from "./bot/imagine-public.js";
 import {
   normalizeVideoAspectRatio,
@@ -96,6 +97,18 @@ function optionalImaginePublicUrlList(name: string): string[] | undefined {
   return urls.length > 0 ? urls : undefined;
 }
 
+function optionalImaginePublicVideoUrls(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || !raw.trim()) return undefined;
+  const { urls, invalid } = parseImaginePublicVideoUrlList(raw);
+  if (invalid.length > 0) {
+    throw new Error(
+      `${name} must be https mp4 URLs (imagine-public.x.ai with no query, or another https host whose path ends in .mp4), separated by commas or whitespace`,
+    );
+  }
+  return urls.length > 0 ? urls : undefined;
+}
+
 function optionalImagineAspectRatio(name: string): ImagineAspectRatio | undefined {
   const value = optional(name);
   if (!value) return undefined;
@@ -135,6 +148,16 @@ function optionalVideoAspectRatio(name: string): VideoAspectRatio | undefined {
     throw new Error(`${name} must be a video aspect ratio such as 16:9, 9:16, 1:1, or 4:3`);
   }
   return ratio;
+}
+
+function optionalNoorUsername(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const handle = value.replace(/^@/, "");
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
+    throw new Error(`${name} must be an X username (1–15 letters, numbers, or underscores)`);
+  }
+  return handle;
 }
 
 function optionalVoiceLanguage(name: string): string | undefined {
@@ -265,6 +288,13 @@ export interface Env {
    * Merged with `boobsImaginePublicBootyUrl`. Ignored unless `boobsImagineApp` is true.
    */
   boobsImaginePublicBootyUrls?: string[];
+  /**
+   * Command-specific mp4 banks mixed with that command's stills.
+   * Ignored unless `boobsImagineApp` is true. Classic DMs cannot attach them.
+   */
+  boobsImaginePublicAssVideoUrls?: string[];
+  boobsImaginePublicBootyVideoUrls?: string[];
+  boobsImaginePublicBoobsVideoUrls?: string[];
   /** Video model id. Unset uses `grok-imagine-video-1.5`. */
   videoImagineModel?: string;
   /** Clip length in seconds (1–15). Unset uses 5. */
@@ -275,6 +305,8 @@ export interface Env {
   videoImagineResolution?: VideoResolution;
   /** TTS language. Unset uses `en`. Personas choose the voice id. */
   voiceTtsLanguage?: string;
+  /** X handle for `!noor`. Unset uses `noorrietje`. */
+  noorUsername?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -334,10 +366,18 @@ export function loadEnv(requireOwner = true): Env {
     boobsImaginePublicUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_URL"),
     boobsImaginePublicBootyUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_BOOTY_URL"),
     boobsImaginePublicBootyUrls: optionalImaginePublicUrlList("BOOBS_IMAGINE_PUBLIC_BOOTY_URLS"),
+    boobsImaginePublicAssVideoUrls: optionalImaginePublicVideoUrls("BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS"),
+    boobsImaginePublicBootyVideoUrls: optionalImaginePublicVideoUrls(
+      "BOOBS_IMAGINE_PUBLIC_BOOTY_VIDEO_URLS",
+    ),
+    boobsImaginePublicBoobsVideoUrls: optionalImaginePublicVideoUrls(
+      "BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS",
+    ),
     videoImagineModel: optionalVideoModel("VIDEO_IMAGINE_MODEL"),
     videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
     videoImagineResolution: optionalVideoResolution("VIDEO_IMAGINE_RESOLUTION"),
     voiceTtsLanguage: optionalVoiceLanguage("VOICE_TTS_LANGUAGE"),
+    noorUsername: optionalNoorUsername("NOOR_ALERT_USERNAME"),
   };
 }

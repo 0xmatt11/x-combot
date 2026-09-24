@@ -4,9 +4,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   fetchImaginePublicImage,
+  imaginePublicPoolFor,
   imaginePublicUrlsFor,
   parseImaginePublicImageUrl,
   parseImaginePublicImageUrlList,
+  parseImaginePublicVideoUrl,
+  parseImaginePublicVideoUrlList,
+  pickImaginePublicMedia,
   pickImaginePublicUrl,
 } from "../src/bot/imagine-public.js";
 import { loadEnv } from "../src/env.js";
@@ -148,6 +152,91 @@ describe("booty image bank", () => {
   });
 });
 
+const ASS_MP4 =
+  "https://imagine-public.x.ai/imagine-public/videos/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4";
+const BOOTY_MP4 = "https://vidgen.x.ai/booty-clip.mp4?X-Amz-Signature=abc%2B";
+const BOOBS_MP4 =
+  "https://imagine-public.x.ai/imagine-public/videos/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.mp4";
+
+describe("imagine-public video banks", () => {
+  it("accepts an imagine-public mp4 and a signed https mp4", () => {
+    expect(parseImaginePublicVideoUrl(`  ${ASS_MP4}  `)).toBe(ASS_MP4);
+    expect(
+      parseImaginePublicVideoUrl(
+        "https://imagine-public.x.ai/imagine-public/videos/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA.MP4",
+      ),
+    ).toBe(ASS_MP4);
+    expect(parseImaginePublicVideoUrl(BOOTY_MP4)).toBe(BOOTY_MP4);
+    expect(parseImaginePublicVideoUrl(undefined)).toBeUndefined();
+    expect(parseImaginePublicVideoUrl("")).toBeUndefined();
+    expect(parseImaginePublicVideoUrl(ASS_MP4.replace("https://", "http://"))).toBeUndefined();
+    expect(parseImaginePublicVideoUrl(`${ASS_MP4}?sig=1`)).toBeUndefined();
+    expect(parseImaginePublicVideoUrl(`${ASS_MP4}#x`)).toBeUndefined();
+    expect(parseImaginePublicVideoUrl(ASS_MP4.replace(".mp4", ".jpg"))).toBeUndefined();
+    expect(parseImaginePublicVideoUrl("https://user:pass@vidgen.x.ai/clip.mp4")).toBeUndefined();
+    expect(parseImaginePublicVideoUrl("not a url")).toBeUndefined();
+  });
+
+  it("parses a comma, space, or newline video list and drops duplicates", () => {
+    const parsed = parseImaginePublicVideoUrlList(
+      `# clips\n${ASS_MP4}, ${BOOTY_MP4}\n${ASS_MP4} ${BOOBS_MP4}`,
+    );
+    expect(parsed.invalid).toEqual([]);
+    expect(parsed.urls).toEqual([ASS_MP4, BOOTY_MP4, BOOBS_MP4]);
+    expect(parseImaginePublicVideoUrlList(undefined)).toEqual({ urls: [], invalid: [] });
+    expect(parseImaginePublicVideoUrlList("  \n , ")).toEqual({ urls: [], invalid: [] });
+    expect(parseImaginePublicVideoUrlList(`${ASS_MP4} https://cdn.example/a.jpg`).invalid).toEqual([
+      "https://cdn.example/a.jpg",
+    ]);
+  });
+
+  it("mixes command stills with that command's videos only", () => {
+    const source = {
+      chestUrl: JPEG,
+      bootyUrl: JPEG_B,
+      bootyUrls: [JPEG_C],
+      assVideoUrls: [ASS_MP4],
+      bootyVideoUrls: [BOOTY_MP4],
+      boobsVideoUrls: [BOOBS_MP4, ASS_MP4],
+    };
+    const boobs = imaginePublicPoolFor(source, "boobs");
+    const ass = imaginePublicPoolFor(source, "ass");
+    const booty = imaginePublicPoolFor(source, "booty");
+    expect(boobs).toEqual([
+      { kind: "image", url: JPEG },
+      { kind: "video", url: BOOBS_MP4 },
+      { kind: "video", url: ASS_MP4 },
+    ]);
+    expect(ass).toEqual([
+      { kind: "image", url: JPEG_C },
+      { kind: "image", url: JPEG_B },
+      { kind: "video", url: ASS_MP4 },
+    ]);
+    expect(booty).toEqual([
+      { kind: "image", url: JPEG_C },
+      { kind: "image", url: JPEG_B },
+      { kind: "video", url: BOOTY_MP4 },
+    ]);
+    expect(ass.map((item) => item.url)).not.toContain(BOOTY_MP4);
+    expect(booty.map((item) => item.url)).not.toContain(ASS_MP4);
+    expect(boobs.map((item) => item.url)).not.toContain(JPEG_B);
+
+    expect(pickImaginePublicMedia(boobs, () => 0)).toEqual({ kind: "image", url: JPEG });
+    expect(pickImaginePublicMedia(boobs, () => 0.34)).toEqual({ kind: "video", url: BOOBS_MP4 });
+    expect(pickImaginePublicMedia(boobs, () => 0.67)).toEqual({ kind: "video", url: ASS_MP4 });
+    expect(pickImaginePublicMedia(boobs, () => 0.999)?.kind).toBe("video");
+    let calls = 0;
+    expect(
+      pickImaginePublicMedia([{ kind: "video", url: ASS_MP4 }], () => {
+        calls += 1;
+        return 0.9;
+      }),
+    ).toEqual({ kind: "video", url: ASS_MP4 });
+    expect(calls).toBe(0);
+    expect(pickImaginePublicMedia([], () => 0)).toBeUndefined();
+  });
+});
+
 describe("BOOBS_IMAGINE_APP", () => {
   const previous = {
     owner: process.env.BOT_OWNER_ID,
@@ -155,6 +244,9 @@ describe("BOOBS_IMAGINE_APP", () => {
     chest: process.env.BOOBS_IMAGINE_PUBLIC_URL,
     booty: process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URL,
     bank: process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS,
+    assVideos: process.env.BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS,
+    bootyVideos: process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_VIDEO_URLS,
+    boobsVideos: process.env.BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS,
   };
 
   afterEach(() => {
@@ -163,6 +255,9 @@ describe("BOOBS_IMAGINE_APP", () => {
     restore("BOOBS_IMAGINE_PUBLIC_URL", previous.chest);
     restore("BOOBS_IMAGINE_PUBLIC_BOOTY_URL", previous.booty);
     restore("BOOBS_IMAGINE_PUBLIC_BOOTY_URLS", previous.bank);
+    restore("BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS", previous.assVideos);
+    restore("BOOBS_IMAGINE_PUBLIC_BOOTY_VIDEO_URLS", previous.bootyVideos);
+    restore("BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS", previous.boobsVideos);
   });
 
   it("stays off unless set, and rejects a URL that is not a public JPEG", () => {
@@ -171,10 +266,16 @@ describe("BOOBS_IMAGINE_APP", () => {
     delete process.env.BOOBS_IMAGINE_PUBLIC_URL;
     delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URL;
     delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS;
+    delete process.env.BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS;
+    delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_VIDEO_URLS;
+    delete process.env.BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS;
     expect(loadEnv(true).boobsImagineApp).toBeUndefined();
     expect(loadEnv(true).boobsImaginePublicUrl).toBeUndefined();
     expect(loadEnv(true).boobsImaginePublicBootyUrl).toBeUndefined();
     expect(loadEnv(true).boobsImaginePublicBootyUrls).toBeUndefined();
+    expect(loadEnv(true).boobsImaginePublicAssVideoUrls).toBeUndefined();
+    expect(loadEnv(true).boobsImaginePublicBootyVideoUrls).toBeUndefined();
+    expect(loadEnv(true).boobsImaginePublicBoobsVideoUrls).toBeUndefined();
 
     process.env.BOOBS_IMAGINE_APP = "false";
     expect(loadEnv(true).boobsImagineApp).toBe(false);
@@ -223,6 +324,29 @@ describe("BOOBS_IMAGINE_APP", () => {
 
     process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS = `${JPEG_B} https://cdn.example/a.jpg`;
     expect(() => loadEnv(true)).toThrow(/BOOBS_IMAGINE_PUBLIC_BOOTY_URLS/);
+  });
+
+  it("loads per-command video banks and rejects a bad entry", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    process.env.BOOBS_IMAGINE_APP = "true";
+    delete process.env.BOOBS_IMAGINE_PUBLIC_URL;
+    delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URL;
+    delete process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_URLS;
+    process.env.BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS = `${ASS_MP4}, ${ASS_MP4}\n${BOOTY_MP4}`;
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOTY_VIDEO_URLS = BOOTY_MP4;
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS = `# chest clips\n${BOOBS_MP4}`;
+    const env = loadEnv(true);
+    expect(env.boobsImaginePublicAssVideoUrls).toEqual([ASS_MP4, BOOTY_MP4]);
+    expect(env.boobsImaginePublicBootyVideoUrls).toEqual([BOOTY_MP4]);
+    expect(env.boobsImaginePublicBoobsVideoUrls).toEqual([BOOBS_MP4]);
+
+    process.env.BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS = " \n , ";
+    expect(loadEnv(true).boobsImaginePublicAssVideoUrls).toBeUndefined();
+
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS = `${BOOBS_MP4} https://cdn.example/clip.jpg`;
+    expect(() => loadEnv(true)).toThrow(/BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS/);
+    process.env.BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS = `${BOOBS_MP4}?sig=1`;
+    expect(() => loadEnv(true)).toThrow(/BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS/);
   });
 });
 

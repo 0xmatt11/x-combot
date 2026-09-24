@@ -8,7 +8,7 @@ import type {
   SendMessageResult,
   XUser,
 } from "../types.js";
-import type { XClient } from "./client.js";
+import type { UserTweet, XClient } from "./client.js";
 
 export class MockXClient implements XClient {
   readonly sent: { conversationId: string; text: string }[] = [];
@@ -45,8 +45,12 @@ export class MockXClient implements XClient {
   failDeleteIds = new Set<string>();
   /** Public posts returned by `listRecentPosts`, keyed by user id. */
   readonly posts = new Map<string, string[]>();
+  /** Structured posts for Noor alert, keyed by user id. */
+  readonly tweets = new Map<string, UserTweet[]>();
   /** When set, timeline reads throw so troll mode can fall back. */
   failPosts = false;
+  /** When set, `listUserTweets` throws so Noor alert can skip the cycle. */
+  failTweets = false;
 
   constructor(bot: XUser = { id: "bot-1", username: "modbot", name: "Mod Bot" }) {
     this.bot = bot;
@@ -74,6 +78,14 @@ export class MockXClient implements XClient {
   async listRecentPosts(userId: string): Promise<string[]> {
     if (this.failPosts) throw new Error("timeline unavailable");
     return [...(this.posts.get(userId) ?? [])];
+  }
+
+  async listUserTweets(userId: string): Promise<UserTweet[]> {
+    if (this.failTweets) throw new Error("timeline unavailable");
+    return (this.tweets.get(userId) ?? []).map((tweet) => ({
+      ...tweet,
+      mediaUrls: [...tweet.mediaUrls],
+    }));
   }
 
   async listDmEvents(): Promise<{ events: DmEvent[]; nextToken?: string }> {

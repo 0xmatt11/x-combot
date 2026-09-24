@@ -5,7 +5,8 @@ welcome:
   enabled: true
   text: |
     Welcome @{username}!
-    Please read the group rules with !rules. Type !help for commands.
+    I'm Milady bot — I help run this chat.
+    I can show !rules, answer with !ask, summarize with !summarize, generate images and videos (!imagine / !video), speak a line (!voice), post fun photos when those commands are enabled, roast with !troll, and track XP (!xp / !top). Type !help for the full list.
 
 # Posted when someone leaves or is removed. X reports both as the same event
 # (classic ParticipantsLeave, Chat groupChange membersRemoved), so the line
@@ -24,13 +25,15 @@ help: |
   Public commands:
     !help — this message
     !rules — group rules
-    !boobs — chest / cleavage photo (off unless enabled)
-    !ass / !booty / !booties — butt photo (same switch as !boobs)
+    !boobs — chest / cleavage photo or clip (off unless enabled)
+    !ass / !booty / !booties — butt photo or clip (same switch as !boobs)
     !imagine <prompt> — generate an image with Grok Imagine (needs an xAI key)
     !video <prompt> — generate a short video with Grok Imagine (needs an xAI key; takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
     !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
     !linkroast on — roast people who drop X status links in this chat until !linkroast off
+    !noor on — Noor alert for @noorrietje. Relays each new post with the status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. Photo posts also attach an Imagine troll remix. !noor off stops it. Name and on/off are case-insensitive
+    !noorabs on — when a Noor alert fires, add "but look at muh pretty abs" and an Imagine close-up of skinny tanned abs. Needs !noor on. !noorabs off stops it
     !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
     !top — level leaderboard (!toplvl)
     Reply + or - to a message — give or take one level (not your own)

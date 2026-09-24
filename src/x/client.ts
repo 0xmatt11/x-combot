@@ -9,6 +9,15 @@ import type {
   XUser,
 } from "../types.js";
 
+/** One public post from `GET /2/users/:id/tweets`, excluding retweets and replies. */
+export interface UserTweet {
+  id: string;
+  text: string;
+  createdAtMs?: number;
+  /** Direct https photo URLs. Video stays on the status link. */
+  mediaUrls: string[];
+}
+
 export interface XClient {
   getMe(): Promise<XUser>;
   getUserByUsername(username: string): Promise<XUser | undefined>;
@@ -18,6 +27,11 @@ export interface XClient {
    * Throws when the token or access tier cannot read that timeline.
    */
   listRecentPosts(userId: string): Promise<string[]>;
+  /**
+   * Same timeline as `listRecentPosts`, with ids, time, and photo URLs.
+   * Used by Noor alert. Throws when the timeline cannot be read.
+   */
+  listUserTweets(userId: string): Promise<UserTweet[]>;
   listDmEvents(params: {
     maxResults?: number;
     paginationToken?: string;
