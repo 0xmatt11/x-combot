@@ -378,6 +378,30 @@ describe("parseLlmWake", () => {
   });
 });
 
+describe("parseCommand !troll", () => {
+  it("parses !troll @x, off, and !untroll", () => {
+    expect(parseCommand("!troll @x")).toEqual({
+      name: "troll",
+      target: { raw: "@x", username: "x" },
+    });
+    expect(parseCommand("/troll @alice")).toEqual({
+      name: "troll",
+      target: { raw: "@alice", username: "alice" },
+    });
+    expect(parseCommand("!TROLL off")).toEqual({ name: "troll", off: true });
+    expect(parseCommand("!troll")).toEqual({ name: "troll" });
+    expect(parseCommand("!untroll")).toEqual({ name: "untroll" });
+    expect(parseCommand("!untroll @alice")).toEqual({ name: "untroll" });
+    expect(parseCommand("!troll Bobby Tables")).toEqual({
+      name: "troll",
+      target: { raw: "Bobby Tables" },
+    });
+    expect(parseUnknownBang("!troll @x")).toBeUndefined();
+    expect(parseUnknownBang("!untroll")).toBeUndefined();
+    expect(parseUnknownBang("!troll off")).toBeUndefined();
+  });
+});
+
 describe("renderTemplate", () => {
   it("substitutes welcome placeholders", () => {
     expect(renderTemplate("hi @{username} ({user_id})", { username: "alice", user_id: "1" })).toBe(

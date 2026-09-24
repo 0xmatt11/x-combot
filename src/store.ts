@@ -140,6 +140,14 @@ CREATE TABLE IF NOT EXISTS message_authors (
   sender_id TEXT NOT NULL,
   PRIMARY KEY (conversation_id, message_key)
 );
+
+CREATE TABLE IF NOT EXISTS troll_targets (
+  conversation_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  username TEXT,
+  last_ms INTEGER NOT NULL DEFAULT 0,
+  roast_next INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 export class Store {
@@ -711,4 +719,69 @@ export class Store {
       )
       .run(conversationId, giverId, targetId, tsMs);
   }
+
+  /**
+   * Who `!troll` is aimed at in this conversation. `lastMs` is the previous
+   * roast. `roastNext` is 1 when the next reply should be a timeline roast.
+   */
+  getTrollTarget(conversationId: string): TrollTarget | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, username, last_ms, roast_next
+         FROM troll_targets WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as
+      | {
+          user_id: string;
+          username: string | null;
+          last_ms: number;
+          roast_next: number;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      userId: row.user_id,
+      username: row.username ?? undefined,
+      lastMs: row.last_ms,
+      roastNext: row.roast_next === 1 ? 1 : 0,
+    };
+  }
+
+  /** Replace the conversation target and reset the cooldown and rotation. */
+  setTrollTarget(conversationId: string, userId: string, username?: string): void {
+    const handle = username?.replace(/^@/, "").trim();
+    const safe = handle && !/^\d+$/.test(handle) ? handle : null;
+    this.db
+      .prepare(
+        `INSERT INTO troll_targets (conversation_id, user_id, username, last_ms, roast_next)
+         VALUES (?, ?, ?, 0, 0)
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           user_id = excluded.user_id,
+           username = excluded.username,
+           last_ms = 0,
+           roast_next = 0`,
+      )
+      .run(conversationId, userId, safe);
+  }
+
+  clearTrollTarget(conversationId: string): void {
+    this.db.prepare("DELETE FROM troll_targets WHERE conversation_id = ?").run(conversationId);
+  }
+
+  /** Record a posted troll and which style comes next (0 mom joke, 1 roast). */
+  markTrollSent(conversationId: string, nowMs: number, roastNext: 0 | 1): void {
+    this.db
+      .prepare(
+        `UPDATE troll_targets SET last_ms = ?, roast_next = ? WHERE conversation_id = ?`,
+      )
+      .run(nowMs, roastNext, conversationId);
+  }
+}
+
+export interface TrollTarget {
+  userId: string;
+  username?: string;
+  lastMs: number;
+  /** 1 when the next reply should use the chat and timeline roast. */
+  roastNext: 0 | 1;
 }

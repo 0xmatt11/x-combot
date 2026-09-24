@@ -13,6 +13,11 @@ export interface XClient {
   getMe(): Promise<XUser>;
   getUserByUsername(username: string): Promise<XUser | undefined>;
   getUserById(id: string): Promise<XUser | undefined>;
+  /**
+   * Recent public posts for a roast. `GET /2/users/:id/tweets`.
+   * Throws when the token or access tier cannot read that timeline.
+   */
+  listRecentPosts(userId: string): Promise<string[]>;
   listDmEvents(params: {
     maxResults?: number;
     paginationToken?: string;

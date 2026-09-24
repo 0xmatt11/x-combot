@@ -43,6 +43,10 @@ export class MockXClient implements XClient {
   /** When set, `sendAudio` throws so callers post a short failure line. */
   failSendAudio = false;
   failDeleteIds = new Set<string>();
+  /** Public posts returned by `listRecentPosts`, keyed by user id. */
+  readonly posts = new Map<string, string[]>();
+  /** When set, timeline reads throw so troll mode can fall back. */
+  failPosts = false;
 
   constructor(bot: XUser = { id: "bot-1", username: "modbot", name: "Mod Bot" }) {
     this.bot = bot;
@@ -65,6 +69,11 @@ export class MockXClient implements XClient {
 
   async getUserById(id: string): Promise<XUser | undefined> {
     return this.users.get(id);
+  }
+
+  async listRecentPosts(userId: string): Promise<string[]> {
+    if (this.failPosts) throw new Error("timeline unavailable");
+    return [...(this.posts.get(userId) ?? [])];
   }
 
   async listDmEvents(): Promise<{ events: DmEvent[]; nextToken?: string }> {

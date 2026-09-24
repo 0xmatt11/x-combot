@@ -56,7 +56,9 @@ export type ParsedCommand =
   | { name: "crash"; args: string }
   | { name: "trivia"; args: string }
   | { name: "hit"; args: string }
-  | { name: "stand"; args: string };
+  | { name: "stand"; args: string }
+  | { name: "troll"; off?: boolean; target?: UserRef }
+  | { name: "untroll" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -130,6 +132,8 @@ const KNOWN_COMMAND_NAMES = new Set([
   "quiz",
   "hit",
   "stand",
+  "troll",
+  "untroll",
 ]);
 
 /**
@@ -344,6 +348,10 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "hit", args: rest };
     case "stand":
       return { name: "stand", args: rest };
+    case "troll":
+      return parseTroll(rest);
+    case "untroll":
+      return { name: "untroll" };
     default:
       return undefined;
   }
@@ -358,6 +366,22 @@ export function parseUserRef(raw: string): UserRef | undefined {
   const match = value.match(USERNAME_RE);
   if (!match) return undefined;
   return { raw: value, username: match[1] };
+}
+
+/**
+ * `!troll @user` turns on (and toggles off that same user).
+ * `!troll off` clears the conversation. A display name that is not a single
+ * @handle is kept raw so the engine can match a known name.
+ */
+function parseTroll(rest: string): ParsedCommand {
+  if (!rest) return { name: "troll" };
+  if (/^off$/i.test(rest)) return { name: "troll", off: true };
+  const { head, tail } = splitHead(rest);
+  const asUser = parseUserRef(head);
+  if (asUser && (asUser.id || head.startsWith("@") || !tail)) {
+    return { name: "troll", target: asUser };
+  }
+  return { name: "troll", target: { raw: rest } };
 }
 
 function splitTarget(rest: string): { target?: UserRef; remainder: string } {
