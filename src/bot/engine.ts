@@ -1744,7 +1744,7 @@ export class ModerationEngine {
   private async handleVoice(event: DmEvent, prompt: string, actions: EngineActions): Promise<void> {
     const conversationId = event.conversationId;
     const voice = this.deps.voice;
-    const normalized = parseVoiceRequest(prompt, voice?.defaultVoice);
+    const normalized = parseVoiceRequest(prompt);
     if (!normalized.ok) {
       await this.reply(conversationId, voicePromptRejection(normalized.reason), actions);
       return;
@@ -1760,10 +1760,12 @@ export class ModerationEngine {
     }
     let spoken: SpokenAudio;
     try {
-      spoken = await voice.synthesize(normalized.text, normalized.voiceId);
+      spoken = await voice.synthesize(normalized.spoken, normalized.voiceId);
     } catch (error) {
       const detail = redactSecrets(error instanceof Error ? error.message : "voice failed");
-      log.warn(`!voice failed conversation=${conversationId} voice=${normalized.voiceId}: ${detail}`);
+      log.warn(
+        `!voice failed conversation=${conversationId} persona=${normalized.personaId} voice=${normalized.voiceId}: ${detail}`,
+      );
       const userMessage = error instanceof VoiceError ? error.userMessage : VOICE_FAILED_MESSAGE;
       await this.reply(conversationId, userMessage, actions);
       return;
@@ -1776,11 +1778,13 @@ export class ModerationEngine {
         voiceId: spoken.voiceId,
       });
       log.info(
-        `!voice posted audio conversation=${conversationId} voice=${spoken.voiceId} bytes=${spoken.bytes.byteLength}`,
+        `!voice posted audio conversation=${conversationId} persona=${normalized.personaId} voice=${spoken.voiceId} bytes=${spoken.bytes.byteLength}`,
       );
     } catch (error) {
       const detail = redactSecrets(error instanceof Error ? error.message : "audio attach failed");
-      log.warn(`!voice attach failed conversation=${conversationId} voice=${spoken.voiceId}: ${detail}`);
+      log.warn(
+        `!voice attach failed conversation=${conversationId} persona=${normalized.personaId} voice=${spoken.voiceId}: ${detail}`,
+      );
       await this.reply(conversationId, VOICE_ATTACH_FAILED_MESSAGE, actions);
     }
   }

@@ -22,7 +22,7 @@ import {
   DEFAULT_VIDEO_RESOLUTION,
   fetchGeneratedVideo,
 } from "./bot/video.js";
-import { createVoiceClient, DEFAULT_VOICE_ID, DEFAULT_VOICE_LANGUAGE } from "./bot/voice.js";
+import { createVoiceClient, DEFAULT_VOICE_LANGUAGE } from "./bot/voice.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
 import { startActivityStream } from "./chat/activity-stream.js";
 import {
@@ -143,17 +143,15 @@ async function main(): Promise<void> {
       `!video enabled (model=${videoModel}, duration=${videoDuration}s, aspect=${videoAspect}, resolution=${videoResolution}).`,
     );
   }
-  const voiceId = env.voiceTtsVoice ?? DEFAULT_VOICE_ID;
   const voiceLanguage = env.voiceTtsLanguage ?? DEFAULT_VOICE_LANGUAGE;
   const voice = imagineKey
     ? createVoiceClient({
         apiKey: imagineKey,
-        voiceId,
         language: voiceLanguage,
       })
     : undefined;
   if (voice) {
-    log.info(`!voice enabled (voice=${voiceId}, language=${voiceLanguage}).`);
+    log.info(`!voice enabled (language=${voiceLanguage}).`);
   }
 
   const llmClient = buildLlmClient(env, defaults);

@@ -12,8 +12,58 @@ import { containsBannedAgeTerm, redactSecrets } from "./adult-filter.js";
 export const VOICE_IDS = ["eve", "ara", "rex", "sal", "leo"] as const;
 export type VoiceId = (typeof VOICE_IDS)[number];
 
-export const DEFAULT_VOICE_ID: VoiceId = "eve";
 export const DEFAULT_VOICE_LANGUAGE = "en";
+
+export type VoicePersonaId = "sexy" | "dude" | "scared" | "horny";
+
+/**
+ * Named personas. `voiceId` is always a built-in xAI id.
+ * ara is "warm and friendly", eve is "energetic and upbeat", rex is "confident and clear".
+ * The three girl personas share ara and eve because sal and leo are the other male tones.
+ * Delivery uses documented speech tags only. It does not add words to the user's line.
+ */
+export const VOICE_PERSONAS: readonly {
+  id: VoicePersonaId;
+  label: string;
+  /** Alias printed in the menu. */
+  menuAlias: string;
+  aliases: readonly string[];
+  voiceId: VoiceId;
+  deliver: (text: string) => string;
+}[] = [
+  {
+    id: "sexy",
+    label: "sexy girl",
+    menuAlias: "sexy",
+    aliases: ["sexy", "sexygirl", "1"],
+    voiceId: "ara",
+    deliver: (text) => `<whisper>${text}</whisper>`,
+  },
+  {
+    id: "dude",
+    label: "regular dude",
+    menuAlias: "dude",
+    aliases: ["dude", "regular", "guy", "2"],
+    voiceId: "rex",
+    deliver: (text) => text,
+  },
+  {
+    id: "scared",
+    label: "scared girl",
+    menuAlias: "scared",
+    aliases: ["scared", "scaredgirl", "3"],
+    voiceId: "eve",
+    deliver: (text) => `[breath] <whisper><higher-pitch>${text}</higher-pitch></whisper>`,
+  },
+  {
+    id: "horny",
+    label: "really horny girl",
+    menuAlias: "horny",
+    aliases: ["horny", "hornygirl", "4"],
+    voiceId: "ara",
+    deliver: (text) => `<build-intensity>${text}</build-intensity>`,
+  },
+];
 /** Spoken text cap for Chat. The API allows much more; an mp3 of this size stays small. */
 export const VOICE_MAX_CHARS = 1_500;
 /** Default MP3 is 128 kbps. Used only to fill duration_millis on the Chat attachment. */
@@ -22,10 +72,14 @@ export const MAX_VOICE_BYTES = 8 * 1024 * 1024;
 
 const REQUEST_TIMEOUT_MS = 60_000;
 
-export const VOICE_EMPTY_MESSAGE = "Give !voice some text. Example: !voice hello from the group";
+export const VOICE_MENU_MESSAGE = [
+  "Pick a voice, then your line:",
+  ...VOICE_PERSONAS.map(
+    (persona, index) =>
+      `${index + 1}. ${persona.label} — !voice ${persona.menuAlias} <text>`,
+  ),
+].join("\n");
 export const VOICE_TOO_LONG_MESSAGE = `That text is too long to speak here. Keep it under ${VOICE_MAX_CHARS} characters.`;
-export const VOICE_UNKNOWN_MESSAGE =
-  "Unknown voice. Use eve, ara, rex, sal, or leo. Example: !voice ara hello";
 export const VOICE_UNAVAILABLE_MESSAGE = "Voice needs XAI_API_KEY.";
 export const VOICE_FAILED_MESSAGE = "Voice synthesis failed. Try again later.";
 export const VOICE_TOO_LARGE_MESSAGE = "That audio is too large to post in chat.";
@@ -34,7 +88,7 @@ export const VOICE_CHAT_REQUIRED_MESSAGE =
 export const VOICE_ATTACH_FAILED_MESSAGE = "Couldn't post that voice note. Try again.";
 export const VOICE_MODERATED_MESSAGE = "That text was blocked by content moderation.";
 
-export type VoiceRejectReason = "empty" | "refused" | "too_long" | "unknown_voice";
+export type VoiceRejectReason = "menu" | "refused" | "too_long";
 
 export interface SpokenAudio {
   bytes: Uint8Array;
@@ -45,7 +99,6 @@ export interface SpokenAudio {
 }
 
 export interface VoiceGenerator {
-  readonly defaultVoice: VoiceId;
   readonly language: string;
   synthesize(text: string, voiceId: VoiceId): Promise<SpokenAudio>;
 }
@@ -60,14 +113,7 @@ export class VoiceError extends Error {
   }
 }
 
-const VOICE_SET = new Set<string>(VOICE_IDS);
 const LANGUAGE_RE = /^(?:auto|[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*)$/;
-
-export function normalizeVoiceId(value: string): VoiceId | undefined {
-  const folded = value.trim().toLowerCase();
-  if (!VOICE_SET.has(folded)) return undefined;
-  return folded as VoiceId;
-}
 
 /** BCP-47 tag or `auto`. The value is kept as written when it matches. */
 export function normalizeVoiceLanguage(value: string): string | undefined {
@@ -76,28 +122,55 @@ export function normalizeVoiceLanguage(value: string): string | undefined {
   return folded;
 }
 
+const PERSONA_BY_ALIAS = new Map<string, (typeof VOICE_PERSONAS)[number]>();
+for (const persona of VOICE_PERSONAS) {
+  for (const alias of persona.aliases) PERSONA_BY_ALIAS.set(alias, persona);
+}
+
 /**
- * `!voice <text>`, with an optional leading voice.
- * `!voice eve hello` and `!voice --voice=ara hello` select that voice.
- * A known voice id with no remaining text is an empty request.
+ * `!voice` with no persona shows the menu and does not pick a voice.
+ * `!voice sexy hello` / `!voice 1 hello` selects that persona.
+ * An unknown first token also shows the menu.
+ * Minor-related wording is refused before anything is sent to the API.
  */
 export function parseVoiceRequest(
   raw: string,
-  defaultVoice: VoiceId = DEFAULT_VOICE_ID,
-): { ok: true; voiceId: VoiceId; text: string } | { ok: false; reason: VoiceRejectReason } {
-  const selected = takeVoiceOverride(raw.trim(), defaultVoice);
-  if (selected.unknown) return { ok: false, reason: "unknown_voice" };
-  const text = selected.text.trim();
-  if (!text) return { ok: false, reason: "empty" };
-  if (containsBannedAgeTerm(text)) return { ok: false, reason: "refused" };
-  if (text.length > VOICE_MAX_CHARS) return { ok: false, reason: "too_long" };
-  return { ok: true, voiceId: selected.voiceId, text };
+):
+  | {
+      ok: true;
+      personaId: VoicePersonaId;
+      voiceId: VoiceId;
+      /** The user's line, before speech tags. */
+      text: string;
+      /** Text actually sent to TTS, with that persona's delivery tags. */
+      spoken: string;
+    }
+  | { ok: false; reason: VoiceRejectReason } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, reason: "menu" };
+  const lead = trimmed.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  const token = lead?.[1] ?? "";
+  const rest = (lead?.[2] ?? "").trim();
+  const persona = PERSONA_BY_ALIAS.get(token.toLowerCase());
+  if (!persona) {
+    if (containsBannedAgeTerm(trimmed)) return { ok: false, reason: "refused" };
+    return { ok: false, reason: "menu" };
+  }
+  if (!rest) return { ok: false, reason: "menu" };
+  if (containsBannedAgeTerm(rest)) return { ok: false, reason: "refused" };
+  if (rest.length > VOICE_MAX_CHARS) return { ok: false, reason: "too_long" };
+  return {
+    ok: true,
+    personaId: persona.id,
+    voiceId: persona.voiceId,
+    text: rest,
+    spoken: persona.deliver(rest),
+  };
 }
 
 export function voicePromptRejection(reason: VoiceRejectReason): string {
-  if (reason === "empty") return VOICE_EMPTY_MESSAGE;
+  if (reason === "menu") return VOICE_MENU_MESSAGE;
   if (reason === "too_long") return VOICE_TOO_LONG_MESSAGE;
-  if (reason === "unknown_voice") return VOICE_UNKNOWN_MESSAGE;
   return IMAGINE_REFUSED_MESSAGE;
 }
 
@@ -113,7 +186,6 @@ export function estimateMp3DurationMillis(byteLength: number): number {
 
 export function createVoiceClient(options: {
   apiKey: string;
-  voiceId?: string;
   language?: string;
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -122,18 +194,16 @@ export function createVoiceClient(options: {
   if (!apiKey) {
     throw new VoiceError("Voice client requires an API key", VOICE_UNAVAILABLE_MESSAGE);
   }
-  const defaultVoice = normalizeVoiceId(options.voiceId ?? DEFAULT_VOICE_ID) ?? DEFAULT_VOICE_ID;
   const language = normalizeVoiceLanguage(options.language ?? DEFAULT_VOICE_LANGUAGE) ?? DEFAULT_VOICE_LANGUAGE;
   const baseUrl = options.baseUrl ?? IMAGINE_API_BASE;
   const fetchImpl = options.fetchImpl ?? fetch;
 
   return {
-    defaultVoice,
     language,
     async synthesize(text: string, voiceId: VoiceId): Promise<SpokenAudio> {
       const spoken = text.trim();
       if (!spoken) {
-        throw new VoiceError("Voice request was empty", VOICE_EMPTY_MESSAGE);
+        throw new VoiceError("Voice request was empty", VOICE_MENU_MESSAGE);
       }
       let response: Response;
       try {
@@ -184,24 +254,6 @@ export function createVoiceClient(options: {
   };
 }
 
-function takeVoiceOverride(
-  trimmed: string,
-  defaultVoice: VoiceId,
-): { voiceId: VoiceId; text: string; unknown?: boolean } {
-  const flagged = trimmed.match(/^--voice(?:=|\s+)([A-Za-z0-9_-]+)(?:\s+([\s\S]*))?$/i);
-  if (flagged) {
-    const voiceId = normalizeVoiceId(flagged[1] ?? "");
-    if (!voiceId) return { voiceId: defaultVoice, text: "", unknown: true };
-    return { voiceId, text: flagged[2] ?? "" };
-  }
-  const lead = trimmed.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-  if (lead) {
-    const voiceId = normalizeVoiceId(lead[1] ?? "");
-    if (voiceId) return { voiceId, text: lead[2] ?? "" };
-  }
-  return { voiceId: defaultVoice, text: trimmed };
-}
-
 function voiceHttpError(status: number, text: string, spoken: string): VoiceError {
   const detail = safeDetail(text, spoken);
   const message = `Voice HTTP ${status}: ${detail}`;
@@ -218,6 +270,8 @@ function safeDetail(text: string, spoken: string): string {
   let detail = redactSecrets(text);
   const secret = spoken.trim();
   if (secret.length >= 8) detail = detail.split(secret).join("[text]");
+  const inner = secret.replace(/<[^>]+>/g, "").replace(/\[[a-z-]+\]/gi, "").trim();
+  if (inner.length >= 8 && inner !== secret) detail = detail.split(inner).join("[text]");
   return detail.slice(0, 300);
 }
 
