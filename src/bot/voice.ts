@@ -19,7 +19,8 @@ export type VoicePersonaId = "sexy" | "dude" | "scared" | "horny";
 /**
  * Named personas. `voiceId` is always a built-in xAI id.
  * ara is "warm and friendly", eve is "energetic and upbeat", rex is "confident and clear".
- * The three girl personas share ara and eve because sal and leo are the other male tones.
+ * Girl 1 and Girl 3 use ara. Girl 2 uses eve. sal and leo are the other male tones and are unused.
+ * Display labels are Girl 1, regular dude, Girl 2, and Girl 3. Older aliases still select the same voice.
  * Delivery uses documented speech tags only. It does not add words to the user's line.
  */
 export const VOICE_PERSONAS: readonly {
@@ -33,9 +34,9 @@ export const VOICE_PERSONAS: readonly {
 }[] = [
   {
     id: "sexy",
-    label: "sexy girl",
-    menuAlias: "sexy",
-    aliases: ["sexy", "sexygirl", "1"],
+    label: "Girl 1",
+    menuAlias: "girl1",
+    aliases: ["girl1", "1", "sexy", "sexygirl"],
     voiceId: "ara",
     deliver: (text) => `<whisper>${text}</whisper>`,
   },
@@ -49,17 +50,17 @@ export const VOICE_PERSONAS: readonly {
   },
   {
     id: "scared",
-    label: "scared girl",
-    menuAlias: "scared",
-    aliases: ["scared", "scaredgirl", "3"],
+    label: "Girl 2",
+    menuAlias: "girl2",
+    aliases: ["girl2", "3", "scared", "scaredgirl"],
     voiceId: "eve",
     deliver: (text) => `[breath] <whisper><higher-pitch>${text}</higher-pitch></whisper>`,
   },
   {
     id: "horny",
-    label: "really horny girl",
-    menuAlias: "horny",
-    aliases: ["horny", "hornygirl", "4"],
+    label: "Girl 3",
+    menuAlias: "girl3",
+    aliases: ["girl3", "4", "horny", "hornygirl"],
     voiceId: "ara",
     deliver: (text) => `<build-intensity>${text}</build-intensity>`,
   },
@@ -129,7 +130,7 @@ for (const persona of VOICE_PERSONAS) {
 
 /**
  * `!voice` with no persona shows the menu and does not pick a voice.
- * `!voice sexy hello` / `!voice 1 hello` selects that persona.
+ * `!voice girl1 hello` / `!voice 1 hello` selects that persona.
  * An unknown first token also shows the menu.
  * Minor-related wording is refused before anything is sent to the API.
  */

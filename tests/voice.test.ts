@@ -85,10 +85,11 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("sexy")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("teen portrait")).toEqual({ ok: false, reason: "refused" });
     expect(VOICE_MENU_MESSAGE).toMatch(/Pick a voice, then your line:/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/1\. sexy girl — !voice sexy <text>/);
+    expect(VOICE_MENU_MESSAGE).toMatch(/1\. Girl 1 — !voice girl1 <text>/);
     expect(VOICE_MENU_MESSAGE).toMatch(/2\. regular dude — !voice dude <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/3\. scared girl — !voice scared <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/4\. really horny girl — !voice horny <text>/);
+    expect(VOICE_MENU_MESSAGE).toMatch(/3\. Girl 2 — !voice girl2 <text>/);
+    expect(VOICE_MENU_MESSAGE).toMatch(/4\. Girl 3 — !voice girl3 <text>/);
+    expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared/i);
     expect(DEFAULT_VOICE_LANGUAGE).toBe("en");
   });
 
@@ -142,6 +143,7 @@ describe("voice request checks", () => {
       expect(horny.spoken).not.toMatch(/horny|nsfw|sexy/i);
     }
     expect(parseVoiceRequest("4 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
+    expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
     expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "horny" });
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
     expect(parseVoiceRequest(`sexy ${"a".repeat(VOICE_MAX_CHARS)}`).ok).toBe(true);
@@ -452,8 +454,11 @@ describe("!voice command", () => {
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!voice/);
-    expect(loaded.help).toMatch(/sexy girl/);
-    expect(loaded.help).toMatch(/really horny girl/);
+    expect(loaded.help).toMatch(/Girl 1/);
+    expect(loaded.help).toMatch(/Girl 2/);
+    expect(loaded.help).toMatch(/Girl 3/);
+    expect(loaded.help).toMatch(/regular dude/);
+    expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
   });
 
   it("posts the client error line and does not include the API payload", async () => {

@@ -282,7 +282,7 @@ Public:
 | `!ass` / `!booty` / `!booties` | One butt photo or clip from that same saved bank. Same switch, rate limit, mention, and reply as `!boobs`. No other caption |
 | `!imagine <prompt>` | One image from that prompt on grok.com/imagine (Chrome session). Stays on when `!boobs` is off. See [Imagine](#imagine) |
 | `!video <prompt>` | One short video from that prompt on grok.com/imagine. Takes a few minutes. See [Video](#video) |
-| `!voice` | Menu of four personas. `!voice sexy <text>` (or `1`, `dude` / `2`, `scared` / `3`, `horny` / `4`) speaks that line. See [Voice](#voice) |
+| `!voice` | Menu of four personas. `!voice girl1 <text>` (or `1`, `dude` / `2`, `girl2` / `3`, `girl3` / `4`) speaks that line. See [Voice](#voice) |
 | `!troll @user` | Roast that person in this chat until `!untroll @user` names the same person. A second `!troll @user` does not turn it off. See [Troll mode](#troll-mode) |
 | `!linkroast on` | Roast people who paste an X/Twitter status link in this chat until `!linkroast off`. One roast per person about every 45 seconds. See [Link roast](#link-roast) |
 | `!noor on` / `!noor off` | Noor alert for @noorrietje. Relays each new post with her status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. A photo post also attaches an Imagine troll remix. `!Noor ON` matches. See [Noor alert](#noor-alert) |
@@ -532,16 +532,16 @@ When the clip is ready, encrypted Chat uploads the mp4 the same way as a photo (
 
 ## Voice
 
-`!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice sexy hello there`, `!voice 1 hello there`, or `!voice dude what's up`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text.
+`!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice girl1 hello there`, `!voice 1 hello there`, or `!voice dude what's up`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text.
 
 | # | Persona | Aliases | Built-in `voice_id` | Delivery |
 | --- | --- | --- | --- | --- |
-| 1 | sexy girl | `sexy`, `sexygirl`, `1` | `ara` (warm and friendly) | `<whisper>` |
+| 1 | Girl 1 | `girl1`, `1` | `ara` (warm and friendly) | `<whisper>` |
 | 2 | regular dude | `dude`, `regular`, `guy`, `2` | `rex` (confident and clear) | the line as written |
-| 3 | scared girl | `scared`, `scaredgirl`, `3` | `eve` (energetic and upbeat) | `[breath]` plus `<whisper>` and `<higher-pitch>` |
-| 4 | really horny girl | `horny`, `hornygirl`, `4` | `ara` | `<build-intensity>` |
+| 3 | Girl 2 | `girl2`, `3` | `eve` (energetic and upbeat) | `[breath]` plus `<whisper>` and `<higher-pitch>` |
+| 4 | Girl 3 | `girl3`, `4` | `ara` | `<build-intensity>` |
 
-Those tags are xAI speech tags. They change delivery and do not add words to the line. `ara` is used for both girl personas that should sound warm; `eve` is the other female built-in in this set, used for the scared delivery. `rex` is the clear male voice. `sal` and `leo` are not used.
+Those tags are xAI speech tags. They change delivery and do not add words to the line. `ara` is Girl 1 and Girl 3. `eve` is Girl 2. `rex` is regular dude. `sal` and `leo` are not used. The `voice_id` values are unchanged.
 
 The bot waits for the clip and posts it in one reply that tags the requester and, in encrypted Chat, replies to the command. The audio caption is only that `@handle`. Synthesis is usually a few seconds, so there is no separate "Speaking…" line. It uses an xAI key (`XAI_API_KEY`, or the grok LLM key stack). With no key the bot says voice needs `XAI_API_KEY`. Browser Imagine does not move `!voice` off that API. It does not use image search, the adult-command switch, or the adult rate limit, and it stays available when `!boobs` is off.
 
