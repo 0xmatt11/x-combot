@@ -2,7 +2,8 @@ import { log } from "../log.js";
 import type { Store } from "../store.js";
 import type { DeleteHint, DeleteResult, DmEvent, OutboundImage, SendMessageResult } from "../types.js";
 import { logDecryptErrors } from "./decrypt-log.js";
-import { isChatGroupId } from "./ids.js";
+import { isChatGroupId, watermarkKey } from "./ids.js";
+import { groupIdsFromInboxPage } from "./listen.js";
 import type { ChatCipher, ConversationKeySet, SigningKeyEntry } from "./cipher.js";
 import { loadWasmModule } from "./wasm-engine.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
@@ -98,6 +99,20 @@ export class ChatService {
       meta: { conversation_key_events: input.keyEvents },
     };
     return this.decryptPages(input.conversationId, [normalizeChatPage(page)]);
+  }
+
+  /**
+   * One page of `GET /2/chat/conversations`, reduced to encrypted group ids.
+   * `supported` is false when this HTTP client has no inbox call.
+   */
+  async listInboxGroupIds(params: {
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<{ ids: string[]; nextToken?: string; supported: boolean }> {
+    if (!this.http.listConversations) return { ids: [], supported: false };
+    const page = await this.http.listConversations(params);
+    const parsed = groupIdsFromInboxPage(page);
+    return { ...parsed, supported: true };
   }
 
   async listHistory(params: {
@@ -376,7 +391,12 @@ export class ChatService {
     const signingKeys = this.currentSigningKeys();
     const result = this.cipher.decryptEvents(encoded, signingKeys.length > 0 ? signingKeys : undefined);
     this.rememberConversationKeys(conversationId, result.conversationKeys);
-    logDecryptErrors(conversationId, result.errors);
+    const messageFailed = raws.some(
+      (raw) => Boolean(raw.encoded_event && result.errors[raw.encoded_event]),
+    );
+    const firstSight =
+      messageFailed && this.store.getWatermark(watermarkKey(conversationId)) === undefined;
+    logDecryptErrors(conversationId, result.errors, Date.now(), { firstSight });
     if (membersReady) {
       const failed = failedDecryptBlobs(encoded, result.errors);
       for (const keyEvent of freshKeys) {

@@ -10,8 +10,8 @@ Classic group DMs only need [sections 1–3](#1-x-developer-app). For an encrypt
 
 1. **OAuth as the bot account** — `npm run oauth` while logged into the dedicated bot, not the human owner. `BOT_USER_ID` is that OAuth'd account; `BOT_OWNER_ID` is the human owner and is always an admin. See [Install and authorize](#2-install-and-authorize-the-bot-account).
 2. **Identity, once, as that same account.** `npm run chat:register -- --confirm` mints a new key. If this account already has an X Chat identity in Juicebox, do not mint a second one — set `CHAT_PIN` for a single start instead. That start writes `data/chat-keys.json`. Later starts load the file and do not need `CHAT_PIN`. See [section 4](#4-run-against-an-encrypted-x-chat-group).
-3. **`CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID`** — your group id (`g` plus digits).
-4. **`npm run chat:rotate -- gYOUR_GROUP_ID --confirm`** only if the bot joined before it registered. Rotate aborts when any current member has no public key; see [section 4](#4-run-against-an-encrypted-x-chat-group).
+3. **Leave `CHAT_CONVERSATION_IDS` unset.** The bot then moderates every encrypted group (`g…`) the account is in, including groups it is added to later. Set the variable only to limit the bot to those ids. See [section 4](#4-run-against-an-encrypted-x-chat-group).
+4. **`npm run chat:rotate -- gYOUR_GROUP_ID --confirm`** only if the bot joined that group before it registered. Rotate aborts when any current member has no public key; see [section 4](#4-run-against-an-encrypted-x-chat-group).
 5. **`npm start`**
 6. **Send `!help`** in the group. The first poll only records a watermark and does not replay messages already in the thread. For back-to-back commands in a busy group, turn on [Activity push](#activity-push-for-chat) so the bot is not waiting on the poll interval.
 
@@ -49,13 +49,13 @@ These are different products. A URL like `https://x.com/i/chat/gYOUR_GROUP_ID` i
 | Delete | `DELETE /2/dm_events/{id}` (own events only) | `POST /2/chat/conversations/{id}/messages/delete` (signed; delete-for-all) |
 | Keys | none | `POST /2/users/{id}/public_keys`, conversation keys from `KeyChange` events |
 
-`GET /2/dm_events` never returns Chat messages. The bot only polls Chat for ids listed in `CHAT_CONVERSATION_IDS`. Crypto is [chat-xdk](https://github.com/xdevplatform/chat-xdk) (`@xdevplatform/chat-xdk`, the WASM engine shipped in that package). The public `createChat()` wrapper does not expose `exportKeys` (browser-safe). After Juicebox `unlock()`, this process copies the bytes the wrapper imports into the WASM `Chat` class and calls that class's `exportKeys()`, then writes `data/chat-keys.json` (mode `0600`). The next start loads the file with `importKeys` and does not need `CHAT_PIN`.
+`GET /2/dm_events` never returns Chat messages. With a Chat identity on disk (or `CHAT_PIN`) and no allowlist, the bot moderates every encrypted group it is a member of. It learns `g…` ids from Activity (`chat.received`, and join or member events when those arrive) and from `GET /2/chat/conversations`. Set `CHAT_CONVERSATION_IDS` only to limit the bot to those groups. Crypto is [chat-xdk](https://github.com/xdevplatform/chat-xdk) (`@xdevplatform/chat-xdk`, the WASM engine shipped in that package). The public `createChat()` wrapper does not expose `exportKeys` (browser-safe). After Juicebox `unlock()`, this process copies the bytes the wrapper imports into the WASM `Chat` class and calls that class's `exportKeys()`, then writes `data/chat-keys.json` (mode `0600`). The next start loads the file with `importKeys` and does not need `CHAT_PIN`.
 
 Chat events are decrypted with `decryptEvents`, which must be given both `data[].encoded_event` and `meta.conversation_key_events`. Replies are `encryptMessage` then POST. Chat polling uses the same 429 / 402 backoff as the DM poller (see **Rate limits and credits** above).
 
 **Watermark.** Each Chat conversation stores a cursor (`chat_events:<id>`). The first poll records the newest event id and does not replay commands. Later polls decrypt only ciphertext newer than that cursor, and the cursor moves only through events that decrypted. A failed decrypt stays in place and is retried — that is how a KeyChange the process could not verify yet still gets another chance once signing keys load. Decrypt failures are logged at most once a minute per conversation. History that can never be opened (a conversation key wrapped to a different device) holds the cursor until you rotate onto the key this process holds; it is not skipped.
 
-**Polling volume.** With only `CHAT_CONVERSATION_IDS` set, classic `GET /2/dm_events` is not polled (`DM_POLL=true` turns it back on). Quiet Chat polls stretch from `poll.interval_ms` up to `poll.chat_idle_max_ms` (default 120s) and snap back when a new event arrives. Activity push (below) is what makes back-to-back commands realtime; the poll stays as catch-up.
+**Polling volume.** While encrypted Chat is active, classic `GET /2/dm_events` is not polled (`DM_POLL=true` turns it back on). A process with no Chat identity and no `CHAT_CONVERSATION_IDS` still polls classic group DMs. Quiet Chat polls stretch from `poll.interval_ms` up to `poll.chat_idle_max_ms` (default 120s) and snap back when a new event arrives. Inbox discovery is a few `GET /2/chat/conversations` pages at startup, then one page on a slow refresh (about a minute without Activity, ten minutes with it). A 429 or 402 on that list waits out the same backoff and does not walk the rest of the inbox in that tick. Once many groups are known, each catch-up tick reads a handful of conversations instead of every group at once. Activity push (below) is what makes back-to-back commands realtime; the poll stays as catch-up.
 
 There is still **no documented remove-member endpoint** on Chat (only add members, which rotates the key). `!kick` stays a local soft-mute plus an admin DM.
 
@@ -324,13 +324,29 @@ The key file holds unencrypted private key bytes. It is gitignored (`data/` and 
 
 If both the key file and `CHAT_PIN` are set, a file whose public key matches one registered for this user wins. A file that matches no registered key is replaced by the Juicebox unlock. `CHAT_KEYS_PATH` moves the file (default `data/chat-keys.json`).
 
-2. Put **your** group id in `.env` (placeholder below — do not reuse someone else's id):
+2. Leave `CHAT_CONVERSATION_IDS` unset. After `npm start`, dropping the bot account into an encrypted group is enough for it to start moderating there. No edit and no restart per group.
+
+The bot accepts a `g…` id from either path:
+
+- **Activity** (realtime). `chat.received` for a new group is decrypted and handled immediately. Join and member events (`chat.conversation.join`, `chat.conversation.member_added`, and the same family) register the group for the catch-up poll when they show up on the stream. `chat.sent` is ignored. 1:1 Chat ids are ignored.
+- **Inbox list** (catch-up). `GET /2/chat/conversations` supplies groups the account is already in, including ones that are quiet. The first pass reads a few pages. Later refreshes read one page so a large inbox is not walked on every tick. If that endpoint is missing or returns 404, Activity is the discovery path. A 429/402 backs off and does not also pull every group's event page in that same tick.
+
+The first sight of a conversation **seeds a watermark and does not replay history**. A command that arrived only as an Activity `chat.received` is handled live, and that event becomes the watermark so older messages stay unread. A group learned only from the inbox list does not answer messages that were already in the thread; send `!help` after the bot has seen the group. Restarting does not replay either: known groups are remembered from `chat_events:<id>` watermarks.
+
+**Key rotation.** Auto-listen still tries to decrypt. If this account was added to the group **before** its public key was registered, decrypt fails until a new conversation key is wrapped to this process. The log names the group and `npm run chat:rotate -- <g…id> --confirm`. Rotate does not run by itself.
+
+Optional limits:
 
 ```bash
-CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID
+# Only these groups. Unset means every encrypted group this account is in.
+# CHAT_CONVERSATION_IDS=gYOUR_GROUP_ID
+# Skip these groups in either mode.
+# CHAT_CONVERSATION_DENY_IDS=gOTHER_GROUP_ID
+# all | allowlist | off. Unset follows the rules above.
+# CHAT_LISTEN=all
 ```
 
-Ids must look like `g` plus digits. A classic group-DM snowflake is rejected at startup so it is not sent to `/2/chat`.
+Ids must look like `g` plus digits. A classic group-DM snowflake is rejected at startup so it is not sent to `/2/chat`. `CHAT_LISTEN=off` leaves Chat off even when a key file exists. Classic group DMs stay on `DM_POLL` and are not picked up by this discovery.
 
 3. The bot must be a member, and the latest conversation key must be wrapped to the public key you just registered. If the account was added **before** registration, it cannot decrypt. Rotate so a new key is wrapped for every current member, including that bot:
 
@@ -350,7 +366,7 @@ npm run chat:rotate -- gYOUR_GROUP_ID --confirm --force
 
 4. `npm start`. The first Chat poll seeds a watermark and does **not** replay messages already in the group. Send `!help` again after startup. Later polls move that cursor only past events that decrypted. A message that fails to decrypt is retried, which matters when the failure is a KeyChange the process could not verify yet.
 
-`CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_POLL_IDLE_MAX_MS` caps how far a quiet Chat poll stretches (default 120s). `DM_POLL=true` also polls classic group DMs; leave it unset to skip `GET /2/dm_events` when Chat ids are configured.
+`CHAT_POLL_INTERVAL_MS` overrides the shared poll interval for Chat only. `CHAT_POLL_IDLE_MAX_MS` caps how far a quiet Chat poll stretches (default 120s). `DM_POLL=true` also polls classic group DMs. Leave it unset to skip `GET /2/dm_events` while encrypted Chat is active (an allowlist, `CHAT_LISTEN=all`, or a Chat identity with no allowlist). A process that has neither a Chat identity nor `CHAT_CONVERSATION_IDS` still polls classic group DMs.
 
 YAML still defaults `poll.interval_ms` to **12000**. On a busy group that interval, together with classic DM polling, is what produces long 429 backoffs. The running bot should set `POLL_INTERVAL_MS=30000` and `CHAT_POLL_INTERVAL_MS=30000` until Activity push is on. With Activity enabled, the catch-up poll defaults to 5 minutes (`activity.poll_interval_ms`).
 
@@ -383,7 +399,7 @@ On startup the bot lists `GET /2/activity/subscriptions` with the **app-only** b
 }
 ```
 
-`ACTIVITY_BEARER_TOKEN` is required for list and for the stream. If it is unset, those calls are not attempted. It then holds `GET /2/activity/stream` with that same app-only bearer. The user access token is forbidden on the stream. Payloads are decrypted with the same `decryptEvents` path as the poller (`encoded_event` plus any `conversation_key_change_event`). Only ids in `CHAT_CONVERSATION_IDS` are moderated. `chat.sent` is ignored. The stream does not replay history.
+`ACTIVITY_BEARER_TOKEN` is required for list and for the stream. If it is unset, those calls are not attempted. It then holds `GET /2/activity/stream` with that same app-only bearer. The user access token is forbidden on the stream. Payloads are decrypted with the same `decryptEvents` path as the poller (`encoded_event` plus any `conversation_key_change_event`). Every encrypted group is moderated unless `CHAT_CONVERSATION_IDS` or `CHAT_CONVERSATION_DENY_IDS` says otherwise. A `chat.received` for a new `g…` id starts moderation immediately and seeds the watermark at that event when decrypt succeeds. `chat.sent` is ignored. The stream does not replay history.
 
 **Webhook**
 

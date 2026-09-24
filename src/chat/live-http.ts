@@ -14,5 +14,6 @@ export function chatHttpFromLive(client: LiveXClient): ChatHttp {
     addUserPublicKey: (userId, body) => client.addUserPublicKey(userId, body),
     uploadChatMedia: (conversationId, ciphertext) =>
       client.uploadChatMedia(conversationId, ciphertext),
+    listConversations: (params) => client.listChatConversations(params),
   };
 }

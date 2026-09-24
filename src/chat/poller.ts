@@ -2,36 +2,107 @@ import { log } from "../log.js";
 import { nextPollDelayMs } from "../poller.js";
 import type { Store } from "../store.js";
 import { ModerationEngine } from "../bot/engine.js";
+import { watermarkKey } from "./ids.js";
+import { acceptsChatGroup, initialPollIds, type ChatListenPolicy, chatListenPolicy } from "./listen.js";
 import type { ChatService } from "./service.js";
+
+/** Backup inbox refresh while Activity is delivering new groups in realtime. */
+export const CHAT_DISCOVERY_INTERVAL_MS = 10 * 60 * 1000;
+/** Inbox refresh when Activity push is off, so a new group is not invisible for ten minutes. */
+export const CHAT_DISCOVERY_INTERVAL_WITHOUT_ACTIVITY_MS = 60 * 1000;
+/** First pass pages. Later refreshes fetch one page (recently updated conversations). */
+export const CHAT_DISCOVERY_MAX_PAGES = 3;
+export const CHAT_DISCOVERY_PAGE_SIZE = 50;
+/**
+ * Event reads per tick once more groups are known than this.
+ * A small allowlist is still polled in full every tick.
+ */
+export const CHAT_POLLS_PER_TICK = 8;
+
+export interface ChatPollerOptions {
+  policy?: ChatListenPolicy;
+  discoveryIntervalMs?: number;
+  discoveryMaxPages?: number;
+  maxPollsPerTick?: number;
+}
 
 export class ChatPoller {
   private stopped = false;
   private timer: NodeJS.Timeout | undefined;
   private idleMs: number;
+  private readonly policy: ChatListenPolicy;
+  private readonly ids = new Set<string>();
+  private readonly pending = new Set<string>();
+  private cursor = 0;
+  private readonly discoveryIntervalMs: number;
+  private readonly discoveryMaxPages: number;
+  private readonly maxPollsPerTick: number;
+  private nextDiscoveryAt = 0;
+  private inboxListed = false;
+  private discoveryDisabled = false;
 
   constructor(
     private readonly chat: ChatService,
     private readonly store: Store,
     private readonly engine: ModerationEngine,
     private readonly intervalMs: number,
-    private readonly conversationIds: string[],
+    conversationIds: readonly string[],
     private readonly maxResults: number,
     private readonly idleMaxMs = intervalMs,
+    options: ChatPollerOptions = {},
   ) {
     this.idleMs = intervalMs;
+    this.policy =
+      options.policy ?? chatListenPolicy({ mode: "allowlist", allowIds: conversationIds });
+    for (const id of initialPollIds(this.policy, conversationIds)) this.ids.add(id);
+    this.discoveryIntervalMs = options.discoveryIntervalMs ?? CHAT_DISCOVERY_INTERVAL_MS;
+    this.discoveryMaxPages = options.discoveryMaxPages ?? CHAT_DISCOVERY_MAX_PAGES;
+    this.maxPollsPerTick = options.maxPollsPerTick ?? CHAT_POLLS_PER_TICK;
+  }
+
+  get conversationIds(): readonly string[] {
+    return [...this.ids];
   }
 
   start(): void {
+    const label =
+      this.policy.mode === "all"
+        ? this.ids.size > 0
+          ? `${this.ids.size} known encrypted group(s), plus groups discovered from the inbox and Activity`
+          : "encrypted groups discovered from the inbox and Activity"
+        : [...this.ids].join(", ") || "(none)";
     log.info(
-      `Polling GET /2/chat/conversations/:id/events for ${this.conversationIds.join(", ")} every ${this.intervalMs}ms` +
+      `Polling GET /2/chat/conversations/:id/events for ${label} every ${this.intervalMs}ms` +
         (this.idleMaxMs > this.intervalMs ? ` (idle up to ${this.idleMaxMs}ms)` : ""),
     );
+    if (this.policy.mode === "all") {
+      log.info(
+        "New encrypted Chat groups are moderated without CHAT_CONVERSATION_IDS. The first sight of a group seeds a watermark and does not replay history. If decrypt fails because this account joined before its public key was registered, run `npm run chat:rotate -- <g…id> --confirm`.",
+      );
+    }
     void this.tick();
   }
 
   stop(): void {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+  }
+
+  /**
+   * Activity saw a group. Track it for catch-up polls.
+   * `eventId` seeds the watermark when decrypt already succeeded, so older
+   * history is not replayed and anything newer can still be polled.
+   */
+  observeFromActivity(conversationId: string, eventId?: string): void {
+    if (!acceptsChatGroup(this.policy, conversationId)) return;
+    this.noteConversation(conversationId);
+    if (!eventId) return;
+    const key = watermarkKey(conversationId);
+    if (this.store.getWatermark(key)) return;
+    this.store.setWatermark(key, eventId);
+    log.info(
+      `Seeded Chat watermark for ${conversationId} at ${eventId} from Activity; older messages will not be replayed.`,
+    );
   }
 
   async tick(): Promise<void> {
@@ -65,35 +136,139 @@ export class ChatPoller {
   }
 
   async pollOnce(): Promise<{ sawNew: boolean; seeded: boolean }> {
+    await this.maybeDiscover();
     let sawNew = false;
     let seeded = false;
-    for (const conversationId of this.conversationIds) {
-      const key = watermarkKey(conversationId);
-      const watermark = this.store.getWatermark(key);
-      const pulled = await this.chat.pullNew(conversationId, watermark, this.maxResults);
-      if (!watermark) {
-        this.store.setWatermark(key, pulled.newestId ?? "empty");
-        seeded = true;
-        log.info(
-          pulled.newestId
-            ? `Seeded Chat watermark for ${conversationId} at ${pulled.newestId}; historical messages will not be replayed. Send !help again after startup.`
-            : `Seeded empty Chat watermark for ${conversationId}.`,
-        );
-        continue;
-      }
+    for (const conversationId of this.idsForThisTick()) {
       try {
-        if (pulled.events.length > 0) sawNew = true;
-        for (const event of pulled.events) {
-          await this.engine.processEvent(event);
-        }
-      } finally {
-        // Move only through events that decrypted. A failed decrypt stays at
-        // or before the cursor so the next poll can retry it (keys may verify
-        // later). A reply throw still advances when decrypt itself succeeded.
-        if (pulled.watermarkId) this.store.setWatermark(key, pulled.watermarkId);
+        const outcome = await this.pollConversation(conversationId);
+        if (outcome.sawNew) sawNew = true;
+        if (outcome.seeded) seeded = true;
+      } catch (error) {
+        if (isApiBackoff(error)) throw error;
+        log.error(`Chat poll failed for ${conversationId}`, error);
       }
     }
     return { sawNew, seeded };
+  }
+
+  private noteConversation(conversationId: string): boolean {
+    if (!acceptsChatGroup(this.policy, conversationId)) return false;
+    if (this.ids.has(conversationId)) return false;
+    this.ids.add(conversationId);
+    this.pending.add(conversationId);
+    log.info(
+      `Moderating encrypted Chat group ${conversationId}. First sight seeds a watermark and does not replay older messages.`,
+    );
+    return true;
+  }
+
+  private idsForThisTick(): string[] {
+    if (this.policy.mode === "allowlist" || this.ids.size <= this.maxPollsPerTick) {
+      this.pending.clear();
+      return [...this.ids];
+    }
+    const pending = [...this.pending];
+    this.pending.clear();
+    const fresh = pending.slice(0, this.maxPollsPerTick);
+    for (const id of pending.slice(this.maxPollsPerTick)) this.pending.add(id);
+    const rest = [...this.ids].filter((id) => !fresh.includes(id) && !this.pending.has(id));
+    const room = this.maxPollsPerTick - fresh.length;
+    if (room <= 0 || rest.length === 0) return fresh;
+    const batch = [...fresh];
+    const count = Math.min(room, rest.length);
+    for (let i = 0; i < count; i += 1) {
+      const id = rest[(this.cursor + i) % rest.length];
+      if (id) batch.push(id);
+    }
+    this.cursor = rest.length === 0 ? 0 : (this.cursor + count) % rest.length;
+    return batch;
+  }
+
+  private async maybeDiscover(): Promise<void> {
+    if (this.policy.mode !== "all" || this.discoveryDisabled) return;
+    if (Date.now() < this.nextDiscoveryAt) return;
+    const pageBudget = this.inboxListed ? 1 : this.discoveryMaxPages;
+    let token: string | undefined;
+    let added = 0;
+    try {
+      for (let page = 0; page < pageBudget; page += 1) {
+        const listed = await this.chat.listInboxGroupIds({
+          maxResults: CHAT_DISCOVERY_PAGE_SIZE,
+          paginationToken: token,
+        });
+        if (!listed.supported) {
+          this.discoveryDisabled = true;
+          log.info(
+            "This Chat client cannot list the inbox. New encrypted groups are picked up from Activity and from groups already watermarked.",
+          );
+          return;
+        }
+        for (const id of listed.ids) {
+          if (this.noteConversation(id)) added += 1;
+        }
+        token = listed.nextToken;
+        if (!token) break;
+      }
+      const capped = !this.inboxListed && Boolean(token);
+      this.inboxListed = true;
+      this.nextDiscoveryAt = Date.now() + this.discoveryIntervalMs;
+      if (added > 0) {
+        log.info(`Chat inbox discovery added ${added} encrypted group(s).`);
+      }
+      if (capped) {
+        log.info(
+          `Chat inbox discovery stopped after ${pageBudget} page(s) so the inbox list is not walked in one burst. Further groups arrive from Activity or a later refresh.`,
+        );
+      }
+    } catch (error) {
+      const status = errorStatus(error);
+      if (status === 404 || status === 410) {
+        this.discoveryDisabled = true;
+        log.warn(
+          "GET /2/chat/conversations is unavailable. New encrypted groups are picked up from Activity chat.received instead.",
+        );
+        return;
+      }
+      const wait = Math.max(this.discoveryIntervalMs, nextPollDelayMs(this.discoveryIntervalMs, error));
+      this.nextDiscoveryAt = Date.now() + wait;
+      if (isApiBackoff(error)) {
+        log.warn(`Chat inbox discovery was rate limited. Next attempt in ${wait}ms.`, error);
+        throw error;
+      }
+      log.warn(
+        `Chat inbox discovery failed; groups already known are still polled. Next inbox attempt in ${wait}ms.`,
+        error,
+      );
+    }
+  }
+
+  private async pollConversation(
+    conversationId: string,
+  ): Promise<{ sawNew: boolean; seeded: boolean }> {
+    const key = watermarkKey(conversationId);
+    const watermark = this.store.getWatermark(key);
+    const pulled = await this.chat.pullNew(conversationId, watermark, this.maxResults);
+    if (!watermark) {
+      this.store.setWatermark(key, pulled.newestId ?? "empty");
+      log.info(
+        pulled.newestId
+          ? `Seeded Chat watermark for ${conversationId} at ${pulled.newestId}; historical messages will not be replayed. Send !help again after startup.`
+          : `Seeded empty Chat watermark for ${conversationId}.`,
+      );
+      return { sawNew: false, seeded: true };
+    }
+    try {
+      for (const event of pulled.events) {
+        await this.engine.processEvent(event);
+      }
+      return { sawNew: pulled.events.length > 0, seeded: false };
+    } finally {
+      // Move only through events that decrypted. A failed decrypt stays at
+      // or before the cursor so the next poll can retry it (keys may verify
+      // later). A reply throw still advances when decrypt itself succeeded.
+      if (pulled.watermarkId) this.store.setWatermark(key, pulled.watermarkId);
+    }
   }
 }
 
@@ -108,6 +283,15 @@ export function nextChatIdleDelayMs(currentMs: number, intervalMs: number, idleM
   return Math.min(cap, grown);
 }
 
-export function watermarkKey(conversationId: string): string {
-  return `chat_events:${conversationId}`;
+export { watermarkKey } from "./ids.js";
+
+function isApiBackoff(error: unknown): boolean {
+  const status = errorStatus(error);
+  return status === 429 || status === 402;
+}
+
+function errorStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
 }

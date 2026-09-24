@@ -6,9 +6,11 @@ import {
   crcResponseToken,
   hasChatReceivedSubscription,
   parseActivityChat,
+  parseActivityGroupSignal,
   signWebhookBody,
   takeActivityLines,
 } from "../src/chat/activity.js";
+import { chatListenPolicy } from "../src/chat/listen.js";
 import { readActivityBody } from "../src/chat/activity-stream.js";
 import {
   ensureChatActivitySubscription,
@@ -221,7 +223,7 @@ describe("Activity intake", () => {
     const service = new ChatService(new FakeHttp(), cipher, store);
     const dm = new MockXClient({ id: "bot-1", username: "miladybot" });
     const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
-    const intake = new ChatActivityIntake(service, engine, [GROUP]);
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
 
     await intake.handle(envelope());
     expect(cipher.batches[0]?.[0]).toBe("key-new");
@@ -234,6 +236,121 @@ describe("Activity intake", () => {
     const other = envelope({ conversation_id: "g999" });
     await intake.handle(other);
     expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+  });
+
+  it("moderates every encrypted group when no allowlist is set", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const dm = new MockXClient({ id: "bot-1", username: "miladybot" });
+    const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
+    const seen: Array<{ id: string; eventId: string | undefined }> = [];
+    const intake = new ChatActivityIntake(
+      service,
+      engine,
+      chatListenPolicy({ mode: "all" }),
+      (id, eventId) => seen.push({ id, eventId }),
+    );
+
+    await intake.handle(envelope({ conversation_id: "g999" }));
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(seen).toEqual([{ id: "g999", eventId: "evt-2" }]);
+    expect(
+      parseActivityChat(envelope({ conversation_id: "111-222" })),
+    ).toBeUndefined();
+  });
+
+  it("skips a denied group even when listen mode is all", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+    );
+    const intake = new ChatActivityIntake(
+      service,
+      engine,
+      chatListenPolicy({ mode: "all", denyIds: [GROUP] }),
+    );
+
+    await intake.handle(envelope());
+    expect(cipher.texts).toEqual([]);
+  });
+
+  it("registers a join signal for polling without decrypting it", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const cipher = new FakeCipher();
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+    );
+    const seen: string[] = [];
+    const intake = new ChatActivityIntake(
+      service,
+      engine,
+      chatListenPolicy({ mode: "all" }),
+      (id) => seen.push(id),
+    );
+    const body = {
+      data: {
+        event_type: "chat.conversation.join",
+        payload: { conversation_id: "xchat:g999" },
+      },
+    };
+    expect(parseActivityGroupSignal(body)).toEqual({
+      eventType: "chat.conversation.join",
+      conversationId: "g999",
+    });
+    expect(
+      parseActivityGroupSignal({
+        data: { event_type: "chat.conversation.join", payload: { conversation_id: "111-222" } },
+      }),
+    ).toBeUndefined();
+
+    await intake.handle(body);
+    expect(seen).toEqual(["g999"]);
+    expect(cipher.batches).toEqual([]);
+  });
+
+  it("logs a rotate hint when a newly seen group fails to decrypt", async () => {
+    resetDecryptWarningWindow();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = new Store(":memory:");
+    stores.push(store);
+    const cipher = new FakeCipher();
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+    );
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ mode: "all" }));
+    await intake.handle(
+      envelope({ encoded_event: "missing-key", conversation_key_change_event: undefined }),
+    );
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((line) => line.includes("chat:rotate") && line.includes(GROUP))).toBe(true);
+    warn.mockRestore();
+    resetDecryptWarningWindow();
   });
 
   it("reads a stream body of two events", async () => {

@@ -116,7 +116,7 @@ export async function openChatCipher(options: OpenChatCipherOptions): Promise<Ch
   }
 
   throw new Error(
-    "Encrypted X Chat is configured (CHAT_CONVERSATION_IDS) but this bot has no identity keys. Run `npm run chat:register -- --confirm` once, while logged in as the bot account. That writes data/chat-keys.json (mode 0600). Or set CHAT_PIN once to unlock a Juicebox-stored identity (`npm install juicebox-sdk`); a successful unlock writes the same key file and later starts do not need CHAT_PIN.",
+    "Encrypted X Chat is on, but this bot has no identity keys. Run `npm run chat:register -- --confirm` once, while logged in as the bot account. That writes data/chat-keys.json (mode 0600). Or set CHAT_PIN once to unlock a Juicebox-stored identity (`npm install juicebox-sdk`); a successful unlock writes the same key file and later starts do not need CHAT_PIN.",
   );
 }
 

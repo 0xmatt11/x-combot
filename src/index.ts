@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { loadDefaults, normalizeBoobsConfig, normalizeXpConfig } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
@@ -14,7 +15,13 @@ import {
   requireActivityAppBearer,
 } from "./chat/activity-subscribe.js";
 import { startActivityWebhook, type ActivityWebhook } from "./chat/activity-webhook.js";
-import { ChatPoller } from "./chat/poller.js";
+import { CHAT_WATERMARK_PREFIX, isChatGroupId } from "./chat/ids.js";
+import { resolveChatListen, type ChatListenPolicy } from "./chat/listen.js";
+import {
+  CHAT_DISCOVERY_INTERVAL_MS,
+  CHAT_DISCOVERY_INTERVAL_WITHOUT_ACTIVITY_MS,
+  ChatPoller,
+} from "./chat/poller.js";
 import { openChatCipher } from "./chat/identity.js";
 import { chatHttpFromLive } from "./chat/live-http.js";
 import { ChatService } from "./chat/service.js";
@@ -85,7 +92,16 @@ async function main(): Promise<void> {
     );
   }
   const botUserId = env.botUserId ?? me.id;
-  const chatService = await openChatService(env, client, store, botUserId);
+  const identityPresent = Boolean(env.chatPin) || fs.existsSync(env.chatKeysPath);
+  let listen = resolveChatListen({
+    chatListen: env.chatListen,
+    allowIds: env.chatConversationIds,
+    denyIds: env.chatConversationDenyIds,
+    chatIdentityPresent: identityPresent,
+    explicitIdentity: Boolean(env.chatPin),
+  });
+  const chatService = await openChatService(env, client, store, botUserId, listen);
+  if (!chatService) listen = { ...listen, enabled: false };
   const xClient: XClient = chatService ? new RoutedXClient(client, chatService) : client;
 
   const engine = new ModerationEngine(
@@ -116,7 +132,7 @@ async function main(): Promise<void> {
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;
   const activity = resolveActivitySettings(env, defaults);
   const dmPoll = shouldPollClassicDms({
-    chatConversationCount: env.chatConversationIds.length,
+    chatEnabled: listen.enabled,
     dmPoll: env.dmPoll,
   });
   const poller = new Poller(client, store, engine, intervalMs, defaults.poll.max_results);
@@ -126,7 +142,7 @@ async function main(): Promise<void> {
     log.info("Skipping GET /2/dm_events because DM_POLL=false.");
   } else {
     log.info(
-      "Skipping GET /2/dm_events because CHAT_CONVERSATION_IDS is set. Set DM_POLL=true to also moderate classic group DMs.",
+      "Skipping GET /2/dm_events. Classic group DMs stay off unless DM_POLL=true. Encrypted Chat is moderated separately.",
     );
   }
 
@@ -137,15 +153,24 @@ async function main(): Promise<void> {
   const idleMaxMs = activityOn
     ? chatInterval
     : (env.chatPollIdleMaxMs ?? defaults.poll.chat_idle_max_ms ?? chatInterval);
+  const remembered = store
+    .listWatermarkKeys(CHAT_WATERMARK_PREFIX)
+    .filter((id) => isChatGroupId(id));
   const chatPoller = chatService
     ? new ChatPoller(
         chatService,
         store,
         engine,
         chatInterval,
-        env.chatConversationIds,
+        remembered,
         defaults.poll.max_results,
         idleMaxMs,
+        {
+          policy: listen.policy,
+          discoveryIntervalMs: activityOn
+            ? CHAT_DISCOVERY_INTERVAL_MS
+            : CHAT_DISCOVERY_INTERVAL_WITHOUT_ACTIVITY_MS,
+        },
       )
     : undefined;
   chatPoller?.start();
@@ -164,11 +189,14 @@ async function main(): Promise<void> {
         webhookPort: activity.webhookPort,
         webhookPath: activity.webhookPath,
         webhookPublicUrl: activity.webhookPublicUrl,
-        conversationIds: env.chatConversationIds,
+        policy: listen.policy,
+        onSeen: (conversationId, eventId) => chatPoller?.observeFromActivity(conversationId, eventId),
       })
     : undefined;
   if (activity.enabled && !chatService) {
-    log.warn("ACTIVITY_ENABLED is set but CHAT_CONVERSATION_IDS is empty, so Activity push was not started.");
+    log.warn(
+      "ACTIVITY_ENABLED is set but encrypted Chat is not active (no usable Chat identity and no CHAT_CONVERSATION_IDS), so Activity push was not started.",
+    );
   }
 
   const shutdown = () => {
@@ -189,16 +217,35 @@ async function openChatService(
   client: LiveXClient,
   store: Store,
   botUserId: string,
+  listen: ReturnType<typeof resolveChatListen>,
 ): Promise<ChatService | undefined> {
-  if (env.chatConversationIds.length === 0) return undefined;
-  const cipher = await openChatCipher({
-    userId: botUserId,
-    keysPath: env.chatKeysPath,
-    pin: env.chatPin,
-    loadPublicKeys: () => client.getUserPublicKeys(botUserId),
-  });
-  log.info(`X Chat groups: ${env.chatConversationIds.join(", ")}`);
-  return new ChatService(chatHttpFromLive(client), cipher, store);
+  if (!listen.enabled) return undefined;
+  try {
+    const cipher = await openChatCipher({
+      userId: botUserId,
+      keysPath: env.chatKeysPath,
+      pin: env.chatPin,
+      loadPublicKeys: () => client.getUserPublicKeys(botUserId),
+    });
+    if (listen.policy.mode === "all") {
+      const denied = [...listen.policy.deny];
+      log.info(
+        denied.length > 0
+          ? `X Chat listen mode: every encrypted group this account is in, except ${denied.join(", ")}.`
+          : "X Chat listen mode: every encrypted group this account is in.",
+      );
+    } else {
+      log.info(`X Chat groups (allowlist): ${[...listen.policy.allow].join(", ")}`);
+    }
+    return new ChatService(chatHttpFromLive(client), cipher, store);
+  } catch (error) {
+    if (!listen.implicitAll) throw error;
+    log.error(
+      "Chat identity could not be opened, so encrypted groups will not be moderated. Classic group DM polling stays on the default. Fix the key file or set CHAT_PIN, or set CHAT_LISTEN=off.",
+      error,
+    );
+    return undefined;
+  }
 }
 
 async function startActivityRuntime(options: {
@@ -214,10 +261,11 @@ async function startActivityRuntime(options: {
   webhookPort: number;
   webhookPath: string;
   webhookPublicUrl?: string;
-  conversationIds: string[];
+  policy: ChatListenPolicy;
+  onSeen?: (conversationId: string, eventId: string | undefined) => void;
 }): Promise<{ stop(): void; webhook?: ActivityWebhook } | undefined> {
   if (!options.enabled) return undefined;
-  const intake = new ChatActivityIntake(options.chat, options.engine, options.conversationIds);
+  const intake = new ChatActivityIntake(options.chat, options.engine, options.policy, options.onSeen);
 
   if (options.subscribe) {
     try {

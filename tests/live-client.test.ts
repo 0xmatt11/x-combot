@@ -213,6 +213,22 @@ describe("LiveXClient 429 and 402", () => {
     expect(fields).not.toContain("sequence_id");
   });
 
+  it("lists the Chat inbox on GET /2/chat/conversations", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: [], meta: {} }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await client().listChatConversations({ maxResults: 50, paginationToken: "next" });
+    const url = new URL(String((fetchMock.mock.calls as unknown[][])[0]?.[0]));
+    expect(url.pathname).toBe("/2/chat/conversations");
+    expect(url.searchParams.get("max_results")).toBe("50");
+    expect(url.searchParams.get("pagination_token")).toBe("next");
+  });
+
   it("does not attach retryAfterMs to other HTTP failures", async () => {
     vi.stubGlobal(
       "fetch",

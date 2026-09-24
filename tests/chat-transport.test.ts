@@ -3,6 +3,7 @@ import { ModerationEngine } from "../src/bot/engine.js";
 import { parseChatConversationIds } from "../src/chat/ids.js";
 import { chatEventToDm } from "../src/chat/normalize.js";
 import { ChatActivityIntake } from "../src/chat/activity.js";
+import { chatListenPolicy } from "../src/chat/listen.js";
 import { ChatPoller } from "../src/chat/poller.js";
 import { ChatService } from "../src/chat/service.js";
 import type {
@@ -13,14 +14,14 @@ import type {
   LoadedChatIdentity,
   PublicKeyMaterial,
 } from "../src/chat/cipher.js";
-import type { ChatHttp, RawChatEventsPage } from "../src/chat/http.js";
+import type { ChatHttp, RawChatConversationsPage, RawChatEventsPage } from "../src/chat/http.js";
 import {
   memberIdsFromConversation,
   normalizePublicKeys,
   publicKeyRegistrationBody,
   sendMessageBody,
 } from "../src/chat/wire.js";
-import { nextPollDelayMs, shouldPollClassicDms } from "../src/poller.js";
+import { nextPollDelayMs } from "../src/poller.js";
 import { Store } from "../src/store.js";
 import type { BotRuntimeConfig, DefaultsConfig } from "../src/types.js";
 import { MockXClient } from "../src/x/mock-client.js";
@@ -133,6 +134,9 @@ class FakeCipher implements ChatCipher {
 
 class FakeHttp implements ChatHttp {
   pages: RawChatEventsPage[] = [];
+  inboxPages: RawChatConversationsPage[] = [];
+  inboxCalls = 0;
+  inboxError: unknown;
   sends: Record<string, string>[] = [];
   deletes: Record<string, unknown>[] = [];
   failNext: unknown;
@@ -142,6 +146,16 @@ class FakeHttp implements ChatHttp {
   keysByUser = new Map<string, ReturnType<FakeHttp["defaultKeys"]>>();
   postedKeys: unknown[] = [];
   memberIds = ["alice-1"];
+
+  async listConversations(): Promise<RawChatConversationsPage> {
+    this.inboxCalls += 1;
+    if (this.inboxError) {
+      const error = this.inboxError;
+      this.inboxError = undefined;
+      throw error;
+    }
+    return this.inboxPages.shift() ?? { data: [] };
+  }
 
   async getConversationEvents(): Promise<RawChatEventsPage> {
     this.gets += 1;
@@ -603,7 +617,7 @@ describe("Chat transport into the moderation engine", () => {
     await poller.pollOnce();
 
     const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
-    const intake = new ChatActivityIntake(service, engine, [GROUP]);
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
     await intake.handle({
       data: {
         event_type: "chat.received",
@@ -972,5 +986,181 @@ describe("ChatService.sendImage", () => {
     store.close();
     expect(uploads).toBe(0);
     expect(http.sends).toHaveLength(0);
+  });
+});
+
+describe("Chat group discovery", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  function setup(
+    policy = chatListenPolicy({ mode: "all" }),
+    remembered: string[] = [],
+    options: { maxPollsPerTick?: number; discoveryIntervalMs?: number } = {},
+  ) {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const http = new FakeHttp();
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-old", {
+      type: "message",
+      sequenceId: "10",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "history" },
+    });
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    const service = new ChatService(http, cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+    );
+    const poller = new ChatPoller(service, store, engine, 12_000, remembered, 50, 12_000, {
+      policy,
+      maxPollsPerTick: options.maxPollsPerTick,
+      discoveryIntervalMs: options.discoveryIntervalMs ?? 60_000,
+    });
+    return { store, http, cipher, service, engine, poller };
+  }
+
+  it("discovers g… groups from the inbox, drops 1:1, and seeds without replaying", async () => {
+    const { http, cipher, poller, store } = setup();
+    http.inboxPages.push({
+      data: [
+        { id: "g111", type: "group" },
+        { id: "111-222", type: "one_to_one" },
+        { id: "1578398451921985538", type: "GROUP" },
+        { id: "xchat:g222" },
+      ],
+    });
+    http.pages.push(
+      { data: [{ id: "evt-old", sender_id: "alice-1", encoded_event: "b64-old" }] },
+      { data: [{ id: "evt-old-2", sender_id: "alice-1", encoded_event: "b64-old" }] },
+    );
+    await poller.pollOnce();
+    expect(http.inboxCalls).toBe(1);
+    expect(http.gets).toBe(2);
+    expect(cipher.texts).toEqual([]);
+    expect(store.getWatermark("chat_events:g111")).toBe("evt-old");
+    expect(store.getWatermark("chat_events:g222")).toBe("evt-old-2");
+    expect([...poller.conversationIds].sort()).toEqual(["g111", "g222"]);
+
+    http.pages.push(
+      { data: [{ id: "evt-old", sender_id: "alice-1", encoded_event: "b64-old" }] },
+      { data: [{ id: "evt-old-2", sender_id: "alice-1", encoded_event: "b64-old" }] },
+    );
+    await poller.pollOnce();
+    expect(http.inboxCalls).toBe(1);
+    expect(cipher.texts).toEqual([]);
+  });
+
+  it("does not list or poll groups outside an allowlist", async () => {
+    const { http, poller } = setup(chatListenPolicy({ allowIds: [GROUP] }));
+    http.inboxPages.push({ data: [{ id: "g999", type: "group" }] });
+    http.pages.push({ data: [] });
+    await poller.pollOnce();
+    expect(http.inboxCalls).toBe(0);
+    expect(http.gets).toBe(1);
+    expect(poller.conversationIds).toEqual([GROUP]);
+  });
+
+  it("does not poll a denied group discovered from the inbox", async () => {
+    const { http, poller } = setup(chatListenPolicy({ mode: "all", denyIds: ["g111"] }));
+    http.inboxPages.push({
+      data: [
+        { id: "g111", type: "group" },
+        { id: "g222", type: "group" },
+      ],
+    });
+    http.pages.push({ data: [{ id: "evt-2", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await poller.pollOnce();
+    expect(poller.conversationIds).toEqual(["g222"]);
+    expect(http.gets).toBe(1);
+  });
+
+  it("polls a few new groups per tick so a large inbox is not read at once", async () => {
+    const ids = ["g1", "g2", "g3", "g4", "g5"];
+    const { http, poller } = setup(chatListenPolicy({ mode: "all" }), ["g1"], {
+      maxPollsPerTick: 2,
+    });
+    http.inboxPages.push({ data: ids.map((id) => ({ id, type: "group" })) });
+    await poller.pollOnce();
+    expect(http.inboxCalls).toBe(1);
+    expect(http.gets).toBe(2);
+    await poller.pollOnce();
+    expect(http.gets).toBe(4);
+    expect(http.inboxCalls).toBe(1);
+    expect([...poller.conversationIds].sort()).toEqual(ids);
+  });
+
+  it("does not read event pages in the same tick when inbox discovery is rate limited", async () => {
+    const { http, poller } = setup(chatListenPolicy({ mode: "all" }), ["g111"]);
+    http.inboxError = Object.assign(new Error("rate"), { status: 429, retryAfterMs: 60_000 });
+    http.pages.push({ data: [] });
+    await expect(poller.pollOnce()).rejects.toMatchObject({ status: 429 });
+    expect(http.gets).toBe(0);
+    expect(http.inboxCalls).toBe(1);
+  });
+
+  it("still polls known groups when the inbox list fails with a non-rate error", async () => {
+    const { http, poller } = setup(chatListenPolicy({ mode: "all" }), ["g111"]);
+    http.inboxError = Object.assign(new Error("unavailable"), { status: 500 });
+    http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
+    await poller.pollOnce();
+    expect(http.gets).toBe(1);
+    await poller.pollOnce();
+    expect(http.inboxCalls).toBe(1);
+  });
+
+  it("stops inbox discovery when the list endpoint is missing", async () => {
+    const { http, poller } = setup();
+    http.inboxError = Object.assign(new Error("missing"), { status: 404 });
+    await poller.pollOnce();
+    await poller.pollOnce();
+    expect(http.inboxCalls).toBe(1);
+    expect(http.gets).toBe(0);
+  });
+
+  it("seeds an Activity watermark and does not replay that message on the catch-up poll", async () => {
+    const { http, cipher, service, store, engine, poller } = setup();
+    const intake = new ChatActivityIntake(
+      service,
+      engine,
+      chatListenPolicy({ mode: "all" }),
+      (id, eventId) => poller.observeFromActivity(id, eventId),
+    );
+    await intake.handle({
+      data: {
+        event_type: "chat.received",
+        payload: {
+          id: "evt-2",
+          sender_id: "alice-1",
+          conversation_id: "g999",
+          encoded_event: "b64-help",
+        },
+      },
+    });
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
+
+    http.inboxPages.push({ data: [] });
+    http.pages.push({
+      data: [
+        { id: "evt-2", sender_id: "alice-1", encoded_event: "b64-help" },
+        { id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
   });
 });

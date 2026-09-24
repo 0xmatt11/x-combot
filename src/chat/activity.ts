@@ -4,7 +4,8 @@ import type { Env } from "../env.js";
 import { log } from "../log.js";
 import type { ActivityConfig, ActivityTransport, DefaultsConfig } from "../types.js";
 import type { ChatService } from "./service.js";
-import { isChatGroupId } from "./ids.js";
+import { canonicalChatGroupId } from "./ids.js";
+import { acceptsChatGroup, type ChatListenPolicy } from "./listen.js";
 import type { RawChatEvent } from "./http.js";
 import { normalizeRawChatEvent } from "./raw.js";
 
@@ -90,11 +91,43 @@ export function parseActivityChat(body: unknown): ParsedActivityChat | undefined
 }
 
 export function normalizeActivityConversationId(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  let id = raw.trim();
-  if (id.startsWith("xchat:")) id = id.slice("xchat:".length);
-  if (isChatGroupId(id)) return id;
-  return undefined;
+  return canonicalChatGroupId(raw);
+}
+
+const GROUP_SIGNAL_TYPES = new Set([
+  "chat.conversation.join",
+  "chat.conversation_join",
+  "chat.conversation.member_added",
+  "chat.conversation.member_removed",
+  "chat.conversation.admin_added",
+  "chat.conversation.admin_removed",
+  "chat.update.group_name",
+]);
+
+/**
+ * Membership and group-update Activity events that name a `g…` id but do not
+ * carry an `encoded_event`. They register the group for polling. `chat.received`
+ * stays on `parseActivityChat`. 1:1 ids are ignored.
+ */
+export function parseActivityGroupSignal(
+  body: unknown,
+): { eventType: string; conversationId: string } | undefined {
+  const root = asRecord(body);
+  if (!root) return undefined;
+  const data = asRecord(root.data) ?? root;
+  const eventType = stringOf(data.event_type ?? data.eventType);
+  if (!eventType || !GROUP_SIGNAL_TYPES.has(eventType)) return undefined;
+  const payload = asRecord(data.payload) ?? data;
+  const conversationId = normalizeActivityConversationId(
+    stringOf(
+      payload.conversation_id ??
+        payload.conversationId ??
+        data.conversation_id ??
+        data.conversationId,
+    ),
+  );
+  if (!conversationId) return undefined;
+  return { eventType, conversationId };
 }
 
 export function crcResponseToken(crcToken: string, clientSecret: string): string {
@@ -171,33 +204,49 @@ export function takeActivityLines(buffer: string): { lines: string[]; rest: stri
 }
 
 export class ChatActivityIntake {
-  private readonly allowed: ReadonlySet<string>;
-
   constructor(
     private readonly chat: ChatService,
     private readonly engine: ModerationEngine,
-    conversationIds: readonly string[],
-  ) {
-    this.allowed = new Set(conversationIds);
-  }
+    private readonly policy: ChatListenPolicy,
+    private readonly onSeen?: (conversationId: string, eventId: string | undefined) => void,
+  ) {}
 
   async handle(body: unknown): Promise<void> {
     const parsed = parseActivityChat(body);
-    if (!parsed || parsed.eventType !== "chat.received") return;
-    if (!this.allowed.has(parsed.conversationId)) return;
-    const events = await this.chat.ingestActivity({
-      conversationId: parsed.conversationId,
-      raw: parsed.raw,
-      keyEvents: parsed.keyEvents,
-    });
-    for (const event of events) {
-      await this.engine.processEvent(event);
+    if (parsed?.eventType === "chat.received") {
+      if (!acceptsChatGroup(this.policy, parsed.conversationId)) {
+        log.debug(
+          `Ignoring Activity chat.received in ${parsed.conversationId}; it is outside the Chat listen policy.`,
+        );
+        return;
+      }
+      const events = await this.chat.ingestActivity({
+        conversationId: parsed.conversationId,
+        raw: parsed.raw,
+        keyEvents: parsed.keyEvents,
+      });
+      // Seed the watermark only after a successful decrypt so a missing
+      // conversation key is retried. Older history is still not replayed.
+      this.onSeen?.(parsed.conversationId, events.length > 0 ? parsed.raw.id : undefined);
+      for (const event of events) {
+        await this.engine.processEvent(event);
+      }
+      if (events.length > 0) {
+        log.debug(
+          `Activity chat.received delivered ${events.length} event(s) in ${parsed.conversationId}`,
+        );
+      }
+      return;
     }
-    if (events.length > 0) {
-      log.debug(
-        `Activity chat.received delivered ${events.length} event(s) in ${parsed.conversationId}`,
-      );
-    }
+    if (parsed?.eventType === "chat.sent") return;
+
+    const signal = parseActivityGroupSignal(body);
+    if (!signal) return;
+    if (!acceptsChatGroup(this.policy, signal.conversationId)) return;
+    log.info(
+      `Activity ${signal.eventType} named ${signal.conversationId}. The catch-up poll will seed a watermark and will not replay history.`,
+    );
+    this.onSeen?.(signal.conversationId, undefined);
   }
 }
 

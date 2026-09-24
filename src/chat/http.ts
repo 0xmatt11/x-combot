@@ -25,6 +25,15 @@ export interface RawChatEventsPage {
   };
 }
 
+/** `GET /2/chat/conversations` inbox page. Shape varies; callers parse with `groupIdsFromInboxPage`. */
+export interface RawChatConversationsPage {
+  data?: unknown;
+  meta?: {
+    next_token?: string;
+    has_more?: boolean;
+  };
+}
+
 export interface ChatHttp {
   getConversationEvents(
     conversationId: string,
@@ -50,4 +59,12 @@ export interface ChatHttp {
    * Returns `media_hash_key` for an inline `attachment_type: "media"` message.
    */
   uploadChatMedia(conversationId: string, ciphertext: Uint8Array): Promise<string>;
+  /**
+   * Inbox list (`GET /2/chat/conversations`). Absent on fakes that do not discover groups.
+   * Callers must keep only `g…` ids and must not treat a failure as fatal.
+   */
+  listConversations?(params: {
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<RawChatConversationsPage>;
 }

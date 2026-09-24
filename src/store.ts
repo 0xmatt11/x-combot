@@ -188,6 +188,15 @@ export class Store {
       .run(key, value);
   }
 
+  /** Suffixes of watermark keys that start with `prefix`. `_` and `%` in the prefix are escaped. */
+  listWatermarkKeys(prefix: string): string[] {
+    const escaped = prefix.replace(/[\\%_]/g, (char) => `\\${char}`);
+    const rows = this.db
+      .prepare("SELECT key FROM watermarks WHERE key LIKE ? ESCAPE '\\' ORDER BY key")
+      .all(`${escaped}%`) as { key: string }[];
+    return rows.map((row) => row.key.slice(prefix.length));
+  }
+
   addWarn(
     conversationId: string,
     userId: string,

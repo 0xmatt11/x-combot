@@ -89,7 +89,9 @@ async function main(): Promise<void> {
     file.registered = true;
     writeKeyFile(env.chatKeysPath, file);
     console.log(`Registered public key version ${file.version}.`);
-    console.log("Restart the bot with CHAT_CONVERSATION_IDS set to the g… group id.");
+    console.log(
+      "Restart the bot. Leave CHAT_CONVERSATION_IDS unset to moderate every encrypted group this account is in, or set it to limit the bot to specific g… ids.",
+    );
     console.log(
       "If the bot was already in the group before this key existed, run `npm run chat:rotate -- <g…id> --confirm` so the conversation key is wrapped for it.",
     );
