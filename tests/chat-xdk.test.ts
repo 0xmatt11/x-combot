@@ -144,6 +144,64 @@ describe("chat-xdk WASM boundary", () => {
     expect(JSON.stringify(seen[0])).not.toContain("media_type");
   });
 
+  it("forwards a reply target and a mention entity to encryptReply", () => {
+    const seen: unknown[] = [];
+    const inner = {
+      encryptMessage(params: unknown) {
+        seen.push(params);
+        return { messageId: "m", encryptedContent: "e", encodedEventSignature: "s" };
+      },
+      encryptReply(params: unknown) {
+        seen.push(params);
+        return { messageId: "r", encryptedContent: "e", encodedEventSignature: "s" };
+      },
+      encryptStream(plaintext: Uint8Array) {
+        return plaintext;
+      },
+      getPublicKeys() {
+        return { identity: "", signing: "" };
+      },
+    } as unknown as XdkLike;
+    const cipher = wrapCipher(inner);
+    cipher.encryptReply("g1", "@alice", {
+      entities: [[0, 6, "mention"]],
+      replyToEvent: "blob-cmd",
+      replyToSequenceId: "55",
+      replyToSenderId: "alice-1",
+      replyToText: "!boobs",
+      attachments: [
+        {
+          mediaHashKey: "hash-inline",
+          width: 8,
+          height: 9,
+          filesizeBytes: 3,
+          filename: "image.jpg",
+        },
+      ],
+    });
+    expect(seen[0]).toEqual({
+      conversationId: "g1",
+      text: "@alice",
+      entities: [[0, 6, "mention"]],
+      replyToEvent: "blob-cmd",
+      replyToSequenceId: "55",
+      replyToSenderId: "alice-1",
+      replyToText: "!boobs",
+      attachments: [
+        {
+          attachment_type: "media",
+          media_hash_key: "hash-inline",
+          width: 8,
+          height: 9,
+          filesize_bytes: 3,
+          filename: "image.jpg",
+        },
+      ],
+    });
+    expect(JSON.stringify(seen[0])).not.toContain("18+");
+    expect(JSON.stringify(seen[0])).not.toContain("media_type");
+  });
+
   it("passes media_type 4 and duration_millis for an audio attachment", () => {
     const seen: unknown[] = [];
     const inner = {
@@ -300,6 +358,7 @@ describe("chat-xdk WASM boundary", () => {
     const body = deleteMessagesBody(signature, cipher.signingPublicKey(), ["99"], true);
     expect(body.sequence_ids).toEqual(["99"]);
     expect(body.delete_message_action).toBe("delete_for_all");
+    expect(body).not.toHaveProperty("media_hash_keys");
     const signatures = body.action_signatures as { message_event_signature: { signature: string } }[];
     expect(signatures[0]?.message_event_signature.signature).toBeTruthy();
 

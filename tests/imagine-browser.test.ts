@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ADULT_IMAGE_RETRY_MESSAGE } from "../src/bot/adult-filter.js";
 import { ModerationEngine } from "../src/bot/engine.js";
 import {
   assertBrowserMediaUrl,
@@ -354,7 +355,6 @@ describe("browser Imagine in the engine", () => {
         fetches.push(url);
         throw new Error("image HTTP client was called");
       },
-      adultImageProvider: "imagine",
     });
     await engine.processEvent(message({ id: "img-1", text: "!imagine a neon cat" }));
     expect(fetches).toEqual([]);
@@ -364,6 +364,8 @@ describe("browser Imagine in the engine", () => {
         url: "https://grok.com/imagine",
         mimeType: "image/jpeg",
         bytes: jpeg.byteLength,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -398,7 +400,7 @@ describe("browser Imagine in the engine", () => {
     );
     await engine.waitForBackgroundWork();
     expect(downloads).toEqual([]);
-    expect(actions.replies).toEqual([VIDEO_STARTED_MESSAGE]);
+    expect(actions.replies).toEqual([`@alice ${VIDEO_STARTED_MESSAGE}`]);
     expect(client.videos).toEqual([
       {
         conversationId: chatGroupId,
@@ -407,18 +409,22 @@ describe("browser Imagine in the engine", () => {
         bytes: mp4.byteLength,
         width: 1280,
         height: 720,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
   });
 
-  it("tells the chat when the browser session is signed out and does not search", async () => {
+  it("does not call Imagine for adult commands when the browser session is signed out", async () => {
     const store = new Store(":memory:");
     stores.push(store);
     const client = new MockXClient();
     let searches = 0;
+    let generates = 0;
     const engine = new ModerationEngine(store, client, runtime(), undefined, {
       imagine: {
         async generate() {
+          generates += 1;
           throw new ImagineError("Chrome session is not signed in", IMAGINE_BROWSER_LOGIN_MESSAGE, "session");
         },
       },
@@ -435,15 +441,19 @@ describe("browser Imagine in the engine", () => {
       fetchImage: async () => {
         throw new Error("cdn fetch");
       },
-      adultImageProvider: "imagine",
     });
     await engine.processEvent(message({ id: "boobs-1", text: "!boobs" }));
+    await engine.processEvent(message({ id: "ass-1", text: "!ass" }));
+    await engine.processEvent(message({ id: "booty-1", text: "!booty" }));
     await engine.processEvent(message({ id: "img-2", text: "!imagine a neon cat" }));
-    expect(searches).toBe(0);
+    expect(generates).toBe(1);
+    expect(searches).toBe(3);
     expect(client.images).toHaveLength(0);
     expect(client.sent.map((row) => row.text)).toEqual([
-      IMAGINE_BROWSER_LOGIN_MESSAGE,
-      IMAGINE_BROWSER_LOGIN_MESSAGE,
+      `@alice ${ADULT_IMAGE_RETRY_MESSAGE}`,
+      `@alice ${ADULT_IMAGE_RETRY_MESSAGE}`,
+      `@alice ${ADULT_IMAGE_RETRY_MESSAGE}`,
+      `@alice ${IMAGINE_BROWSER_LOGIN_MESSAGE}`,
     ]);
     expect(client.sent.map((row) => row.text).join("\n")).not.toMatch(/XAI_API_KEY/);
   });
@@ -462,7 +472,7 @@ describe("browser Imagine in the engine", () => {
     });
     const engine = new ModerationEngine(store, client, runtime(), undefined, { imagine });
     await engine.processEvent(message({ id: "mod-1", text: "!imagine a neon cat" }));
-    expect(client.sent[0]?.text.startsWith(IMAGINE_MODERATED_INTRO)).toBe(true);
+    expect(client.sent[0]?.text.startsWith(`@alice ${IMAGINE_MODERATED_INTRO}`)).toBe(true);
     expect(client.sent[0]?.text.match(/^\d\./gm)).toHaveLength(5);
   });
 });

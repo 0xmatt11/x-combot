@@ -166,14 +166,14 @@ describe("encrypted Chat !auth gate", () => {
     const authorized = await first.engine.processEvent(
       message({ id: "auth", senderId: matt.id, text: "  !AuTh  " }),
     );
-    expect(authorized.replies).toEqual([CHAT_AUTH_OK]);
-    expect(first.client.sent.map((row) => row.text)).toEqual([CHAT_AUTH_OK]);
+    expect(authorized.replies).toEqual([`@0xMatt66 ${CHAT_AUTH_OK}`]);
+    expect(first.client.sent.map((row) => row.text)).toEqual([`@0xMatt66 ${CHAT_AUTH_OK}`]);
     expect(first.store.isChatAuthorized(chatId)).toBe(true);
 
     const again = await first.engine.processEvent(
       message({ id: "auth-2", senderId: matt.id, text: "!auth" }),
     );
-    expect(again.replies).toEqual([CHAT_AUTH_ALREADY]);
+    expect(again.replies).toEqual([`@0xMatt66 ${CHAT_AUTH_ALREADY}`]);
     expect(count(first.store, "chat_authorizations")).toBe(1);
 
     const replay = await first.engine.processEvent(
@@ -184,7 +184,7 @@ describe("encrypted Chat !auth gate", () => {
     await first.engine.processEvent(
       message({ id: "after", senderId: alice.id, text: "!help" }),
     );
-    expect(first.client.sent.at(-1)?.text).toBe("Type !rules");
+    expect(first.client.sent.at(-1)?.text).toBe("@alice Type !rules");
     await first.engine.processEvent({
       id: "join-2",
       eventType: "ParticipantsJoin",
@@ -203,7 +203,7 @@ describe("encrypted Chat !auth gate", () => {
     await restarted.engine.processEvent(
       message({ id: "restart-help", senderId: alice.id, text: "!help" }),
     );
-    expect(restarted.client.sent.map((row) => row.text)).toEqual(["Type !rules"]);
+    expect(restarted.client.sent.map((row) => row.text)).toEqual(["@alice Type !rules"]);
     expect(restarted.store.getUserXp(chatId, alice.id).xp).toBe(0);
   });
 
@@ -215,7 +215,10 @@ describe("encrypted Chat !auth gate", () => {
     await engine.processEvent(
       message({ id: "classic-auth", senderId: matt.id, text: "!auth", conversationId: classicId }),
     );
-    expect(client.sent.map((row) => row.text)).toEqual(["Type !rules", CHAT_AUTH_CLASSIC]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "@alice Type !rules",
+      `@0xMatt66 ${CHAT_AUTH_CLASSIC}`,
+    ]);
   });
 
   it("grandfathers Chat watermarks that existed before the gate and not ones written after", async () => {
@@ -262,7 +265,7 @@ describe("encrypted Chat !auth gate", () => {
         conversationId: laterChat,
       }),
     );
-    expect(client.sent.map((row) => row.text)).toEqual(["Type !rules"]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice Type !rules"]);
   });
 });
 

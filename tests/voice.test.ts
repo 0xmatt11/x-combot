@@ -85,10 +85,11 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("sexy")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("teen portrait")).toEqual({ ok: false, reason: "refused" });
     expect(VOICE_MENU_MESSAGE).toMatch(/Pick a voice, then your line:/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/1\. sexy girl — !voice sexy <text>/);
+    expect(VOICE_MENU_MESSAGE).toMatch(/1\. Girl 1 — !voice girl1 <text>/);
     expect(VOICE_MENU_MESSAGE).toMatch(/2\. regular dude — !voice dude <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/3\. scared girl — !voice scared <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/4\. really horny girl — !voice horny <text>/);
+    expect(VOICE_MENU_MESSAGE).toMatch(/3\. Girl 2 — !voice girl2 <text>/);
+    expect(VOICE_MENU_MESSAGE).toMatch(/4\. Girl 3 — !voice girl3 <text>/);
+    expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared/i);
     expect(DEFAULT_VOICE_LANGUAGE).toBe("en");
   });
 
@@ -142,6 +143,7 @@ describe("voice request checks", () => {
       expect(horny.spoken).not.toMatch(/horny|nsfw|sexy/i);
     }
     expect(parseVoiceRequest("4 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
+    expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
     expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "horny" });
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
     expect(parseVoiceRequest(`sexy ${"a".repeat(VOICE_MAX_CHARS)}`).ok).toBe(true);
@@ -371,6 +373,8 @@ describe("!voice command", () => {
         bytes: mp3.byteLength,
         durationMillis: estimateMp3DurationMillis(mp3.byteLength),
         voiceId: "ara",
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -402,7 +406,7 @@ describe("!voice command", () => {
     );
     expect(voice.prompts).toHaveLength(0);
     expect(client.audios).toHaveLength(0);
-    expect(actions.replies).toEqual([VOICE_CHAT_REQUIRED_MESSAGE]);
+    expect(actions.replies).toEqual([`@alice ${VOICE_CHAT_REQUIRED_MESSAGE}`]);
   });
 
   it("says to try again when the Chat upload fails", async () => {
@@ -412,7 +416,7 @@ describe("!voice command", () => {
     );
     expect(voice.prompts).toHaveLength(1);
     expect(client.audios).toHaveLength(0);
-    expect(actions.replies).toEqual([VOICE_ATTACH_FAILED_MESSAGE]);
+    expect(actions.replies).toEqual([`@alice ${VOICE_ATTACH_FAILED_MESSAGE}`]);
     expect(actions.replies[0]).not.toContain("hello from the group");
   });
 
@@ -443,15 +447,18 @@ describe("!voice command", () => {
     await missing.engine.processEvent(
       message({ id: "nokey", conversationId: chatGroupId, text: "!voice sexy hello from the group" }),
     );
-    expect(missing.client.sent[0]?.text).toBe(VOICE_UNAVAILABLE_MESSAGE);
+    expect(missing.client.sent[0]?.text).toBe(`@alice ${VOICE_UNAVAILABLE_MESSAGE}`);
     expect(missing.client.sent[0]?.text).toMatch(/XAI_API_KEY/);
   });
 
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!voice/);
-    expect(loaded.help).toMatch(/sexy girl/);
-    expect(loaded.help).toMatch(/really horny girl/);
+    expect(loaded.help).toMatch(/Girl 1/);
+    expect(loaded.help).toMatch(/Girl 2/);
+    expect(loaded.help).toMatch(/Girl 3/);
+    expect(loaded.help).toMatch(/regular dude/);
+    expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
   });
 
   it("posts the client error line and does not include the API payload", async () => {
@@ -464,7 +471,7 @@ describe("!voice command", () => {
     await engine.processEvent(
       message({ id: "down", conversationId: chatGroupId, text: "!voice scared hello from the group" }),
     );
-    expect(client.sent.map((row) => row.text)).toEqual([VOICE_FAILED_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${VOICE_FAILED_MESSAGE}`]);
     expect(client.audios).toHaveLength(0);
     expect(client.sent[0]?.text).not.toMatch(/api_key|overloaded|\{/);
   });

@@ -11,6 +11,7 @@ import type {
   ChatMediaAttachment,
   DecryptedEvent,
   EncryptMessageOptions,
+  EncryptReplyOptions,
   LoadedChatIdentity,
   PublicKeyMaterial,
 } from "../src/chat/cipher.js";
@@ -52,6 +53,7 @@ function runtime(): BotRuntimeConfig {
 
 class FakeCipher implements ChatCipher {
   readonly texts: string[] = [];
+  readonly replies: { conversationId: string; text: string; options?: EncryptReplyOptions }[] = [];
   readonly deleted: string[][] = [];
   readonly batches: string[][] = [];
   readonly wrapped: PublicKeyMaterial[] = [];
@@ -95,6 +97,11 @@ class FakeCipher implements ChatCipher {
       encryptedContent: `enc:${text}`,
       encodedEventSignature: "sig",
     };
+  }
+
+  encryptReply(conversationId: string, text: string, options?: EncryptReplyOptions) {
+    this.replies.push({ conversationId, text, options });
+    return this.encryptMessage(conversationId, text, options);
   }
 
   encryptStream(plaintext: Uint8Array, _conversationKey: Uint8Array) {
@@ -305,6 +312,7 @@ describe("Chat ids and wire shapes", () => {
       sequenceId: "55",
       conversationId: GROUP,
       mentions: [{ username: "miladybot" }],
+      encodedEvent: "b64",
     });
 
     const join = chatEventToDm(
@@ -598,10 +606,10 @@ describe("Chat transport into the moderation engine", () => {
     });
     await poller.pollOnce();
 
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(http.sends).toHaveLength(1);
     expect(http.sends[0]).toMatchObject({
-      encoded_message_create_event: "enc:CHAT_HELP_OK",
+      encoded_message_create_event: "enc:someone CHAT_HELP_OK",
       encoded_message_event_signature: "sig",
       conversation_token: "tok",
     });
@@ -734,7 +742,7 @@ describe("Chat transport into the moderation engine", () => {
       ],
     });
     await poller.pollOnce();
-    expect(cipher.texts).toEqual([rolled, "CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual([rolled, "someone CHAT_HELP_OK"]);
   });
 
   it("does not rerun a command already indexed under another id for that sequence", async () => {
@@ -792,7 +800,7 @@ describe("Chat transport into the moderation engine", () => {
     });
     await poller.pollOnce();
     expect(cipher.batches[2]).toEqual(["b64-help", "b64-dead"]);
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-1");
 
     cipher.events.set("b64-dead", {
@@ -915,7 +923,7 @@ describe("Chat transport into the moderation engine", () => {
     });
     await vi.advanceTimersByTimeAsync(48_000);
     expect(http.gets).toBe(4);
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
 
     http.pages.push({ data: [] });
     await vi.advanceTimersByTimeAsync(12_000);
@@ -1058,6 +1066,48 @@ describe("ChatService.sendImage", () => {
     expect(result).toEqual({ dmEventId: "mid-img", dmConversationId: "g1" });
     expect(JSON.stringify(encrypted[0]?.options?.attachments)).not.toContain("media_type");
     expect(JSON.stringify(encrypted[0]?.options?.attachments)).not.toContain("mediaType");
+  });
+
+  it("replies to the command and mentions the requester on an adult photo", async () => {
+    const cipher = new FakeCipher();
+    const key = new Uint8Array(32).fill(7);
+    cipher.events.set("blob-99", { type: "message", id: "e1", content: { text: "!boobs" } });
+    cipher.conversationKeys = { keys: { "99": key }, latestVersion: "99" };
+    const http = new FakeHttp();
+    http.pages.push(page("blob-99"));
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    await service.listHistory({ conversationId: "g1" });
+    await service.sendImage("g1", {
+      url: "https://cdn.example/a.jpg",
+      bytes: Uint8Array.from([1, 2, 3, 4]),
+      mimeType: "image/jpeg",
+      caption: {
+        text: "@alice",
+        mention: { username: "alice", start: 0, end: 6 },
+        replyTo: {
+          sequenceId: "55",
+          senderId: "alice-1",
+          previewText: "!boobs",
+          rawEvent: "blob-cmd",
+        },
+      },
+    });
+    store.close();
+    expect(cipher.replies).toHaveLength(1);
+    expect(cipher.replies[0]).toMatchObject({
+      conversationId: "g1",
+      text: "@alice",
+      options: {
+        entities: [[0, 6, "mention"]],
+        replyToSequenceId: "55",
+        replyToSenderId: "alice-1",
+        replyToText: "!boobs",
+        replyToEvent: "blob-cmd",
+      },
+    });
+    expect(cipher.replies[0]?.text).not.toMatch(/18\+/);
+    expect(JSON.stringify(cipher.replies[0]?.options?.attachments)).not.toContain("media_type");
   });
 
   it("does not replace a newer conversation key with an older decrypt", async () => {
@@ -1368,7 +1418,7 @@ describe("Chat group discovery", () => {
         },
       },
     });
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
 
     http.inboxPages.push({ data: [] });
@@ -1379,7 +1429,7 @@ describe("Chat group discovery", () => {
       ],
     });
     await poller.pollOnce();
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
   });
 });

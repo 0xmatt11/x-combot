@@ -89,6 +89,10 @@ class FakeCipher implements ChatCipher {
     };
   }
 
+  encryptReply(conversationId: string, text: string) {
+    return this.encryptMessage(conversationId, text);
+  }
+
   encryptStream(plaintext: Uint8Array, _conversationKey: Uint8Array) {
     return plaintext;
   }
@@ -229,14 +233,14 @@ describe("Activity intake", () => {
     await intake.handle(envelope());
     expect(cipher.batches[0]?.[0]).toBe("key-new");
     expect(cipher.batches[0]).toContain("b64-help");
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
 
     await intake.handle(envelope());
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
 
     const other = envelope({ conversation_id: "g999" });
     await intake.handle(other);
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
   });
 
   it("moderates every encrypted group when no allowlist is set", async () => {
@@ -262,7 +266,7 @@ describe("Activity intake", () => {
     );
 
     await intake.handle(envelope({ conversation_id: "g999" }));
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(seen).toEqual([{ id: "g999", eventId: "evt-2" }]);
     expect(
       parseActivityChat(envelope({ conversation_id: "111-222" })),

@@ -130,11 +130,11 @@ describe("link roast mode", () => {
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!LiNkRoAsT oN" }));
     expect(store.isLinkroastEnabled(groupId)).toBe(true);
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
+      "@alice Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
     ]);
 
     await engine.processEvent(message({ id: "again", senderId: bob.id, text: "!linkroast ON" }));
-    expect(client.sent.at(-1)?.text).toBe("Link roast is already on.");
+    expect(client.sent.at(-1)?.text).toBe("@bob Link roast is already on.");
 
     const restarted = new ModerationEngine(store, client, runtime(), undefined, { random: () => 0 });
     expect(store.isLinkroastEnabled(groupId)).toBe(true);
@@ -142,12 +142,12 @@ describe("link roast mode", () => {
       message({ id: "off", senderId: alice.id, text: "/LINKROAST off" }),
     );
     expect(store.isLinkroastEnabled(groupId)).toBe(false);
-    expect(client.sent.at(-1)?.text).toBe("Link roast off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Link roast off.");
 
     await restarted.processEvent(message({ id: "off2", senderId: alice.id, text: "!linkroast off" }));
-    expect(client.sent.at(-1)?.text).toBe("Link roast is already off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Link roast is already off.");
     await restarted.processEvent(message({ id: "bare", senderId: alice.id, text: "!linkroast" }));
-    expect(client.sent.at(-1)?.text).toBe("Use !linkroast on or !linkroast off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Use !linkroast on or !linkroast off.");
   });
 
   it("roasts a status link with the LLM and ignores profiles", async () => {
@@ -177,7 +177,7 @@ describe("link roast mode", () => {
       start,
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
+      "@alice Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
       roast,
     ]);
     expect(llm.calls).toHaveLength(1);
@@ -215,7 +215,7 @@ describe("link roast mode", () => {
     );
 
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
+      "@alice Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
       "@alice first roast stays.",
       "@bob gets a turn.",
       "@alice second roast stays.",
@@ -244,8 +244,8 @@ describe("link roast mode", () => {
     );
     expect(llm.calls).toHaveLength(0);
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
-      "Link roast off.",
+      "@alice Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
+      "@alice Link roast off.",
     ]);
   });
 

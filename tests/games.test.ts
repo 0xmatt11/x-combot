@@ -242,10 +242,10 @@ describe("instant game commands", () => {
     );
     await engine.processEvent(message({ id: "g4", senderId: alice.id, text: "!coinflip" }));
     expect(client.sent.map((row) => row.text)).toEqual([
-      "✊ @alice played paper. I played rock. @alice wins.",
-      "🪙 @alice called tails. It's heads. I win.",
-      "🎱 @alice — It is certain.",
-      "🪙 @alice flipped heads.",
+      "@alice ✊ @alice played paper. I played rock. @alice wins.",
+      "@alice 🪙 @alice called tails. It's heads. I win.",
+      "@alice 🎱 @alice — It is certain.",
+      "@alice 🪙 @alice flipped heads.",
     ]);
     expect(client.sent.some((row) => /admins/i.test(row.text))).toBe(false);
     expect(client.sent.some((row) => row.text.includes("rain"))).toBe(false);
@@ -256,13 +256,17 @@ describe("instant game commands", () => {
     await engine.processEvent(message({ id: "g5", senderId: alice.id, text: "!rps" }));
     await engine.processEvent(message({ id: "g6", senderId: alice.id, text: "!coinflip edge" }));
     await engine.processEvent(message({ id: "g7", senderId: alice.id, text: "/eightball" }));
-    expect(client.sent.map((row) => row.text)).toEqual([RPS_HELP, COIN_HELP, EIGHT_BALL_HELP]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      `@alice ${RPS_HELP}`,
+      `@alice ${COIN_HELP}`,
+      `@alice ${EIGHT_BALL_HELP}`,
+    ]);
   });
 
   it("posts the catalog from !games", async () => {
     const { engine, client } = setup();
     await engine.processEvent(message({ id: "g8", senderId: alice.id, text: "/games" }));
-    expect(client.sent.map((row) => row.text)).toEqual([gamesMenu()]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${gamesMenu()}`]);
     expect(client.sent[0]?.text).toContain("!tictactoe");
     expect(client.sent[0]?.text).toContain("!minesweeper");
   });
@@ -292,9 +296,9 @@ describe("instant game commands", () => {
     );
 
     expect(client.sent.map((row) => row.text)).toEqual([
-      "✊ @HisHandle played rock. I played rock. Tie.",
-      "🪙 Ada flipped heads.",
-      "🎱 someone — It is certain.",
+      "@HisHandle ✊ @HisHandle played rock. I played rock. Tie.",
+      "Ada 🪙 Ada flipped heads.",
+      "someone 🎱 someone — It is certain.",
     ]);
     for (const row of client.sent) {
       expect(row.text).not.toContain(snowflake);
@@ -311,7 +315,7 @@ describe("instant game commands", () => {
       message({ id: "g12", senderId: idOnly.id, sender: idOnly, text: "!coinflip heads" }),
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "🪙 someone called heads. It's heads. someone wins.",
+      "someone 🪙 someone called heads. It's heads. someone wins.",
     ]);
     expect(client.sent.some((row) => row.text.includes("99"))).toBe(false);
   });

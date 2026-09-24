@@ -254,10 +254,12 @@ export class LiveXClient implements XClient {
    * Needs a user token that can upload media (`media.write`). Callers post
    * the image URL as text when this throws.
    *
-   * `text` is omitted. CreateMessageRequest accepts an attachments-only body
-   * (`CreateAttachmentsMessageRequest`). When `text` is present it must be at
-   * least one character, so `""` is invalid and a space would still be a
-   * caption. Omitting the field attaches the image with no caption.
+   * `text` is omitted unless the caller set a caption. CreateMessageRequest
+   * accepts an attachments-only body (`CreateAttachmentsMessageRequest`).
+   * When `text` is present it must be at least one character, so `""` is
+   * invalid. Adult posts set that text to the requester's `@handle`. Classic
+   * DMs have no reply field, so the mention is the message text beside the
+   * attachment. `!imagine` still omits `text`.
    */
   async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
     if (!image.bytes || image.bytes.byteLength === 0) {
@@ -273,6 +275,7 @@ export class LiveXClient implements XClient {
     }>(`/2/dm_conversations/${encodeURIComponent(conversationId)}/messages`, {
       method: "POST",
       json: {
+        ...(image.caption?.text ? { text: image.caption.text } : {}),
         attachments: [{ media_id: mediaId }],
       },
     });

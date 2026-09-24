@@ -268,6 +268,11 @@ export interface DmEvent {
   sequenceId?: string;
   /** Set when this message is a reply and the decrypted preview (or caller) names a target. */
   replyTo?: ReplyTarget;
+  /**
+   * Base64 raw signed Chat event (`encoded_event`). Kept so a later send can
+   * `encryptReply` to this message. Not logged and not written to SQLite.
+   */
+  encodedEvent?: string;
   /** On `ReactionAdd`, the sequence id of the message that was reacted to. */
   reactionTargetSequenceId?: string;
   /**
@@ -289,12 +294,41 @@ export interface SendMessageResult {
   dmConversationId: string;
 }
 
+/**
+ * Minimal caption for one media post.
+ * Command replies set `text` to `@handle` (or a display name) and, in encrypted
+ * Chat, `replyTo` so the post threads under the triggering message.
+ * Media posts use only that label. Text replies prefix it onto the body.
+ */
+export interface MediaCaption {
+  /** Visible label. Media posts use only this. Text replies prefix it. No 18+ line. */
+  text: string;
+  /**
+   * UTF-8 byte range of an `@handle` inside `text`.
+   * Chat sends this as a mention entity. Classic DMs rely on the `@handle` text.
+   */
+  mention?: { username: string; start: number; end: number };
+  /**
+   * Thread this post under the command. Encrypted Chat uses `encryptReply`.
+   * Classic group DMs have no reply field, so only `text` is sent.
+   */
+  replyTo?: {
+    sequenceId?: string;
+    senderId?: string;
+    previewText?: string;
+    /** Base64 raw signed Chat event. Preferred input to `encryptReply`. */
+    rawEvent?: string;
+  };
+}
+
 /** Image bytes to attach, plus the source URL used when attach is impossible. */
 export interface OutboundImage {
   /** Direct https URL. Do not log this; CDN links can carry signatures. */
   url: string;
   bytes?: Uint8Array;
   mimeType?: string;
+  /** Mention and reply target. Command posts set the requester's `@handle`. */
+  caption?: MediaCaption;
 }
 
 /** Video bytes to attach. Classic DMs cannot take mp4; encrypted Chat uses media_type 3. */
@@ -305,6 +339,8 @@ export interface OutboundVideo {
   mimeType?: string;
   width?: number;
   height?: number;
+  /** Mention and reply target. Command posts set the requester's `@handle`. */
+  caption?: MediaCaption;
 }
 
 /**
@@ -317,6 +353,8 @@ export interface OutboundAudio {
   durationMillis?: number;
   /** Voice id for logs. Not sent to X. */
   voiceId?: string;
+  /** Mention and reply target. `!voice` sets the requester's `@handle`. */
+  caption?: MediaCaption;
 }
 
 export interface DeleteResult {

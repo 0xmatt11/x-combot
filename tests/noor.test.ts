@@ -322,22 +322,22 @@ describe("Noor alert relay", () => {
     const now = 1_700_000_000_000;
     await engine.processEvent(message({ id: "on", text: "!nOoR On" }), now);
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Noor alert on for @noorrietje. New posts only. !noor off to stop.",
+      "@alice Noor alert on for @noorrietje. New posts only. !noor off to stop.",
     ]);
     expect(store.getNoorAlert(groupId)).toMatchObject({ enabled: true, sinceMs: now });
     store.setNoorWatermark(groupId, now, "42");
     await engine.processEvent(message({ id: "again", text: "!noor on" }), now + 10);
     expect(client.sent.at(-1)?.text).toBe(
-      "Noor alert is already on for @noorrietje. !noor off to stop.",
+      "@alice Noor alert is already on for @noorrietje. !noor off to stop.",
     );
     expect(store.getNoorAlert(groupId)?.tweetId).toBe("42");
     await engine.processEvent(message({ id: "off", text: "!NOOR OFF" }), now + 20);
-    expect(client.sent.at(-1)?.text).toBe("Noor alert off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Noor alert off.");
     expect(store.getNoorAlert(groupId)?.enabled).toBe(false);
     await engine.processEvent(message({ id: "off2", text: "!Noor off" }), now + 30);
-    expect(client.sent.at(-1)?.text).toBe("Noor alert is already off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Noor alert is already off.");
     await engine.processEvent(message({ id: "huh", text: "!noor please" }), now + 40);
-    expect(client.sent.at(-1)?.text).toBe("Use !noor on or !noor off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Use !noor on or !noor off.");
   });
 
   it("does not dump history and relays each new post once", async () => {
@@ -634,17 +634,17 @@ describe("Noor alert relay", () => {
     });
     const now = 1_700_000_000_000;
     await engine.processEvent(message({ id: "abs-first", text: "!noorabs on" }), now);
-    expect(client.sent.at(-1)?.text).toBe("Turn on !noor first.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Turn on !noor first.");
     expect(store.getNoorAlert(groupId)).toBeUndefined();
 
     await engine.processEvent(message({ id: "on", text: "!noor on" }), now + 1);
     await engine.processEvent(message({ id: "abs", text: "!NoorAbs ON" }), now + 2);
     expect(client.sent.at(-1)?.text).toBe(
-      "Noor abs on. New posts end with the abs coda. !noorabs off to stop.",
+      "@alice Noor abs on. New posts end with the abs coda. !noorabs off to stop.",
     );
     expect(store.getNoorAlert(groupId)?.absEnabled).toBe(true);
     await engine.processEvent(message({ id: "abs2", text: "!noorabs on" }), now + 3);
-    expect(client.sent.at(-1)?.text).toBe("Noor abs is already on. !noorabs off to stop.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Noor abs is already on. !noorabs off to stop.");
 
     client.sent.length = 0;
     client.images.length = 0;
@@ -730,7 +730,7 @@ describe("Noor alert relay", () => {
     await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
     await engine.processEvent(message({ id: "abs", text: "!noorabs on" }), now + 1);
     await engine.processEvent(message({ id: "off", text: "!NOOR OFF" }), now + 2);
-    expect(client.sent.at(-1)?.text).toBe("Noor alert off. Abs coda off too.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Noor alert off. Abs coda off too.");
     expect(store.getNoorAlert(groupId)?.absEnabled).toBe(false);
     await engine.processEvent(message({ id: "on2", text: "!noor on" }), now + 3);
     expect(store.getNoorAlert(groupId)?.absEnabled).toBe(false);
@@ -741,7 +741,7 @@ describe("Noor alert relay", () => {
     expect(client.sent.map((row) => row.text).some((text) => text === NOOR_ABS_CODA)).toBe(false);
     expect(client.images).toHaveLength(0);
     await engine.processEvent(message({ id: "abs-off", text: "!noorabs off" }), now + 4);
-    expect(client.sent.at(-1)?.text).toBe("Noor abs is already off.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Noor abs is already off.");
   });
 
   it("lists both commands in the live !help reply", async () => {

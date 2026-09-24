@@ -73,6 +73,7 @@ export function chatEventToDm(
       text,
       mentions: mentionsIn(text),
       sequenceId,
+      ...(raw.encoded_event ? { encodedEvent: raw.encoded_event } : {}),
       ...(replyToSenderId ? { replyToSenderId } : {}),
       ...(replyTo ? { replyTo } : {}),
       ...aliases,

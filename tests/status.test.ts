@@ -16,6 +16,9 @@ import { MockXClient } from "../src/x/mock-client.js";
 
 const alice: XUser = { id: "u-alice", username: "alice", name: "Alice" };
 const bob: XUser = { id: "u-bob", username: "bob", name: "Bob" };
+const owner: XUser = { id: "owner-1", username: "0xMatt66", name: "Matt" };
+const globalAdmin: XUser = { id: "u-admin", username: "admin", name: "Admin" };
+const convoAdmin: XUser = { id: "u-convo", username: "convo", name: "Convo" };
 const groupId = "1578398451921985538";
 const startedAtMs = 1_699_992_620_000;
 const nowMs = 1_700_000_000_000;
@@ -256,8 +259,14 @@ describe("!status command", () => {
       imaginePublic: { chestUrl: CHEST, bootyUrls: [BOOTY], boobsVideoUrls: [CLIP] },
     });
 
-    await engine.processEvent(message({ id: "s1", text: "!STATUS please" }), now);
-    await engine.processEvent(message({ id: "s2", text: "/status" }), now);
+    await engine.processEvent(
+      message({ id: "s1", senderId: owner.id, sender: owner, text: "!STATUS please" }),
+      now,
+    );
+    await engine.processEvent(
+      message({ id: "s2", senderId: owner.id, sender: owner, text: "/status" }),
+      now,
+    );
     expect(keyReads).toBe(2);
     expect(imagined).toBe(0);
     expect(client.sent).toHaveLength(2);
@@ -291,7 +300,10 @@ describe("!status command", () => {
       imagineBackend: "api",
       buildVersion: { version: "1.2.3" },
     });
-    await engine.processEvent(message({ id: "api-off", text: "!status" }), health.startedAtMs);
+    await engine.processEvent(
+      message({ id: "api-off", senderId: owner.id, sender: owner, text: "!status" }),
+      health.startedAtMs,
+    );
     expect(client.sent.at(-1)?.text).toContain("Imagine: api off");
   });
 
@@ -321,15 +333,54 @@ describe("!status command", () => {
     expect(pulls).toBe(1);
     expect(health.view().chat).toEqual({ phase: "degraded", detail: "backoff 30s" });
 
-    await engine.processEvent(message({ id: "s4", text: "!status" }), health.startedAtMs);
+    await engine.processEvent(
+      message({ id: "s4", senderId: owner.id, sender: owner, text: "!status" }),
+      health.startedAtMs,
+    );
     expect(client.sent.at(-1)?.text).toContain("Chat: degraded (backoff 30s)");
     expect(client.sent.at(-1)?.text).toContain("Keys: n/a (Chat not loaded)");
     expect(pulls).toBe(1);
   });
 
-  it("lists !status in the default !help reply", async () => {
+  it("ignores !status from everyone except BOT_OWNER_ID", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.addConversationAdmin(groupId, convoAdmin.id);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(globalAdmin);
+    client.addUser(convoAdmin);
+    client.addUser(owner);
+    const engine = new ModerationEngine(store, client, {
+      ...runtime(),
+      globalAdminIds: [globalAdmin.id],
+    });
+
+    await engine.processEvent(message({ id: "stranger", text: "!status" }), nowMs);
+    await engine.processEvent(
+      message({ id: "gadmin", senderId: globalAdmin.id, sender: globalAdmin, text: "!STATUS please" }),
+      nowMs,
+    );
+    await engine.processEvent(
+      message({ id: "cadmin", senderId: convoAdmin.id, sender: convoAdmin, text: "/status" }),
+      nowMs,
+    );
+    expect(client.sent).toEqual([]);
+
+    await engine.processEvent(
+      message({ id: "owner", senderId: owner.id, sender: owner, text: "!status" }),
+      nowMs,
+    );
+    expect(client.sent).toHaveLength(1);
+    expect(client.sent[0]?.text).toContain("Bot:");
+    expect(client.sent[0]?.text).toContain("@0xMatt66");
+  });
+
+  it("lists !status as owner-only in the default !help reply", async () => {
     const loaded = loadDefaults("config/default.yaml");
-    expect(loaded.help).toMatch(/!status/);
+    expect(loaded.help).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
+    expect(loaded.help).toMatch(/same gate as !auth/);
+    expect(loaded.help).toMatch(/ADMIN_IDS and per-group admins are ignored/);
     expect(loaded.help).toMatch(/public_keys/);
     expect(loaded.help).toMatch(/browser or api/);
     expect(loaded.help).toMatch(/!linkroast/);
@@ -339,7 +390,7 @@ describe("!status command", () => {
     client.addUser(alice);
     const engine = new ModerationEngine(store, client, { ...runtime(), defaults: loaded });
     await engine.processEvent(message({ id: "help", text: "!HELP" }), nowMs);
-    expect(client.sent.at(-1)?.text).toMatch(/!status/);
+    expect(client.sent.at(-1)?.text).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
     expect(client.sent.at(-1)?.text).toMatch(/public_keys backoff/);
     expect(client.sent.at(-1)?.text).toMatch(/browser or api/);
     expect(client.sent.at(-1)?.text).toMatch(/grok.com\/imagine/);

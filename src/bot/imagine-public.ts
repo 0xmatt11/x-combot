@@ -2,15 +2,15 @@ import { containsBannedAgeTerm } from "./adult-filter.js";
 import { fetchAdultImage, type FetchedImage } from "./image-fetch.js";
 
 /**
- * Optional JPEG or mp4 already hosted for the adult commands.
+ * Saved JPEG or mp4 banks for `!boobs`, `!ass`, and `!booty`.
  *
  * grok.com/imagine can expose `https://imagine-public.x.ai/imagine-public/images/<uuid>.jpg`
- * after X OAuth and the age gate. This module only downloads that URL, plus
- * operator-supplied https mp4 banks. It does not mint either.
+ * after X OAuth and the age gate. This module only downloads URLs the operator
+ * already pasted, plus operator-supplied https mp4 banks. It does not mint either
+ * and it does not open grok.com.
  *
- * TODO: a grok.com session client could mint the URL. Do not add a browser,
- * cookie, or WebSocket driver here — age-gate and OAuth are operator setup,
- * and the API Imagine plus search cascade stays the reliable path.
+ * Adult commands try this bank first, then image search. They do not call the
+ * Imagine generate client.
  */
 
 export const IMAGINE_PUBLIC_HOST = "imagine-public.x.ai";

@@ -4,6 +4,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  MediaCaption,
   OutboundAudio,
   OutboundImage,
   OutboundVideo,
@@ -17,6 +18,8 @@ import {
   CHAT_MEDIA_TYPE_VIDEO,
   type ChatCipher,
   type ChatMediaAttachment,
+  type EncryptMessageOptions,
+  type EncryptReplyOptions,
   type ConversationKeySet,
   type SigningKeyEntry,
 } from "./cipher.js";
@@ -208,10 +211,14 @@ export class ChatService {
     return { events, nextToken: page.meta?.next_token };
   }
 
-  async sendText(conversationId: string, text: string): Promise<SendMessageResult> {
+  async sendText(
+    conversationId: string,
+    text: string,
+    caption?: MediaCaption,
+  ): Promise<SendMessageResult> {
     let payload;
     try {
-      payload = this.cipher.encryptMessage(conversationId, text);
+      payload = this.encryptOutbound(conversationId, text, caption);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(
@@ -235,8 +242,8 @@ export class ChatService {
    * Does not use classic DM `dm_image`.
    *
    * `encryptMessage` requires a text argument. chat-xdk accepts `""`
-   * (`build_message_content` still emits a payload) and the photo is the
-   * message. A space would be visible message text, so the caption is empty.
+   * (`build_message_content` still emits a payload). A caption, when set,
+   * is that text (an `@handle` for adult posts) and is not an 18+ label.
    */
   async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {
     const bytes = image.bytes;
@@ -244,11 +251,16 @@ export class ChatService {
       throw new Error("No image bytes to attach to Chat.");
     }
     const inspected = await inspectChatImage(bytes, image.mimeType);
-    return this.sendChatMedia(conversationId, bytes, {
-      width: inspected.width,
-      height: inspected.height,
-      filename: inspected.filename,
-    });
+    return this.sendChatMedia(
+      conversationId,
+      bytes,
+      {
+        width: inspected.width,
+        height: inspected.height,
+        filename: inspected.filename,
+      },
+      image.caption,
+    );
   }
 
   /**
@@ -263,12 +275,17 @@ export class ChatService {
     }
     const width = positiveEven(video.width) ?? 1280;
     const height = positiveEven(video.height) ?? 720;
-    return this.sendChatMedia(conversationId, bytes, {
-      width,
-      height,
-      filename: "video.mp4",
-      mediaType: CHAT_MEDIA_TYPE_VIDEO,
-    });
+    return this.sendChatMedia(
+      conversationId,
+      bytes,
+      {
+        width,
+        height,
+        filename: "video.mp4",
+        mediaType: CHAT_MEDIA_TYPE_VIDEO,
+      },
+      video.caption,
+    );
   }
 
   /**
@@ -284,13 +301,50 @@ export class ChatService {
       throw new Error("No audio bytes to attach to Chat.");
     }
     const duration = positiveDuration(audio.durationMillis) ?? 1;
-    return this.sendChatMedia(conversationId, bytes, {
-      width: 1,
-      height: 1,
-      filename: "voice.mp3",
-      mediaType: CHAT_MEDIA_TYPE_AUDIO,
-      durationMillis: duration,
-    });
+    return this.sendChatMedia(
+      conversationId,
+      bytes,
+      {
+        width: 1,
+        height: 1,
+        filename: "voice.mp3",
+        mediaType: CHAT_MEDIA_TYPE_AUDIO,
+        durationMillis: duration,
+      },
+      audio.caption,
+    );
+  }
+
+  /**
+   * `encryptReply` when the caption names a Chat message. Otherwise
+   * `encryptMessage`. A mention entity is the `@handle` byte range.
+   */
+  private encryptOutbound(
+    conversationId: string,
+    text: string,
+    caption?: MediaCaption,
+    extra?: EncryptMessageOptions,
+  ): ReturnType<ChatCipher["encryptMessage"]> {
+    const mention = caption?.mention;
+    const entities = mention
+      ? ([[mention.start, mention.end, "mention"]] as EncryptReplyOptions["entities"])
+      : undefined;
+    const options: EncryptReplyOptions = {
+      ...extra,
+      ...(entities ? { entities } : {}),
+    };
+    const reply = caption?.replyTo;
+    if (reply && (reply.rawEvent || reply.sequenceId)) {
+      return this.cipher.encryptReply(conversationId, text, {
+        ...options,
+        ...(reply.rawEvent ? { replyToEvent: reply.rawEvent } : {}),
+        ...(reply.sequenceId ? { replyToSequenceId: reply.sequenceId } : {}),
+        ...(reply.senderId ? { replyToSenderId: reply.senderId } : {}),
+        ...(reply.previewText ? { replyToText: reply.previewText } : {}),
+      });
+    }
+    const hasOptions = Boolean(extra || entities);
+    return this.cipher.encryptMessage(conversationId, text, hasOptions ? options : undefined);
   }
 
   /**
@@ -305,6 +359,7 @@ export class ChatService {
       ChatMediaAttachment,
       "width" | "height" | "filename" | "mediaType" | "durationMillis"
     >,
+    caption?: MediaCaption,
   ): Promise<SendMessageResult> {
     const latest = this.conversationKeys.get(conversationId);
     if (!latest) {
@@ -320,7 +375,7 @@ export class ChatService {
     const label = mediaLabel(attachment.mediaType);
     let payload;
     try {
-      payload = this.cipher.encryptMessage(conversationId, "", {
+      payload = this.encryptOutbound(conversationId, caption?.text ?? "", caption, {
         conversationKey: latest.key,
         conversationKeyVersion: latest.version,
         attachments: [
@@ -562,6 +617,10 @@ export class ChatService {
       const dm = chatEventToDm(conversationId, raw, decrypted);
       if (!dm) continue;
       this.store.rememberChatMessage(dm.id, dm.conversationId, dm.sequenceId, dm.createdAt);
+      const sentId = decrypted?.id?.trim();
+      if (sentId && sentId !== dm.id) {
+        this.store.rememberChatMessage(sentId, dm.conversationId, dm.sequenceId, dm.createdAt);
+      }
       events.push(dm);
     }
     return events;

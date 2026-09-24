@@ -491,58 +491,54 @@ describe("engine Imagine and search dedupe", () => {
       imagine: options?.imagine === false ? undefined : imagine,
       imaginePublic: options?.imaginePublic,
       fetchVideo: options?.fetchVideo,
-      adultImageProvider: options?.provider,
       recentImages: createRecentImageMemory(options?.recentLimit ?? 8),
       random: options?.random ?? (() => 0),
     });
     return { engine, client, search, imagine };
   }
 
-  it("generates a fresh chest photo and does not search or caption it", async () => {
+  it("does not call Imagine for !boobs and searches when the saved bank is empty", async () => {
     const { engine, client, search, imagine } = setup({ provider: "imagine" });
     const actions = await engine.processEvent(message({ id: "img-1", text: "!Boobs" }));
-    expect(search.calls).toBe(0);
-    expect(imagine.prompts).toHaveLength(1);
-    expect(imagine.prompts[0]).toMatch(/cleavage|chest/i);
-    expect(imagine.prompts[0]).not.toMatch(/18\+/);
-    expect(client.images).toEqual([
-      {
-        conversationId: groupId,
-        url: "https://imgen.x.ai/fresh-1.jpg",
-        mimeType: "image/jpeg",
-        bytes: 2,
-      },
-    ]);
+    expect(imagine.prompts).toHaveLength(0);
+    expect(search.calls).toBe(1);
+    expect(client.images.map((row) => row.url)).toEqual([URL_A]);
     expect(client.sent).toHaveLength(0);
     expect(actions.replies).toEqual([]);
+    expect(JSON.stringify(client.images)).not.toContain("18+");
   });
 
-  it("uses the butt prompt for !ass and !booty", async () => {
-    const { engine, imagine, search } = setup({ provider: "imagine" });
+  it("does not call Imagine for !ass and !booty and searches when the bank is empty", async () => {
+    const { engine, client, imagine, search } = setup({ provider: "imagine" });
     await engine.processEvent(message({ id: "ass-1", text: "!ass" }));
     await engine.processEvent(message({ id: "booty-1", text: "!booty" }));
-    expect(search.calls).toBe(0);
-    expect(imagine.prompts).toHaveLength(2);
-    for (const prompt of imagine.prompts) {
-      expect(prompt).toMatch(/butt|from behind/i);
-      expect(prompt).not.toMatch(/cleavage/i);
-      expect(prompt).not.toMatch(/18\+/);
-    }
+    expect(imagine.prompts).toHaveLength(0);
+    expect(search.calls).toBe(2);
+    expect(client.images.map((row) => row.url)).toEqual([URL_B]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "@alice No matching image came back. Try again.",
+    ]);
   });
 
-  it("attaches a configured imagine-public JPEG when API Imagine misses, with no caption", async () => {
+  it("attaches a configured imagine-public JPEG, mentions the requester, and does not call Imagine", async () => {
     const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
     const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
     const posted = setup({
       provider: "imagine",
-      failGenerate: true,
       imaginePublic: { chestUrl: chest, bootyUrl: booty },
     });
     const actions = await posted.engine.processEvent(message({ id: "pub-1", text: "!boobs" }));
-    expect(posted.imagine.prompts).toHaveLength(1);
+    expect(posted.imagine.prompts).toHaveLength(0);
     expect(posted.search.calls).toBe(0);
     expect(posted.client.images).toEqual([
-      { conversationId: groupId, url: chest, mimeType: "image/jpeg", bytes: 2 },
+      {
+        conversationId: groupId,
+        url: chest,
+        mimeType: "image/jpeg",
+        bytes: 2,
+        caption: "@alice",
+        mention: "alice",
+      },
     ]);
     expect(posted.client.sent).toHaveLength(0);
     expect(actions.replies).toEqual([]);
@@ -575,13 +571,26 @@ describe("engine Imagine and search dedupe", () => {
         url: image.url,
         mimeType: image.mimeType,
         bytes: image.bytes.byteLength,
+        ...(image.caption
+          ? {
+              caption: image.caption.text,
+              ...(image.caption.mention ? { mention: image.caption.mention.username } : {}),
+            }
+          : {}),
       });
       return { dmEventId: `img-${client.images.length}`, dmConversationId: conversationId };
     };
 
     await engine.processEvent(message({ id: "bytes-1", text: "!booty" }));
     expect(client.images).toEqual([
-      { conversationId: groupId, url: second, mimeType: "image/jpeg", bytes: 2 },
+      {
+        conversationId: groupId,
+        url: second,
+        mimeType: "image/jpeg",
+        bytes: 2,
+        caption: "@alice",
+        mention: "alice",
+      },
     ]);
     expect(client.sent).toHaveLength(0);
     expect(search.calls).toBe(0);
@@ -599,16 +608,16 @@ describe("engine Imagine and search dedupe", () => {
     expect(blocked.search.calls).toBe(1);
   });
 
-  it("keeps API Imagine ahead of a configured public JPEG and does not search", async () => {
+  it("uses the saved bank ahead of Imagine and search", async () => {
     const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
     const { engine, client, search, imagine } = setup({
       provider: "imagine",
       imaginePublic: { chestUrl: chest },
     });
     await engine.processEvent(message({ id: "api-first", text: "!boobs" }));
-    expect(imagine.prompts).toHaveLength(1);
+    expect(imagine.prompts).toHaveLength(0);
     expect(search.calls).toBe(0);
-    expect(client.images.map((row) => row.url)).toEqual(["https://imgen.x.ai/fresh-1.jpg"]);
+    expect(client.images.map((row) => row.url)).toEqual([chest]);
   });
 
   it("searches when the public JPEG is missing, already posted, or not a JPEG", async () => {
@@ -643,18 +652,18 @@ describe("engine Imagine and search dedupe", () => {
     expect(repeat.client.images[1]?.url).toMatch(/^https:\/\/cdn\.example\//);
   });
 
-  it("does not use the public JPEG when API Imagine blocks the image", async () => {
+  it("uses the public JPEG when Imagine would block the image, and does not call Imagine", async () => {
     const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
-    const { engine, client, search } = setup({
+    const { engine, client, search, imagine } = setup({
       provider: "imagine",
       failGenerate: "moderated",
       imaginePublic: { chestUrl: chest },
     });
     await engine.processEvent(message({ id: "mod-public", text: "!boobs" }));
+    expect(imagine.prompts).toHaveLength(0);
     expect(search.calls).toBe(0);
-    expect(client.images).toHaveLength(0);
-    expect(client.sent[0]?.text).toMatch(/blocked by content moderation/i);
-    expect(client.sent.map((row) => row.text).join("\n")).not.toContain(chest);
+    expect(client.images.map((row) => row.url)).toEqual([chest]);
+    expect(client.sent.map((row) => row.text).join("\n")).not.toMatch(/blocked by content moderation/i);
   });
 
   it("uses the public JPEG before search when Imagine is not selected", async () => {
@@ -783,6 +792,8 @@ describe("engine Imagine and search dedupe", () => {
         bytes: 4,
         width: undefined,
         height: undefined,
+        caption: "@alice",
+        mention: "alice",
       },
       {
         conversationId: chatGroupId,
@@ -791,6 +802,8 @@ describe("engine Imagine and search dedupe", () => {
         bytes: 4,
         width: undefined,
         height: undefined,
+        caption: "@alice",
+        mention: "alice",
       },
       {
         conversationId: chatGroupId,
@@ -799,8 +812,79 @@ describe("engine Imagine and search dedupe", () => {
         bytes: 4,
         width: undefined,
         height: undefined,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
+  });
+
+  it("replies to the command when a bank still or clip is posted in Chat", async () => {
+    const chest =
+      "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const clip =
+      "https://imagine-public.x.ai/imagine-public/videos/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.mp4";
+    const still = setup({
+      provider: "imagine",
+      imaginePublic: { chestUrl: chest },
+    });
+    await still.engine.processEvent(
+      message({
+        id: "reply-still",
+        conversationId: chatGroupId,
+        text: "!boobs",
+        sequenceId: "55",
+        encodedEvent: "blob-cmd",
+      }),
+    );
+    expect(still.imagine.prompts).toHaveLength(0);
+    expect(still.search.calls).toBe(0);
+    expect(still.client.images).toEqual([
+      {
+        conversationId: chatGroupId,
+        url: chest,
+        mimeType: "image/jpeg",
+        bytes: 2,
+        caption: "@alice",
+        mention: "alice",
+        replyToSequenceId: "55",
+        replyToSenderId: alice.id,
+        replyToEvent: "blob-cmd",
+      },
+    ]);
+    expect(JSON.stringify(still.client.images)).not.toContain("18+");
+
+    const video = setup({
+      provider: "imagine",
+      imaginePublic: { boobsVideoUrls: [clip] },
+      fetchVideo: async () => ({ bytes: Uint8Array.from([1, 2, 3, 4]), mimeType: "video/mp4" }),
+    });
+    await video.engine.processEvent(
+      message({
+        id: "reply-clip",
+        conversationId: chatGroupId,
+        text: "!boobs",
+        sequenceId: "56",
+        encodedEvent: "blob-clip",
+      }),
+    );
+    expect(video.imagine.prompts).toHaveLength(0);
+    expect(video.search.calls).toBe(0);
+    expect(video.client.videos).toEqual([
+      {
+        conversationId: chatGroupId,
+        url: clip,
+        mimeType: "video/mp4",
+        bytes: 4,
+        width: undefined,
+        height: undefined,
+        caption: "@alice",
+        mention: "alice",
+        replyToSequenceId: "56",
+        replyToSenderId: alice.id,
+        replyToEvent: "blob-clip",
+      },
+    ]);
+    expect(JSON.stringify(video.client.videos)).not.toContain("18+");
   });
 
   it("posts the still when the roll is an image and keeps a classic DM off mp4", async () => {
@@ -893,10 +977,10 @@ describe("engine Imagine and search dedupe", () => {
     expect(missed.client.images.map((row) => row.url)).toEqual([URL_A]);
   });
 
-  it("falls back to search when Imagine fails and skips Imagine when search is selected", async () => {
+  it("searches when the saved bank is empty and does not call Imagine for either provider", async () => {
     const failed = setup({ provider: "imagine", failGenerate: true });
     await failed.engine.processEvent(message({ id: "fall-1", text: "!boobs" }));
-    expect(failed.imagine.prompts).toHaveLength(1);
+    expect(failed.imagine.prompts).toHaveLength(0);
     expect(failed.search.calls).toBe(1);
     expect(failed.client.images.map((row) => row.url)).toEqual([URL_A]);
 
@@ -920,7 +1004,9 @@ describe("engine Imagine and search dedupe", () => {
     await engine.processEvent(message({ id: "h1", text: "!boobs" }));
     await engine.processEvent(message({ id: "h2", text: "!boobs" }));
     expect(client.images.map((row) => row.url)).toEqual([URL_A]);
-    expect(client.sent.map((row) => row.text)).toEqual(["No matching image came back. Try again."]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "@alice No matching image came back. Try again.",
+    ]);
   });
 
   it("keeps the recent window per conversation", async () => {
@@ -942,28 +1028,25 @@ describe("engine Imagine and search dedupe", () => {
     expect(disabled.client.sent[0]?.text).toMatch(/disabled/);
   });
 
-  it("replies in the chat when Imagine blocks an adult image, and does not search", async () => {
+  it("does not call Imagine or post a moderation reply for adult commands", async () => {
     for (const command of ["boobs", "ass", "booty"] as const) {
       const { engine, client, search, imagine } = setup({ provider: "imagine", failGenerate: "moderated" });
       await engine.processEvent(message({ id: `mod-${command}`, text: `!${command}` }));
-      expect(search.calls).toBe(0);
-      expect(imagine.prompts).toHaveLength(1);
-      expect(client.images).toHaveLength(0);
+      expect(imagine.prompts).toHaveLength(0);
+      expect(search.calls).toBe(1);
+      expect(client.images).toHaveLength(1);
       const text = client.sent.map((row) => row.text).join("\n");
-      expect(text).toMatch(/blocked by content moderation/i);
-      expect(numberedPrompts(text)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
-      expect(text).not.toMatch(/cost_ticks|imagine:content-moderated|\{/);
-      expect(text).not.toMatch(/\b(nude|naked|cleavage|lingerie|boobs|tits|butts?|booty|porn)\b/i);
-      expect(text).toMatch(/woman|portrait|fashion|illustration/i);
+      expect(text).not.toMatch(/blocked by content moderation/i);
     }
   });
 
-  it("rate-limits before calling Imagine", async () => {
-    const { engine, imagine } = setup({ provider: "imagine", perUser: 1, windowMs: 60_000 });
+  it("rate-limits before the saved bank and search", async () => {
+    const { engine, imagine, search } = setup({ provider: "imagine", perUser: 1, windowMs: 60_000 });
     const now = 5_000_000;
     await engine.processEvent(message({ id: "r1", text: "!boobs" }), now);
     await engine.processEvent(message({ id: "r2", text: "!ass" }), now + 1);
-    expect(imagine.prompts).toHaveLength(1);
+    expect(imagine.prompts).toHaveLength(0);
+    expect(search.calls).toBe(1);
   });
 });
 
@@ -1011,7 +1094,6 @@ describe("!imagine command", () => {
       {
         imagine: options?.imagine === false ? undefined : imagine,
         fetchImage: async () => ({ bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/jpeg" }),
-        adultImageProvider: "search",
       },
     );
     return { engine, client, imagine, store };
@@ -1029,6 +1111,8 @@ describe("!imagine command", () => {
         url: "https://imgen.x.ai/user.jpg",
         mimeType: "image/jpeg",
         bytes: 3,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -1042,7 +1126,7 @@ describe("!imagine command", () => {
       message({ id: "free-link", text: "!imagine a neon cat" }),
     );
     expect(client.images).toHaveLength(0);
-    expect(actions.replies).toEqual(["https://imgen.x.ai/user.jpg"]);
+    expect(actions.replies).toEqual(["@alice https://imgen.x.ai/user.jpg"]);
   });
 
   it("rejects an empty prompt, minor wording, and a missing key, and sends a long prompt", async () => {
@@ -1074,7 +1158,7 @@ describe("!imagine command", () => {
     await engine.processEvent(message({ id: "api-long", text: `!imagine ${"b".repeat(2000)}` }));
     expect(imagine.prompts[0]).toHaveLength(2000);
     expect(client.images).toHaveLength(0);
-    expect(client.sent.map((row) => row.text)).toEqual([IMAGINE_TOO_LONG_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${IMAGINE_TOO_LONG_MESSAGE}`]);
   });
 
   it("is listed in the default help text", () => {
@@ -1093,7 +1177,7 @@ describe("!imagine command", () => {
     expect(client.images).toHaveLength(0);
     expect(client.sent).toHaveLength(1);
     const text = client.sent[0]?.text ?? "";
-    expect(text.startsWith(IMAGINE_MODERATED_INTRO)).toBe(true);
+    expect(text.startsWith(`@alice ${IMAGINE_MODERATED_INTRO}`)).toBe(true);
     expect(numberedPrompts(text)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
     expect(text).not.toMatch(/cost_ticks|imagine:content-moderated|\{/);
     expect(text).not.toMatch(/\b(nude|naked|cleavage|porn)\b/i);
@@ -1150,7 +1234,7 @@ describe("!imagine command", () => {
     });
     await engine.processEvent(message({ id: "down", text: "!imagine a neon cat" }));
     expect(client.images).toHaveLength(0);
-    expect(client.sent.map((row) => row.text)).toEqual([IMAGINE_FAILED_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${IMAGINE_FAILED_MESSAGE}`]);
   });
 });
 

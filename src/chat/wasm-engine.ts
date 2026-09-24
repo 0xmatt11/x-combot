@@ -5,8 +5,11 @@ import { pathToFileURL } from "node:url";
 import type {
   ActionSignature,
   ChatCipher,
+  ChatEntity,
+  ChatMediaAttachment,
   DecryptEventsResult,
   EncryptMessageOptions,
+  EncryptReplyOptions,
   LoadedChatIdentity,
   PreparedKeyChange,
   PublicKeyMaterial,
@@ -39,16 +42,22 @@ export interface XdkLike {
     text: string;
     conversationKey?: Uint8Array;
     conversationKeyVersion?: string;
-    attachments?: Array<{
-      attachment_type: "media";
-      media_hash_key: string;
-      width: number;
-      height: number;
-      filesize_bytes: number;
-      filename: string;
-      media_type?: number;
-      duration_millis?: number;
-    }>;
+    entities?: ChatEntity[];
+    attachments?: ChatAttachmentWire[];
+  }): SendPayload & {
+    encodedEventSignature?: string;
+  };
+  encryptReply(params: {
+    conversationId: string;
+    text: string;
+    conversationKey?: Uint8Array;
+    conversationKeyVersion?: string;
+    entities?: ChatEntity[];
+    attachments?: ChatAttachmentWire[];
+    replyToEvent?: string;
+    replyToSequenceId?: string;
+    replyToSenderId?: string;
+    replyToText?: string;
   }): SendPayload & {
     encodedEventSignature?: string;
   };
@@ -153,47 +162,24 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
       return identity;
     },
     encryptMessage(conversationId, text, options?: EncryptMessageOptions) {
-      const attachments = options?.attachments?.map((item) => {
-        const descriptor: {
-          attachment_type: "media";
-          media_hash_key: string;
-          width: number;
-          height: number;
-          filesize_bytes: number;
-          filename: string;
-          media_type?: number;
-          duration_millis?: number;
-        } = {
-          attachment_type: "media",
-          media_hash_key: item.mediaHashKey,
-          width: item.width,
-          height: item.height,
-          filesize_bytes: item.filesizeBytes,
-          filename: item.filename,
-        };
-        // Omitted media_type defaults to image (inline photo, not a file).
-        if (item.mediaType !== undefined) descriptor.media_type = item.mediaType;
-        if (item.durationMillis !== undefined) descriptor.duration_millis = item.durationMillis;
-        return descriptor;
-      });
       const payload = inner.encryptMessage({
         conversationId,
         text,
-        ...(options?.conversationKey ? { conversationKey: options.conversationKey } : {}),
-        ...(options?.conversationKeyVersion
-          ? { conversationKeyVersion: options.conversationKeyVersion }
-          : {}),
-        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...encryptFields(options),
       });
-      const encoded =
-        payload.encodedEventSignature ??
-        (payload as { encoded_event_signature?: string }).encoded_event_signature ??
-        "";
-      return {
-        messageId: payload.messageId,
-        encryptedContent: payload.encryptedContent,
-        encodedEventSignature: encoded,
-      };
+      return readSendPayload(payload);
+    },
+    encryptReply(conversationId, text, options?: EncryptReplyOptions) {
+      const payload = inner.encryptReply({
+        conversationId,
+        text,
+        ...encryptFields(options),
+        ...(options?.replyToEvent ? { replyToEvent: options.replyToEvent } : {}),
+        ...(options?.replyToSequenceId ? { replyToSequenceId: options.replyToSequenceId } : {}),
+        ...(options?.replyToSenderId ? { replyToSenderId: options.replyToSenderId } : {}),
+        ...(options?.replyToText ? { replyToText: options.replyToText } : {}),
+      });
+      return readSendPayload(payload);
     },
     encryptStream(plaintext, conversationKey) {
       return inner.encryptStream(plaintext, conversationKey);
@@ -255,6 +241,63 @@ function normalizeConversationKeys(raw: unknown): DecryptEventsResult["conversat
         ? String(latestRaw)
         : null;
   return { keys, latestVersion };
+}
+
+interface ChatAttachmentWire {
+  attachment_type: "media";
+  media_hash_key: string;
+  width: number;
+  height: number;
+  filesize_bytes: number;
+  filename: string;
+  media_type?: number;
+  duration_millis?: number;
+}
+
+function wireAttachments(items: ChatMediaAttachment[] | undefined): ChatAttachmentWire[] | undefined {
+  if (!items || items.length === 0) return undefined;
+  return items.map((item) => {
+    const descriptor: ChatAttachmentWire = {
+      attachment_type: "media",
+      media_hash_key: item.mediaHashKey,
+      width: item.width,
+      height: item.height,
+      filesize_bytes: item.filesizeBytes,
+      filename: item.filename,
+    };
+    // Omitted media_type defaults to image (inline photo, not a file).
+    if (item.mediaType !== undefined) descriptor.media_type = item.mediaType;
+    if (item.durationMillis !== undefined) descriptor.duration_millis = item.durationMillis;
+    return descriptor;
+  });
+}
+
+function encryptFields(options?: EncryptMessageOptions): {
+  conversationKey?: Uint8Array;
+  conversationKeyVersion?: string;
+  entities?: ChatEntity[];
+  attachments?: ChatAttachmentWire[];
+} {
+  const attachments = wireAttachments(options?.attachments);
+  return {
+    ...(options?.conversationKey ? { conversationKey: options.conversationKey } : {}),
+    ...(options?.conversationKeyVersion
+      ? { conversationKeyVersion: options.conversationKeyVersion }
+      : {}),
+    ...(options?.entities && options.entities.length > 0 ? { entities: options.entities } : {}),
+    ...(attachments ? { attachments } : {}),
+  };
+}
+
+function readSendPayload(payload: SendPayload & { encoded_event_signature?: string }): SendPayload {
+  return {
+    messageId: payload.messageId,
+    encryptedContent: payload.encryptedContent,
+    encodedEventSignature:
+      payload.encodedEventSignature ??
+      payload.encoded_event_signature ??
+      "",
+  };
 }
 
 export function exportIdentity(chat: XdkLike): string {

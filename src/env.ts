@@ -315,8 +315,9 @@ export interface Env {
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
   boobsSearchApiKey?: string;
   /**
-   * Adult-image source. `imagine` or `search`. Unset means Imagine when an xAI
-   * key is present, otherwise the search cascade.
+   * Still parsed (`imagine` or `search`) so an existing `.env` does not fail
+   * startup. Adult commands ignore it. They use the saved imagine-public bank,
+   * then search, and do not call Imagine.
    */
   boobsImageProvider?: AdultImageProviderName;
   /** Imagine model id. Unset uses `grok-imagine-image-quality`. */
@@ -324,9 +325,9 @@ export interface Env {
   /** Optional Imagine aspect ratio. Unset lets the model choose. */
   boobsImagineAspectRatio?: ImagineAspectRatio;
   /**
-   * When true, adult commands may attach an already-hosted imagine-public
-   * JPEG or mp4 after Imagine misses and before search. Default off.
-   * Static fetches only. Does not open grok.com.
+   * When true, adult commands attach an already-hosted imagine-public JPEG or
+   * mp4 before search. Default off. Static fetches only. Does not open grok.com.
+   * Adult commands do not call Imagine whether this is on or off.
    */
   boobsImagineApp?: boolean;
   /** `!boobs` JPEG on imagine-public.x.ai. Ignored unless `boobsImagineApp` is true. */
@@ -346,8 +347,9 @@ export interface Env {
   boobsImaginePublicBootyVideoUrls?: string[];
   boobsImaginePublicBoobsVideoUrls?: string[];
   /**
-   * Where `!imagine`, `!video`, and adult Imagine gens run.
+   * Where `!imagine` and `!video` run.
    * Default `browser` (grok.com/imagine). `api` keeps api.x.ai generations.
+   * Adult photo commands do not use this.
    */
   imagineBackend: ImagineBackend;
   /** Chrome user-data dir signed in as @0xMatt66. Browser mode only. */

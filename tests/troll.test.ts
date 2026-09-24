@@ -95,7 +95,7 @@ describe("troll mode", () => {
       roastNext: 0,
     });
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
+      "@alice Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
     ]);
 
     await engine.processEvent(
@@ -108,7 +108,7 @@ describe("troll mode", () => {
       1_000,
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
+      "@alice Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
       FIRST_JOKE,
     ]);
     expect(client.sent.some((row) => row.text.includes(bob.id))).toBe(false);
@@ -155,7 +155,7 @@ describe("troll mode", () => {
       message({ id: "b2", senderId: bob.id, text: "no roast" }),
       1_000_000 + TROLL_COOLDOWN_MS,
     );
-    expect(client.sent.at(-1)?.text).toBe("Troll mode off for @bob.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll mode off for @bob.");
     expect(client.sent.some((row) => row.text.includes("Troll mode stays on for @bob"))).toBe(true);
     expect(client.sent.some((row) => row.text.includes("Still trolling @bob"))).toBe(true);
   });
@@ -174,7 +174,7 @@ describe("troll mode", () => {
     );
     expect(client.sent.filter((row) => row.text === FIRST_JOKE)).toHaveLength(1);
     expect(client.sent.at(-1)?.text).toBe(
-      "Already trolling @bob. That stays on until !untroll @bob.",
+      "@alice Already trolling @bob. That stays on until !untroll @bob.",
     );
     await engine.processEvent(message({ id: "switch", senderId: alice.id, text: "!troll @alice" }));
     expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);

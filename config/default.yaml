@@ -22,16 +22,16 @@ rules: |
   3. Follow X's rules: https://help.x.com/rules-and-policies
 
 help: |
-  Public commands:
+  Public commands. Every reply tags you and, in encrypted Chat, replies to your message. User command messages auto-delete after 15 minutes when the API allows. That covers every public command on this list, including !help. Bot replies stay: help text, pictures, video, voice, games, !ask answers, roasts, and !status stay in chat. Deleting your command leaves that reply up. The quote of your command can show that message as deleted.
     !help — this message
-    !status — health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     !rules — group rules
-    !boobs — chest / cleavage photo or clip (off unless enabled)
-    !ass / !booty / !booties — butt photo or clip (same switch as !boobs)
+    !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty. Tags you and replies to your command (off unless enabled; does not open grok.com/imagine)
+    !ass / !booty / !booties — butt photo or clip from that same saved bank. Same tag and reply (same switch as !boobs; does not open grok.com/imagine)
     !imagine <prompt> — image from grok.com/imagine in the signed-in Chrome session (not the xAI API)
     !video <prompt> — short video from grok.com/imagine in that same Chrome session (takes a few minutes)
-    !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
+    !voice — pick a persona, then a line. Bare !voice lists them: 1 Girl 1, 2 regular dude, 3 Girl 2, 4 Girl 3 (!voice girl1 hello, !voice 2 what's up)
     !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
+    !roast @user — one dunk from their lines in this chat and their public posts. Does not turn on !troll. Reply to them with no @user, or use a display name. /roast works too
     !linkroast on — roast people who drop X status links in this chat until !linkroast off
     !noor on — Noor alert for @noorrietje. Relays each new post with the status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. Photo posts also attach an Imagine troll remix. !noor off stops it. Name and on/off are case-insensitive
     !noorabs on — when a Noor alert fires, add "but look at muh pretty abs" and an Imagine close-up of skinny tanned abs. Needs !noor on. !noorabs off stops it
@@ -71,6 +71,7 @@ help: |
 
   Admin commands:
     !auth — owner only (BOT_OWNER_ID). A new encrypted Chat group stays silent until that account sends exact !auth (any case, optional surrounding spaces). !auth please does not count. Other people are ignored. Groups already watermarked before this rule are already authorized. Classic group DMs do not need it
+    !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.
     !warn @user [reason] — add a warning
     !warns @user — show warning count
@@ -158,14 +159,18 @@ xp:
 
 # Adult images (`!boobs`, and `!ass` / `!booty` / `!booties`). Off by default so a moderation
 # deploy does not post NSFW. One switch covers all of them: enabled: true or
-# BOOBS_ENABLED=true (env wins). The default Imagine path is the grok.com/imagine
-# Chrome session (IMAGINE_BACKEND=browser). IMAGINE_BACKEND=api uses the xAI
-# image API when a key is set. BOOBS_IMAGE_PROVIDER=search keeps the DuckDuckGo
-# cascade (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are
-# off-topic, keyless Bing HTML (adlt=off) runs next, then Reddit. Search
-# also skips the last few posted URLs and image hashes in that conversation.
-# The command ignores extra text so members cannot change the prompt. See the README.
-# !imagine <prompt> uses the same Imagine path and does not use this switch.
+# BOOBS_ENABLED=true (env wins). These commands use the saved imagine-public
+# bank (BOOBS_IMAGINE_APP and the BOOBS_IMAGINE_PUBLIC_* URL lists), then the
+# search cascade if that bank is empty. They do not open grok.com/imagine and
+# they do not call api.x.ai image generation. !imagine and !video still use
+# the Chrome session (IMAGINE_BACKEND=browser). Search is DuckDuckGo by default
+# (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are off-topic,
+# keyless Bing HTML (adlt=off) runs next, then Reddit. Search also skips the
+# last few posted URLs and image hashes in that conversation.
+# The command ignores extra text so members cannot change the prompt. A posted
+# photo or clip tags the requester (@handle) and, in encrypted Chat, replies
+# to their command. See the README.
+# !imagine <prompt> uses the Imagine path and does not use this switch.
 # Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
 # count is enforced only when rate_limit_window_ms is also positive.
 # vision: optional download + LLM check (chest/butt subject, no genitalia).

@@ -498,8 +498,8 @@ describe("!video command", () => {
     );
     const started = await pending;
     await vi.waitUntil(() => sleeps.length === 1);
-    expect(started.replies).toEqual([VIDEO_STARTED_MESSAGE]);
-    expect(client.sent.map((row) => row.text)).toEqual([VIDEO_STARTED_MESSAGE]);
+    expect(started.replies).toEqual([`@alice ${VIDEO_STARTED_MESSAGE}`]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${VIDEO_STARTED_MESSAGE}`]);
     expect(client.videos).toHaveLength(0);
     releaseSleep();
     await engine.waitForBackgroundWork();
@@ -512,10 +512,12 @@ describe("!video command", () => {
         bytes: 4,
         width: 1280,
         height: 720,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
-    expect(client.sent.map((row) => row.text)).toEqual([VIDEO_STARTED_MESSAGE]);
-    expect(started.replies).toEqual([VIDEO_STARTED_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${VIDEO_STARTED_MESSAGE}`]);
+    expect(started.replies).toEqual([`@alice ${VIDEO_STARTED_MESSAGE}`]);
   });
 
   it("posts the temporary url with a note in a classic group DM", async () => {
@@ -528,8 +530,8 @@ describe("!video command", () => {
     expect(fetches).toHaveLength(0);
     expect(client.videos).toHaveLength(0);
     expect(actions.replies).toEqual([
-      VIDEO_STARTED_MESSAGE,
-      formatVideoReadyMessage(VIDEO_URL),
+      `@alice ${VIDEO_STARTED_MESSAGE}`,
+      `@alice ${formatVideoReadyMessage(VIDEO_URL)}`,
     ]);
     expect(actions.replies[1]).toMatch(/temporary/);
     expect(actions.replies[1]).toContain(VIDEO_URL);
@@ -542,8 +544,8 @@ describe("!video command", () => {
       message({ id: "chat-fail", conversationId: chatGroupId, text: "!video a paper boat" }),
     );
     expect(client.videos).toHaveLength(0);
-    expect(actions.replies[0]).toBe(VIDEO_STARTED_MESSAGE);
-    expect(actions.replies[1]).toBe(formatVideoReadyMessage(VIDEO_URL));
+    expect(actions.replies[0]).toBe(`@alice ${VIDEO_STARTED_MESSAGE}`);
+    expect(actions.replies[1]).toBe(`@alice ${formatVideoReadyMessage(VIDEO_URL)}`);
   });
 
   it("rejects an empty prompt and minor wording, and sends a long prompt", async () => {
@@ -560,11 +562,11 @@ describe("!video command", () => {
     expect(text).toMatch(/not allowed/);
     expect(text).toContain(IMAGINE_REFUSED_MESSAGE);
     expect(text).not.toMatch(/teen/);
-    expect(client.sent.filter((row) => row.text === VIDEO_STARTED_MESSAGE)).toHaveLength(1);
+    expect(client.sent.filter((row) => row.text === `@alice ${VIDEO_STARTED_MESSAGE}`)).toHaveLength(1);
 
     const missing = setup({ video: false });
     await run(missing.engine, message({ id: "nokey", text: "!video a paper boat" }));
-    expect(missing.client.sent[0]?.text).toBe(VIDEO_UNAVAILABLE_MESSAGE);
+    expect(missing.client.sent[0]?.text).toBe(`@alice ${VIDEO_UNAVAILABLE_MESSAGE}`);
     expect(missing.client.sent[0]?.text).toMatch(/XAI_API_KEY/);
   });
 
@@ -588,8 +590,8 @@ describe("!video command", () => {
     expect(video.prompts).toEqual(["a nude woman on a beach at sunset"]);
     expect(client.videos).toHaveLength(0);
     const text = client.sent.map((row) => row.text).join("\n");
-    expect(client.sent[0]?.text).toBe(VIDEO_STARTED_MESSAGE);
-    expect(client.sent[1]?.text.startsWith(VIDEO_MODERATED_INTRO)).toBe(true);
+    expect(client.sent[0]?.text).toBe(`@alice ${VIDEO_STARTED_MESSAGE}`);
+    expect(client.sent[1]?.text.startsWith(`@alice ${VIDEO_MODERATED_INTRO}`)).toBe(true);
     expect(numberedPrompts(client.sent[1]?.text ?? "")).toHaveLength(IMAGINE_SUGGESTION_COUNT);
     expect(text).not.toMatch(/cost_ticks|\{/);
     expect(text).not.toMatch(/\b(nude|naked|cleavage|porn)\b/i);
@@ -631,8 +633,8 @@ describe("!video command", () => {
     });
     await run(failed.engine, message({ id: "down", text: "!video a paper boat" }));
     expect(failed.client.sent.map((row) => row.text)).toEqual([
-      VIDEO_STARTED_MESSAGE,
-      VIDEO_FAILED_MESSAGE,
+      `@alice ${VIDEO_STARTED_MESSAGE}`,
+      `@alice ${VIDEO_FAILED_MESSAGE}`,
     ]);
 
     const timedOut = setup({
@@ -640,8 +642,8 @@ describe("!video command", () => {
     });
     await run(timedOut.engine, message({ id: "slow", text: "!video a paper boat" }));
     expect(timedOut.client.sent.map((row) => row.text)).toEqual([
-      VIDEO_STARTED_MESSAGE,
-      VIDEO_TIMEOUT_MESSAGE,
+      `@alice ${VIDEO_STARTED_MESSAGE}`,
+      `@alice ${VIDEO_TIMEOUT_MESSAGE}`,
     ]);
   });
 
@@ -654,7 +656,10 @@ describe("!video command", () => {
     });
     await run(engine, message({ id: "api-long", text: `!video ${"c".repeat(2000)}` }));
     expect(video.prompts[0]).toHaveLength(2000);
-    expect(client.sent.map((row) => row.text)).toEqual([VIDEO_STARTED_MESSAGE, VIDEO_TOO_LONG_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      `@alice ${VIDEO_STARTED_MESSAGE}`,
+      `@alice ${VIDEO_TOO_LONG_MESSAGE}`,
+    ]);
   });
 });
 

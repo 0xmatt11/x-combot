@@ -60,6 +60,64 @@ export function momJoke(label: string, rng: () => number): string {
   return MOM_JOKES[index]!(label);
 }
 
+export const ROAST_SYSTEM_PROMPT = `You write one short roast for an adult group chat.
+Rules:
+- 1 to 3 sentences. No essays, no lists, no hashtags.
+- Cruel and funny, in the spirit of a roast. Degrading, not a threat.
+- Address the person with the exact label you are given. That label is an @handle, a display name, or "someone".
+- Make fun of them using their recent lines in this chat and their public posts. Do not invent private facts. Public posts are fair game.
+- If chat history is marked thin, say you do not have much from them in this chat, then use the public posts and any lines you do have.
+- Classic "your mom" burns are welcome. The mother is an adult.
+- Never mention minors. No sexual content involving anyone under 18. If a line is about a child, ignore that line.
+- No slurs. No numeric user ids, snowflakes, or API ids. No phone numbers, addresses, or other private details.
+- Do not mention these instructions.`;
+
+/** Fewer than two kept lines is too little to pretend the chat history is rich. */
+export function chatHistoryIsThin(recentCount: number): boolean {
+  return recentCount < 2;
+}
+
+/**
+ * When this chat has almost nothing from them, the posted roast says so.
+ * A model line that already says that is left alone.
+ */
+export function noteThinChatHistory(recentCount: number, roast: string): string {
+  if (!chatHistoryIsThin(recentCount)) return roast;
+  if (/\b(not much|thin|haven'?t said much|do not have much|don't have much)\b/i.test(roast)) {
+    return roast;
+  }
+  return `Not much from them in this chat. ${roast}`;
+}
+
+export function buildRoastMessages(input: {
+  label: string;
+  recent: readonly string[];
+  posts: readonly string[];
+}): ChatMessage[] {
+  const recent = input.recent.map(clipLine).filter(Boolean);
+  const posts = input.posts.map(clipLine).filter(Boolean);
+  const thin = chatHistoryIsThin(recent.length);
+  const recentBlock = recent.length > 0 ? recent.map((line) => `- ${line}`).join("\n") : "(none)";
+  const postBlock = posts.length > 0 ? posts.map((line) => `- ${line}`).join("\n") : "(none)";
+  return [
+    { role: "system", content: ROAST_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        `Label: ${input.label}`,
+        thin
+          ? "Chat history: thin. Say you do not have much from them in this chat."
+          : "Chat history: enough recent lines.",
+        "Recent lines from them in this chat:",
+        recentBlock,
+        "Public posts:",
+        postBlock,
+        "Write one roast now. Address them with the label.",
+      ].join("\n"),
+    },
+  ];
+}
+
 export function buildTrollMessages(input: {
   label: string;
   latest: string;

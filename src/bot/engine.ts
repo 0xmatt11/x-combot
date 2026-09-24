@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   DEFAULT_LEAVE_TEXT,
   isFullContextMode,
@@ -12,6 +13,7 @@ import type {
   ConversationSettings,
   DmEvent,
   LlmContextMode,
+  MediaCaption,
   ResolvedConversationConfig,
   XUser,
 } from "../types.js";
@@ -27,8 +29,10 @@ import type { ChatMessage, LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
+  buildRoastMessages,
   buildTrollMessages,
   momJoke,
+  noteThinChatHistory,
   sanitizeTrollReply,
   stripApiIds,
   TROLL_COOLDOWN_MS,
@@ -70,7 +74,6 @@ import {
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import {
-  adultImaginePrompt,
   formatImagineModerationReply,
   imaginePromptRejection,
   ImagineError,
@@ -78,11 +81,9 @@ import {
   IMAGINE_UNAVAILABLE_MESSAGE,
   isImagineGenerationApiUrl,
   isImagineModerationError,
-  isImagineSessionError,
   normalizeImaginePrompt,
   suggestSofterImaginePrompts,
   type AdultImageCommand,
-  type AdultImageProviderName,
   type ImagineBackend,
   type ImagineGenerator,
   type ImagineImage,
@@ -229,7 +230,7 @@ export interface EngineDeps {
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
   adultVision?: AdultVisionJudge;
-  /** Shared Grok Imagine client for `!imagine` and the adult commands. */
+  /** Grok Imagine client for `!imagine` only. Adult commands do not call it. */
   imagine?: ImagineGenerator;
   /** Grok Imagine video client for `!video`. Same key as `imagine`. */
   video?: VideoGenerator;
@@ -238,16 +239,12 @@ export interface EngineDeps {
   /** xAI text-to-speech for `!voice`. Same key as `imagine`. */
   voice?: VoiceGenerator;
   /**
-   * Adult commands only. Unset means Imagine when `imagine` is set, otherwise search.
-   * `!imagine` always uses the Imagine client.
-   */
-  adultImageProvider?: AdultImageProviderName;
-  /**
-   * Optional already-hosted Imagine public JPEGs and mp4s. Tried after API
-   * Imagine misses and before search. Absent means that step is off.
+   * Saved imagine-public stills and mp4s for `!boobs`, `!ass`, and `!booty`.
+   * Tried first. An empty or exhausted bank falls through to search.
+   * Absent means that step is off. Does not open grok.com.
    * `bootyUrls` is the shared `!ass` / `!booty` still bank; a single `bootyUrl`
    * still works. Video lists are command-specific and mix with those stills.
-   * `!imagine` does not use this.
+   * `!imagine` and `!video` do not use this.
    */
   imaginePublic?: ImaginePublicUrls;
   /** Last posted image URLs and content hashes. Defaults to an in-memory window. */
@@ -266,6 +263,29 @@ export interface EngineDeps {
   imagineBackend?: ImagineBackend;
   /** Package version and short git sha. Defaults to a one-time local read. */
   buildVersion?: { version?: string; sha?: string };
+  /**
+   * How long a bang/slash command stays in chat before auto-delete.
+   * The bot's reply is not deleted. Default is 15 minutes.
+   * A restart drops timers that have not fired.
+   */
+  commandCleanupMs?: number;
+}
+
+/**
+ * The inbound event whose command (or other handled message) is in progress.
+ * `reply` and command media posts read it so every command response tags the
+ * sender and, in encrypted Chat, threads under that event. Background `!video`
+ * work re-enters this store. Scheduled Noor relays do not.
+ */
+const commandContext = new AsyncLocalStorage<DmEvent>();
+
+/** The member's bang or slash command is removed after this delay. Bot replies stay. */
+export const COMMAND_CLEANUP_MS = 15 * 60 * 1000;
+
+interface CommandCleanupTarget {
+  eventId: string;
+  conversationId: string;
+  sequenceId?: string;
 }
 
 export class ModerationEngine {
@@ -286,6 +306,12 @@ export class ModerationEngine {
   private noorPollInFlight = false;
   /** Used when no shared RuntimeHealth was passed in. */
   private readonly startedAtMs = Date.now();
+  /**
+   * In-process timers that delete the member's command message. `unref` so a
+   * quiet process can exit. A restart before they fire leaves that bang in chat.
+   * Bot replies are not on this list.
+   */
+  private readonly commandCleanupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly store: Store,
@@ -299,6 +325,10 @@ export class ModerationEngine {
   }
 
   async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
+    return commandContext.run(event, () => this.handleIncoming(event, nowMs));
+  }
+
+  private async handleIncoming(event: DmEvent, nowMs: number): Promise<EngineActions> {
     const actions: EngineActions = {
       replies: [],
       deletes: [],
@@ -326,7 +356,9 @@ export class ModerationEngine {
         isChatAuthMessage(event.text)
       ) {
         this.store.authorizeChat(event.conversationId);
-        await this.reply(event.conversationId, CHAT_AUTH_OK, actions);
+        await this.runCommandCleanup(event, () =>
+          this.reply(event.conversationId, CHAT_AUTH_OK, actions),
+        );
       }
       return actions;
     }
@@ -397,7 +429,9 @@ export class ModerationEngine {
       });
 
     if (command && !llmFromCmd) {
-      await this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs);
+      await this.runCommandCleanup(event, () =>
+        this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs),
+      );
       if (command.name !== "troll" && command.name !== "untroll") {
         await this.trollIfTarget(event, senderId, actions, nowMs);
       }
@@ -415,7 +449,13 @@ export class ModerationEngine {
         }
         return actions;
       }
-      await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
+      if (llmFromCmd) {
+        await this.runCommandCleanup(event, () =>
+          this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs),
+        );
+      } else {
+        await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
+      }
       await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
@@ -430,13 +470,15 @@ export class ModerationEngine {
         }
         return actions;
       }
-      await this.handleUnknownCommand(
-        event,
-        unknownBang,
-        senderIsAdmin,
-        settings,
-        actions,
-        nowMs,
+      await this.runCommandCleanup(event, () =>
+        this.handleUnknownCommand(
+          event,
+          unknownBang,
+          senderIsAdmin,
+          settings,
+          actions,
+          nowMs,
+        ),
       );
       await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
@@ -1759,6 +1801,55 @@ export class ModerationEngine {
     }
   }
 
+  private async handleRoast(
+    event: DmEvent,
+    command: { name: "roast"; target?: UserRef },
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const user = await this.resolveTrollUser(command.target, event, actions, "roast");
+    if (!user?.id) return;
+    if (user.id === this.config.botUserId) {
+      await this.reply(conversationId, "Pick someone else.", actions);
+      return;
+    }
+    const storedHandle =
+      user.username && !isNumericUserId(user.username)
+        ? user.username.replace(/^@/, "")
+        : undefined;
+    const label = await this.trollLabel(
+      { userId: user.id, username: storedHandle },
+      conversationId,
+      user,
+    );
+    const text = await this.composeRoast(event, user.id, label);
+    await this.reply(conversationId, text, actions);
+  }
+
+  /**
+   * One dunk. Same chat-history fetch and timeline call as troll mode.
+   * Does not write `troll_targets`.
+   */
+  private async composeRoast(event: DmEvent, userId: string, label: string): Promise<string> {
+    const rng = () => this.nextRandom();
+    const recent = await this.trollRecentLines(event, userId);
+    const posts = await this.trollPosts(event.conversationId, userId);
+    const settings = this.conversationConfig(event.conversationId);
+    if (!this.llmClient || !settings.llmEnabled) {
+      log.info(
+        `Roast fell back to a mom joke conversation=${event.conversationId} (llm unavailable)`,
+      );
+      return noteThinChatHistory(recent.length, momJoke(label, rng));
+    }
+    try {
+      const answer = await this.llmClient.complete(buildRoastMessages({ label, recent, posts }));
+      return noteThinChatHistory(recent.length, sanitizeTrollReply(answer, label, [userId], rng));
+    } catch (error) {
+      log.warn(`Roast failed conversation=${event.conversationId}`, error);
+      return noteThinChatHistory(recent.length, momJoke(label, rng));
+    }
+  }
+
   private async handleTrollCommand(
     event: DmEvent,
     command: { name: "troll"; off?: boolean; target?: UserRef },
@@ -1927,7 +2018,7 @@ export class ModerationEngine {
     target: UserRef | undefined,
     event: DmEvent,
     actions: EngineActions,
-    purpose: "troll" | "untroll" = "troll",
+    purpose: "troll" | "untroll" | "roast" = "troll",
   ): Promise<XUser | undefined> {
     if (target?.id || target?.username) {
       try {
@@ -1943,7 +2034,7 @@ export class ModerationEngine {
       if (named) return named;
     }
     if (!target) {
-      if (purpose === "troll") {
+      if (purpose === "troll" || purpose === "roast") {
         const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
         if (replyId) {
           try {
@@ -1958,7 +2049,9 @@ export class ModerationEngine {
         event.conversationId,
         purpose === "untroll"
           ? "Who? `!untroll @user` stops trolling that person."
-          : "Who? `!troll @user` starts it. `!untroll @user` stops it.",
+          : purpose === "roast"
+            ? "Who? `!roast @user` dunks that person once. Reply to their message or name them."
+            : "Who? `!troll @user` starts it. `!untroll @user` stops it.",
         actions,
       );
       return undefined;
@@ -2009,6 +2102,8 @@ export class ModerationEngine {
         return;
       }
       case "status":
+        // Same owner gate as !auth. Admins and everyone else are ignored.
+        if (senderId !== this.config.ownerId) return;
         await this.reply(conversationId, this.statusReport(conversationId, settings, nowMs), actions);
         return;
       case "rules":
@@ -2039,6 +2134,9 @@ export class ModerationEngine {
         return;
       case "untroll":
         await this.handleUntroll(event, command, actions);
+        return;
+      case "roast":
+        await this.handleRoast(event, command, actions);
         return;
       case "linkroast":
         await this.handleLinkroast(event, command, actions);
@@ -2511,22 +2609,16 @@ export class ModerationEngine {
       }
     }
 
-    const provider = this.adultProvider();
-    if (provider === "imagine" && this.deps.imagine) {
-      const posted = await this.tryAdultImagine(conversationId, command, actions, label);
-      if (posted) return;
-      log.warn(`${label} Imagine unavailable; trying the next adult image source conversation=${conversationId}`);
-    }
-
-    if (await this.tryImaginePublic(conversationId, command, actions, label)) return;
+    // Saved bank only. These commands do not open grok.com/imagine and do not
+    // call the Imagine generate client (browser or api.x.ai). An empty or
+    // exhausted bank falls through to search. The post mentions the requester
+    // and, in encrypted Chat, replies to their command.
+    const caption = await this.commandCaption(event);
+    if (await this.tryImaginePublic(conversationId, command, actions, label, caption)) return;
 
     const search = this.deps.imageSearch;
     if (!search) {
-      await this.reply(
-        conversationId,
-        provider === "imagine" ? IMAGINE_FAILED_MESSAGE : "Image search is not configured.",
-        actions,
-      );
+      await this.reply(conversationId, "Image search is not configured.", actions);
       return;
     }
 
@@ -2573,6 +2665,7 @@ export class ModerationEngine {
       selection.image,
       actions,
       label,
+      caption,
       selection.fetched,
     );
     if (delivery.posted) {
@@ -2654,8 +2747,9 @@ export class ModerationEngine {
   }
 
   private enqueueBackground(work: () => Promise<void>): void {
+    const event = commandContext.getStore();
     const job = Promise.resolve()
-      .then(work)
+      .then(() => (event ? commandContext.run(event, work) : work()))
       .catch((error: unknown) => {
         const detail = redactSecrets(error instanceof Error ? error.message : "video failed");
         log.warn(`!video background failed: ${detail}`);
@@ -2702,13 +2796,16 @@ export class ModerationEngine {
       }
       if (fetched && fetched.bytes.byteLength > 0) {
         try {
-          await this.client.sendVideo(conversationId, {
-            url: shareable ? video.url : GROK_IMAGINE_PAGE,
-            bytes: fetched.bytes,
-            mimeType: fetched.mimeType,
-            width: video.width,
-            height: video.height,
-          });
+          await this.client.sendVideo(
+            conversationId,
+            await this.withCommandCaption({
+              url: shareable ? video.url : GROK_IMAGINE_PAGE,
+              bytes: fetched.bytes,
+              mimeType: fetched.mimeType,
+              width: video.width,
+              height: video.height,
+            }),
+          );
           log.info(
             `!video posted native video conversation=${conversationId} host=${imageHost(shareable ? video.url : GROK_IMAGINE_PAGE)}`,
           );
@@ -2766,12 +2863,15 @@ export class ModerationEngine {
       return;
     }
     try {
-      await this.client.sendAudio(conversationId, {
-        bytes: spoken.bytes,
-        mimeType: spoken.mimeType,
-        durationMillis: spoken.durationMillis,
-        voiceId: spoken.voiceId,
-      });
+      await this.client.sendAudio(
+        conversationId,
+        await this.withCommandCaption({
+          bytes: spoken.bytes,
+          mimeType: spoken.mimeType,
+          durationMillis: spoken.durationMillis,
+          voiceId: spoken.voiceId,
+        }),
+      );
       log.info(
         `!voice posted audio conversation=${conversationId} persona=${normalized.personaId} voice=${spoken.voiceId} bytes=${spoken.bytes.byteLength}`,
       );
@@ -2803,50 +2903,6 @@ export class ModerationEngine {
     await this.reply(conversationId, userMessage, actions);
   }
 
-  /**
-   * One fresh Imagine image for an adult command. A repeated URL or byte hash
-   * is tried once more. Content moderation is explained in the conversation
-   * and does not fall back to search. A signed-out browser session is also
-   * explained and does not fall back to search or the API. Any other failure
-   * returns false so the public CDN and then search can run.
-   */
-  private async tryAdultImagine(
-    conversationId: string,
-    command: AdultImageCommand,
-    actions: EngineActions,
-    label: string,
-  ): Promise<boolean> {
-    const imagine = this.deps.imagine;
-    if (!imagine) return false;
-    let sawRecent = false;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let generated: ImagineImage;
-      const prompt = adultImaginePrompt(command, () => this.nextRandom());
-      try {
-        generated = await imagine.generate(prompt);
-      } catch (error) {
-        const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
-        log.warn(`${label} Imagine failed conversation=${conversationId}: ${detail}`);
-        if (isImagineModerationError(error) || isImagineSessionError(error)) {
-          await this.replyImagineFailure(conversationId, prompt, error, actions);
-          return true;
-        }
-        return false;
-      }
-      const outcome = await this.postGeneratedImage(conversationId, generated, actions, label);
-      if (outcome === "posted") return true;
-      if (outcome === "recent") {
-        sawRecent = true;
-        continue;
-      }
-      return false;
-    }
-    if (sawRecent) {
-      log.warn(`${label} Imagine repeated a recent image conversation=${conversationId}`);
-    }
-    return false;
-  }
-
   private async postGeneratedImage(
     conversationId: string,
     image: ImagineImage,
@@ -2866,11 +2922,14 @@ export class ModerationEngine {
 
     if (!url && materialized.fetched) {
       try {
-        await this.client.sendImage(conversationId, {
-          url: GROK_IMAGINE_PAGE,
-          bytes: materialized.fetched.bytes,
-          mimeType: materialized.fetched.mimeType,
-        });
+        await this.client.sendImage(
+          conversationId,
+          await this.withCommandCaption({
+            url: GROK_IMAGINE_PAGE,
+            bytes: materialized.fetched.bytes,
+            mimeType: materialized.fetched.mimeType,
+          }),
+        );
         this.recentImages.remember(conversationId, { hash });
         log.info(
           `${label} posted native image conversation=${conversationId} host=${imageHost(GROK_IMAGINE_PAGE)}`,
@@ -2890,6 +2949,7 @@ export class ModerationEngine {
       { url: url!, adult: true },
       actions,
       label,
+      await this.commandCaption(),
       materialized.fetched,
     );
     if (!delivery.posted) return "failed";
@@ -2921,19 +2981,20 @@ export class ModerationEngine {
   }
 
   /**
-   * Attach one item from the operator's still bank mixed with that command's
-   * mp4 bank. A JPEG uses the existing photo path. An mp4 is downloaded and
-   * sent with `sendVideo` in encrypted Chat. Classic DMs cannot attach mp4,
-   * so a video draw is skipped. A recent URL, a repeated byte hash, a bad
-   * download, or a failed upload tries another candidate. The source URL is
-   * not posted as text. A miss returns false so search can run. This does
-   * not call grok.com.
+   * First step for `!boobs`, `!ass`, and `!booty`. Attach one item from the
+   * operator's still bank mixed with that command's mp4 bank. A JPEG uses the
+   * existing photo path. An mp4 is downloaded and sent with `sendVideo` in
+   * encrypted Chat. Classic DMs cannot attach mp4, so a video draw is skipped.
+   * A recent URL, a repeated byte hash, a bad download, or a failed upload
+   * tries another candidate. The source URL is not posted as text. A miss
+   * returns false so search can run. This does not call grok.com or api.x.ai.
    */
   private async tryImaginePublic(
     conversationId: string,
     command: AdultImageCommand,
     _actions: EngineActions,
     label: string,
+    caption?: MediaCaption,
   ): Promise<boolean> {
     const pending = imaginePublicPoolFor(this.deps.imaginePublic, command);
     let notedVideoSkip = false;
@@ -2952,10 +3013,10 @@ export class ModerationEngine {
           }
           continue;
         }
-        if (await this.postImaginePublicVideo(conversationId, item.url, label)) return true;
+        if (await this.postImaginePublicVideo(conversationId, item.url, label, caption)) return true;
         continue;
       }
-      if (await this.postImaginePublicImage(conversationId, item.url, label)) return true;
+      if (await this.postImaginePublicImage(conversationId, item.url, label, caption)) return true;
     }
     return false;
   }
@@ -2964,6 +3025,7 @@ export class ModerationEngine {
     conversationId: string,
     url: string,
     label: string,
+    caption?: MediaCaption,
   ): Promise<boolean> {
     if (this.recentImages.hasUrl(conversationId, url)) {
       log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
@@ -2981,6 +3043,7 @@ export class ModerationEngine {
         url,
         bytes: fetched.bytes,
         mimeType: fetched.mimeType,
+        caption,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -2998,6 +3061,7 @@ export class ModerationEngine {
     conversationId: string,
     url: string,
     label: string,
+    caption?: MediaCaption,
   ): Promise<boolean> {
     if (this.recentImages.hasUrl(conversationId, url)) {
       log.warn(`${label} Imagine public video was already posted conversation=${conversationId}`);
@@ -3035,6 +3099,7 @@ export class ModerationEngine {
         url,
         bytes: fetched.bytes,
         mimeType: "video/mp4",
+        caption,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -3074,11 +3139,6 @@ export class ModerationEngine {
     }
   }
 
-  private adultProvider(): AdultImageProviderName {
-    if (this.deps.adultImageProvider) return this.deps.adultImageProvider;
-    return this.deps.imagine ? "imagine" : "search";
-  }
-
   private nextRandom(): number {
     return this.deps.random?.() ?? Math.random();
   }
@@ -3088,6 +3148,7 @@ export class ModerationEngine {
     image: AdultImageCandidate,
     actions: EngineActions,
     label: string,
+    caption?: MediaCaption,
     alreadyFetched?: AdultVisionImage,
   ): Promise<{ posted: boolean; hash?: string }> {
     const host = imageHost(image.url);
@@ -3107,8 +3168,8 @@ export class ModerationEngine {
           url: image.url,
           bytes: fetched.bytes,
           mimeType: fetched.mimeType,
+          ...(caption ? { caption } : {}),
         });
-        // The image is the whole message. Do not record a caption such as "18+".
         log.info(`${label} posted native image conversation=${conversationId} host=${host}`);
         return { posted: true, hash };
       } catch (error) {
@@ -3122,6 +3183,66 @@ export class ModerationEngine {
     await this.reply(conversationId, image.url, actions);
     log.info(`${label} posted image link conversation=${conversationId} host=${host}`);
     return { posted: true, hash };
+  }
+
+  /**
+   * `@handle` when we know one, otherwise the same chat label other commands use.
+   * Encrypted Chat threads the post under the triggering event via `encryptReply`.
+   * No sender (a leave with only a participant list) means no mention.
+   */
+  private async commandCaption(event?: DmEvent): Promise<MediaCaption | undefined> {
+    const source = event ?? commandContext.getStore();
+    if (!source?.senderId && !source?.sender) return undefined;
+    const senderId = source.senderId ?? "";
+    const text = await this.chatLabel(source.sender, senderId, source.conversationId);
+    const mention = handleMention(text);
+    const canReply = Boolean(source.sequenceId || source.encodedEvent);
+    return {
+      text,
+      ...(mention ? { mention } : {}),
+      ...(canReply
+        ? {
+            replyTo: {
+              ...(source.sequenceId ? { sequenceId: source.sequenceId } : {}),
+              ...(source.senderId ? { senderId: source.senderId } : {}),
+              ...(source.text ? { previewText: source.text } : {}),
+              ...(source.encodedEvent ? { rawEvent: source.encodedEvent } : {}),
+            },
+          }
+        : {}),
+    };
+  }
+
+  /** Attach the command mention when this send is handling an inbound event. */
+  private async withCommandCaption<T extends object>(
+    media: T,
+  ): Promise<T & { caption?: MediaCaption }> {
+    if ("caption" in media && media.caption) return media as T & { caption?: MediaCaption };
+    const caption = await this.commandCaption();
+    if (!caption) return media;
+    return { ...media, caption };
+  }
+
+  /**
+   * Prefix the sender label and pass a Chat mention + reply target.
+   * A body that already starts with that label is not prefixed again.
+   * Outside a handled event (Noor relays call `sendMessage` directly) the text is unchanged.
+   */
+  private async addressText(body: string): Promise<{ text: string; caption?: MediaCaption }> {
+    const event = commandContext.getStore();
+    // Welcome and leave lines already name the member. They are not replies to a command.
+    if (
+      !event ||
+      event.eventType === "ParticipantsJoin" ||
+      event.eventType === "ParticipantsLeave"
+    ) {
+      return { text: body };
+    }
+    const caption = await this.commandCaption(event);
+    if (!caption) return { text: body };
+    const label = caption.text;
+    const prefixed = alreadyAddresses(body, label) ? body : `${label} ${body}`;
+    return { text: prefixed, caption };
   }
 
   private async applyWarn(
@@ -3266,13 +3387,81 @@ export class ModerationEngine {
     return (messages) => this.llmClient!.complete(messages);
   }
 
+  /**
+   * Every public bang on the !help list, including !help, plus admin bangs,
+   * `!auth`, and unknown bangs. After the delay, delete only that member's
+   * command message when the API allows. Help text, media, games, !ask
+   * answers, roasts, and other bot replies stay in the chat.
+   * The timer is in-process: a restart before it fires leaves the bang up.
+   * `@mention` wakes, welcomes, and leaves are not bang commands.
+   */
+  private async runCommandCleanup(event: DmEvent, work: () => Promise<void>): Promise<void> {
+    try {
+      await work();
+    } finally {
+      this.scheduleCommandCleanup({
+        eventId: event.id,
+        conversationId: event.conversationId,
+        sequenceId: event.sequenceId,
+      });
+    }
+  }
+
+  private scheduleCommandCleanup(target: CommandCleanupTarget): void {
+    if (!target.eventId) return;
+    const delay = this.deps.commandCleanupMs ?? COMMAND_CLEANUP_MS;
+    const timer = setTimeout(() => {
+      this.commandCleanupTimers.delete(timer);
+      void this.deleteCommandClutter(target).catch((error: unknown) => {
+        log.warn("Command cleanup failed", error);
+      });
+    }, delay);
+    timer.unref?.();
+    this.commandCleanupTimers.add(timer);
+  }
+
+  /**
+   * Deletes the member's command only. Never the bot's reply.
+   * Chat delete lists that one sequence id. The reply is a separate message
+   * (`encryptReply` snapshots the parent into `replying_to_preview`), so
+   * removing the command leaves the reply text, media, and @mention in place.
+   * The quote strip can show the command as deleted.
+   */
+  private async deleteCommandClutter(target: CommandCleanupTarget): Promise<void> {
+    const actions: EngineActions = {
+      replies: [],
+      deletes: [],
+      notifies: [],
+      muted: false,
+      warned: false,
+      llm: false,
+    };
+    const indexed = this.store.lookupChatMessage(target.eventId);
+    const sequenceId = target.sequenceId || indexed?.sequenceId;
+    const conversationId = target.conversationId || indexed?.conversationId;
+    if (isChatGroupId(conversationId)) {
+      if (!sequenceId) {
+        log.info(
+          `Skipping auto-delete of command ${target.eventId} in ${conversationId}: no Chat sequence id.`,
+        );
+        return;
+      }
+      await this.tryDelete(target.eventId, actions, { conversationId, sequenceId });
+      return;
+    }
+    log.info(
+      `Skipping auto-delete of command ${target.eventId}: classic DMs only delete messages this account sent.`,
+    );
+  }
+
   private async reply(
     conversationId: string,
     text: string,
     actions: EngineActions,
   ): Promise<void> {
-    await this.client.sendMessage(conversationId, text);
-    actions.replies.push(text);
+    const addressed = await this.addressText(text);
+    await this.client.sendMessage(conversationId, addressed.text, addressed.caption);
+    actions.replies.push(addressed.text);
   }
 
   private async notifyAdmins(
@@ -3298,6 +3487,22 @@ export class ModerationEngine {
 }
 
 /** A cap applies only when some count is positive and the window is positive. `0` is unlimited. */
+/** The body already leads with this sender label, including `@bob, …`. */
+function alreadyAddresses(body: string, label: string): boolean {
+  if (body === label || body.startsWith(`${label} `) || body.startsWith(`${label}\n`)) return true;
+  if (!body.startsWith(label)) return false;
+  const next = body[label.length];
+  return next !== undefined && !/^[\p{L}\p{N}_]$/u.test(next);
+}
+
+/** `@handle` covering the whole label. Display names are not a Chat mention entity. */
+function handleMention(text: string): MediaCaption["mention"] | undefined {
+  const match = /^@([A-Za-z0-9_]{1,15})$/.exec(text);
+  const username = match?.[1];
+  if (!username) return undefined;
+  return { username, start: 0, end: new TextEncoder().encode(text).byteLength };
+}
+
 function boobsRateLimitActive(settings: ResolvedConversationConfig): boolean {
   const hasCap = settings.boobsRateLimitPerUser > 0 || settings.boobsRateLimitPerConversation > 0;
   return hasCap && settings.boobsRateLimitWindowMs > 0;

@@ -3,7 +3,8 @@ import type { ChatMessage } from "../llm/client.js";
 import { containsBannedAgeTerm, containsGenitalTerm, redactSecrets } from "./adult-filter.js";
 
 /**
- * xAI Grok Imagine. One client serves `!imagine` and the adult-image commands.
+ * xAI Grok Imagine. Used by `!imagine`. Adult commands (`!boobs`, `!ass`,
+ * `!booty`) do not call this client; they use the saved imagine-public bank.
  * Docs: https://docs.x.ai/developers/model-capabilities/images/generation
  * POST https://api.x.ai/v1/images/generations  Authorization: Bearer $XAI_API_KEY
  */
@@ -220,9 +221,11 @@ export interface AdultImageProviderChoice {
 }
 
 /**
- * Adult commands use Imagine when a key exists, unless `search` is requested.
- * An explicit `imagine` with no key falls back to search.
- * Browser mode uses Imagine without an API key. `search` still skips generation.
+ * Legacy env choice. Adult commands do not use it to generate: they always
+ * try the saved imagine-public bank, then search, and never call Imagine.
+ * `imagineKeyMissing` stays true when `BOOBS_IMAGE_PROVIDER=imagine` is set
+ * in API mode with no key, so startup can say that setting does not generate.
+ * Browser mode still reports `imagine` without an API key. `search` reports search.
  */
 export function resolveAdultImageProvider(input: {
   provider?: AdultImageProviderName;
@@ -245,8 +248,9 @@ export function resolveAdultImageProvider(input: {
 }
 
 /**
- * Fixed pin-up prompt for one adult command. Caller text is never included.
- * `random` picks a pose and a framing token so each call asks for a new image.
+ * Fixed pin-up prompt. `!boobs`, `!ass`, and `!booty` do not send it.
+ * Those commands use the saved bank and do not call Imagine.
+ * `random` picks a pose and a framing token. Caller text is never included.
  */
 export function adultImaginePrompt(
   command: AdultImageCommand,

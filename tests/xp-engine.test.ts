@@ -198,7 +198,7 @@ describe("XP engine", () => {
         replyTo: { senderId: bob.id, verified: true },
       }),
     );
-    expect(client.sent.at(-1)?.text).toBe("@bob is already level 0.");
+    expect(client.sent.at(-1)?.text).toBe("@alice @bob is already level 0.");
   });
 
   it("blocks a muted member from granting a level", async () => {
@@ -250,7 +250,7 @@ describe("XP engine", () => {
 
     await engine.processEvent(message({ id: "top", senderId: alice.id, text: "!toplvl" }));
     expect(client.sent.at(-1)?.text).toBe(
-      "Top levels:\n1. @bob — level 2 (235 XP)\n2. @alice — level 1 (100 XP)",
+      "@alice Top levels:\n1. @bob — level 2 (235 XP)\n2. @alice — level 1 (100 XP)",
     );
     expect(store.xpRank(groupId, owner.id)).toBeUndefined();
   });
@@ -394,7 +394,7 @@ describe("XP engine", () => {
     await engine.processEvent(
       message({ id: "top", senderId: alice.id, text: "!top" }),
     );
-    expect(client.sent.at(-1)?.text).toBe("Top levels:\n1. @ape7458 — level 1 (100 XP)");
+    expect(client.sent.at(-1)?.text).toBe("@alice Top levels:\n1. @ape7458 — level 1 (100 XP)");
     expect(client.sent.at(-1)?.text).not.toContain(senderId);
   });
 

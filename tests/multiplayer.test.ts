@@ -383,9 +383,9 @@ describe("multiplayer commands in chat", () => {
       message({ id: "m3", senderId: bob.id, text: "!tictactoe accept" }),
     );
     await engine.processEvent(message({ id: "m4", senderId: alice.id, text: "!tictactoe a1" }));
-    expect(client.sent.map((row) => row.text)[0]).toBe(TICTACTOE_HELP);
+    expect(client.sent.map((row) => row.text)[0]).toBe(`@alice ${TICTACTOE_HELP}`);
     expect(client.sent[1]?.text).toContain("@alice challenged @bob to tic-tac-toe.");
-    expect(client.sent[3]?.text.startsWith("X · ·")).toBe(true);
+    expect(client.sent[3]?.text.startsWith("@alice X · ·")).toBe(true);
     expect(client.sent.some((row) => /admins/i.test(row.text))).toBe(false);
   });
 
@@ -437,7 +437,7 @@ describe("multiplayer commands in chat", () => {
         replyTo: { senderId: bob.id, verified: false },
       }),
     );
-    expect(client.sent[0]?.text).toBe(HANGMAN_HELP);
+    expect(client.sent[0]?.text).toBe(`@alice ${HANGMAN_HELP}`);
 
     store.rememberMessageAuthor(groupId, "seq-9", bob.id);
     await engine.processEvent(
@@ -474,10 +474,10 @@ describe("multiplayer commands in chat", () => {
       }),
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Could not resolve that user.",
-      "Pick someone else.",
-      "Reply to someone else, or pass @user.",
-      "Pick someone else.",
+      "@alice Could not resolve that user.",
+      "@alice Pick someone else.",
+      "@alice Reply to someone else, or pass @user.",
+      "@alice Pick someone else.",
     ]);
   });
 

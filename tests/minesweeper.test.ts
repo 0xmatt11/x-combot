@@ -334,7 +334,7 @@ describe("!minesweeper command", () => {
     expect(sent[0]).toContain("💣 @alice — easy 5×5, 4 mines");
     expect(sent[1]).toContain("💣 @alice flagged B2.");
     expect(sent[2]).toContain("B2 is flagged.");
-    expect(sent[3]).toBe(MINESWEEPER_HELP);
+    expect(sent[3]).toBe(`@alice ${MINESWEEPER_HELP}`);
     expect(sent.some((text) => /admins/i.test(text))).toBe(false);
   });
 
