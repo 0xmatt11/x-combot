@@ -30,6 +30,22 @@ import {
 } from "./adult-filter.js";
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
+import {
+  adultImaginePrompt,
+  imaginePromptRejection,
+  IMAGINE_FAILED_MESSAGE,
+  IMAGINE_UNAVAILABLE_MESSAGE,
+  normalizeImaginePrompt,
+  type AdultImageCommand,
+  type AdultImageProviderName,
+  type ImagineGenerator,
+  type ImagineImage,
+} from "./imagine.js";
+import {
+  createRecentImageMemory,
+  imageContentHash,
+  type RecentImageMemory,
+} from "./recent-images.js";
 import { matchFilters } from "./filters.js";
 import { diceReply, resolveDiceRoller } from "./games/index.js";
 import {
@@ -96,16 +112,30 @@ export interface EngineDeps {
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
   adultVision?: AdultVisionJudge;
+  /** Shared Grok Imagine client for `!imagine` and the adult commands. */
+  imagine?: ImagineGenerator;
+  /**
+   * Adult commands only. Unset means Imagine when `imagine` is set, otherwise search.
+   * `!imagine` always uses the Imagine client.
+   */
+  adultImageProvider?: AdultImageProviderName;
+  /** Last posted image URLs and content hashes. Defaults to an in-memory window. */
+  recentImages?: RecentImageMemory;
+  random?: () => number;
 }
 
 export class ModerationEngine {
+  private readonly recentImages: RecentImageMemory;
+
   constructor(
     private readonly store: Store,
     private readonly client: XClient,
     private readonly config: BotRuntimeConfig,
     private readonly llmClient?: LlmClient,
     private readonly deps: EngineDeps = {},
-  ) {}
+  ) {
+    this.recentImages = deps.recentImages ?? createRecentImageMemory();
+  }
 
   async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
     const actions: EngineActions = {
@@ -762,6 +792,9 @@ export class ModerationEngine {
       case "booty":
         await this.handleAdultImage(event, command.name, command.extra, settings, actions, nowMs);
         return;
+      case "imagine":
+        await this.handleImagine(event, command.prompt, actions);
+        return;
       case "dice":
         await this.reply(
           conversationId,
@@ -1086,9 +1119,20 @@ export class ModerationEngine {
       }
     }
 
+    const provider = this.adultProvider();
+    if (provider === "imagine" && this.deps.imagine) {
+      const posted = await this.tryAdultImagine(conversationId, command, actions, label);
+      if (posted) return;
+      log.warn(`${label} Imagine unavailable; falling back to image search conversation=${conversationId}`);
+    }
+
     const search = this.deps.imageSearch;
     if (!search) {
-      await this.reply(conversationId, "Image search is not configured.", actions);
+      await this.reply(
+        conversationId,
+        provider === "imagine" ? IMAGINE_FAILED_MESSAGE : "Image search is not configured.",
+        actions,
+      );
       return;
     }
 
@@ -1115,6 +1159,9 @@ export class ModerationEngine {
       vision: settings.boobsVision,
       judge: this.deps.adultVision,
       fetchImage: this.deps.fetchImage,
+      random: () => this.nextRandom(),
+      excludeUrls: this.recentImages.urls(conversationId),
+      excludeHashes: this.recentImages.hashes(conversationId),
     });
     if (!selection.image) {
       if (selection.unavailable) {
@@ -1127,7 +1174,177 @@ export class ModerationEngine {
       );
       return;
     }
-    await this.deliverAdultImage(conversationId, selection.image, actions, label, selection.fetched);
+    const delivery = await this.deliverAdultImage(
+      conversationId,
+      selection.image,
+      actions,
+      label,
+      selection.fetched,
+    );
+    if (delivery.posted) {
+      this.recentImages.remember(conversationId, {
+        url: selection.image.url,
+        hash: delivery.hash ?? selection.contentHash,
+      });
+    }
+  }
+
+  private async handleImagine(
+    event: DmEvent,
+    prompt: string,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const normalized = normalizeImaginePrompt(prompt);
+    if (!normalized.ok) {
+      await this.reply(conversationId, imaginePromptRejection(normalized.reason), actions);
+      return;
+    }
+    const imagine = this.deps.imagine;
+    if (!imagine) {
+      await this.reply(conversationId, IMAGINE_UNAVAILABLE_MESSAGE, actions);
+      return;
+    }
+
+    let sawRecent = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let generated: ImagineImage;
+      try {
+        generated = await imagine.generate(normalized.prompt);
+      } catch (error) {
+        const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
+        log.warn(`!imagine failed conversation=${conversationId}: ${detail}`);
+        await this.reply(conversationId, IMAGINE_FAILED_MESSAGE, actions);
+        return;
+      }
+      const outcome = await this.postGeneratedImage(conversationId, generated, actions, "!imagine");
+      if (outcome === "posted") return;
+      if (outcome === "recent") {
+        sawRecent = true;
+        continue;
+      }
+      await this.reply(conversationId, IMAGINE_FAILED_MESSAGE, actions);
+      return;
+    }
+    if (sawRecent) {
+      log.warn(`!imagine repeated a recent image conversation=${conversationId}`);
+    }
+    await this.reply(conversationId, IMAGINE_FAILED_MESSAGE, actions);
+  }
+
+  /**
+   * One fresh Imagine image for an adult command. A repeated URL or byte hash
+   * is tried once more. Any other failure returns false so search can run.
+   */
+  private async tryAdultImagine(
+    conversationId: string,
+    command: AdultImageCommand,
+    actions: EngineActions,
+    label: string,
+  ): Promise<boolean> {
+    const imagine = this.deps.imagine;
+    if (!imagine) return false;
+    let sawRecent = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let generated: ImagineImage;
+      try {
+        generated = await imagine.generate(adultImaginePrompt(command, () => this.nextRandom()));
+      } catch (error) {
+        const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
+        log.warn(`${label} Imagine failed conversation=${conversationId}: ${detail}`);
+        return false;
+      }
+      const outcome = await this.postGeneratedImage(conversationId, generated, actions, label);
+      if (outcome === "posted") return true;
+      if (outcome === "recent") {
+        sawRecent = true;
+        continue;
+      }
+      return false;
+    }
+    if (sawRecent) {
+      log.warn(`${label} Imagine repeated a recent image conversation=${conversationId}`);
+    }
+    return false;
+  }
+
+  private async postGeneratedImage(
+    conversationId: string,
+    image: ImagineImage,
+    actions: EngineActions,
+    label: string,
+  ): Promise<"posted" | "recent" | "failed"> {
+    const materialized = await this.materializeImagine(image);
+    const hash = materialized.fetched ? imageContentHash(materialized.fetched.bytes) : undefined;
+    const url = materialized.url;
+    if (
+      (url && this.recentImages.hasUrl(conversationId, url)) ||
+      (hash && this.recentImages.hasHash(conversationId, hash))
+    ) {
+      return "recent";
+    }
+    if (!url && !materialized.fetched) return "failed";
+
+    if (!url && materialized.fetched) {
+      try {
+        await this.client.sendImage(conversationId, {
+          url: "https://api.x.ai/v1/images/generations",
+          bytes: materialized.fetched.bytes,
+          mimeType: materialized.fetched.mimeType,
+        });
+        this.recentImages.remember(conversationId, { hash });
+        log.info(`${label} posted native image conversation=${conversationId} host=api.x.ai`);
+        return "posted";
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        log.warn(
+          `${label} native attach failed conversation=${conversationId} host=api.x.ai (${detail})`,
+        );
+        return "failed";
+      }
+    }
+
+    const delivery = await this.deliverAdultImage(
+      conversationId,
+      { url: url!, adult: true },
+      actions,
+      label,
+      materialized.fetched,
+    );
+    if (!delivery.posted) return "failed";
+    this.recentImages.remember(conversationId, { url, hash: delivery.hash ?? hash });
+    return "posted";
+  }
+
+  private async materializeImagine(
+    image: ImagineImage,
+  ): Promise<{ url?: string; fetched?: AdultVisionImage }> {
+    if (image.url && this.deps.fetchImage) {
+      try {
+        const fetched = await this.deps.fetchImage(image.url);
+        if (fetched && fetched.bytes.byteLength > 0) {
+          return { url: image.url, fetched };
+        }
+      } catch {
+        log.warn(`Imagine image download failed host=${imageHost(image.url)}`);
+      }
+    }
+    if (image.bytes && image.bytes.byteLength > 0 && image.mimeType) {
+      return {
+        url: image.url,
+        fetched: { bytes: image.bytes, mimeType: image.mimeType },
+      };
+    }
+    return { url: image.url };
+  }
+
+  private adultProvider(): AdultImageProviderName {
+    if (this.deps.adultImageProvider) return this.deps.adultImageProvider;
+    return this.deps.imagine ? "imagine" : "search";
+  }
+
+  private nextRandom(): number {
+    return this.deps.random?.() ?? Math.random();
   }
 
   private async deliverAdultImage(
@@ -1136,7 +1353,7 @@ export class ModerationEngine {
     actions: EngineActions,
     label: string,
     alreadyFetched?: AdultVisionImage,
-  ): Promise<void> {
+  ): Promise<{ posted: boolean; hash?: string }> {
     const host = imageHost(image.url);
     let fetched = alreadyFetched;
     if (!fetched && this.deps.fetchImage) {
@@ -1146,6 +1363,7 @@ export class ModerationEngine {
         log.warn(`${label} image download failed conversation=${conversationId} host=${host}`);
       }
     }
+    const hash = fetched && fetched.bytes.byteLength > 0 ? imageContentHash(fetched.bytes) : undefined;
 
     if (fetched && fetched.bytes.byteLength > 0) {
       try {
@@ -1156,7 +1374,7 @@ export class ModerationEngine {
         });
         // The image is the whole message. Do not record a caption such as "18+".
         log.info(`${label} posted native image conversation=${conversationId} host=${host}`);
-        return;
+        return { posted: true, hash };
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         log.warn(
@@ -1167,6 +1385,7 @@ export class ModerationEngine {
 
     await this.reply(conversationId, image.url, actions);
     log.info(`${label} posted image link conversation=${conversationId} host=${host}`);
+    return { posted: true, hash };
   }
 
   private async applyWarn(

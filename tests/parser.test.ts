@@ -101,6 +101,20 @@ describe("parseCommand", () => {
     expect(parseCommand("!boobs please")).toEqual({ name: "boobs", extra: "please" });
   });
 
+  it("parses !imagine and keeps the prompt text", () => {
+    expect(parseCommand("!imagine a neon cat in a cyberpunk alley")).toEqual({
+      name: "imagine",
+      prompt: "a neon cat in a cyberpunk alley",
+    });
+    expect(parseCommand("  /IMAGINE   a neon cat  ")).toEqual({
+      name: "imagine",
+      prompt: "a neon cat",
+    });
+    expect(parseCommand("!imagine")).toEqual({ name: "imagine", prompt: "" });
+    expect(parseCommand("!imagine   ")).toEqual({ name: "imagine", prompt: "" });
+    expect(parseUnknownBang("!imagine a cat")).toBeUndefined();
+  });
+
   it("parses !ass and !booty as the same command shape with no custom query", () => {
     expect(parseCommand("!ass")).toEqual({ name: "ass" });
     expect(parseCommand("!ASS")).toEqual({ name: "ass" });

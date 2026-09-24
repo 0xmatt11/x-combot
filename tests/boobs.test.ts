@@ -77,6 +77,12 @@ function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "senderId" | "
   };
 }
 
+function distinctByte(url: string): number {
+  let sum = 0;
+  for (let i = 0; i < url.length; i += 1) sum = (sum + url.charCodeAt(i) * (i + 1)) % 251;
+  return sum;
+}
+
 function candidate(partial: Partial<AdultImageCandidate> & Pick<AdultImageCandidate, "url">): AdultImageCandidate {
   return { adult: true, title: "adult close-up chest crop", ...partial };
 }
@@ -946,7 +952,9 @@ describe("!boobs engine", () => {
       async searchAdultChestImages() {
         search.calls += 1;
         search.topics.push("chest");
-        return options?.hits ?? [candidate({ url: SAFE_URL })];
+        if (options?.hits) return options.hits;
+        const url = search.calls === 1 ? SAFE_URL : `https://i.redd.it/adult-close-up-${search.calls}.jpg`;
+        return [candidate({ url })];
       },
       async searchAdultBootyImages() {
         search.calls += 1;
@@ -979,7 +987,10 @@ describe("!boobs engine", () => {
       imageSearch: search,
       fetchImage:
         options?.fetchImage ??
-        (async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/jpeg" })),
+        (async (url) => ({
+          bytes: Uint8Array.from([9, 9, distinctByte(url)]),
+          mimeType: "image/jpeg",
+        })),
       adultVision: options?.judge,
     });
     return { engine, client, search };
@@ -1162,6 +1173,7 @@ describe("!boobs engine", () => {
     expect(loaded.help).toMatch(/!boobs/);
     expect(loaded.help).toMatch(/!ass/);
     expect(loaded.help).toMatch(/!booty/);
+    expect(loaded.help).toMatch(/!imagine/);
     expect(loaded.boobs?.enabled).toBe(false);
     expect(loaded.boobs?.rate_limit_per_user).toBe(0);
     expect(loaded.boobs?.rate_limit_per_conversation).toBe(0);
@@ -1199,7 +1211,11 @@ describe("!ass and !booty", () => {
       async searchAdultBootyImages() {
         search.calls += 1;
         search.topics.push("booty");
-        return [candidate({ url: "https://i.redd.it/adult-butt.jpg", title: "adult butt close-up" })];
+        const url =
+          search.calls === 1
+            ? "https://i.redd.it/adult-butt.jpg"
+            : `https://i.redd.it/adult-butt-${search.calls}.jpg`;
+        return [candidate({ url, title: "adult butt close-up" })];
       },
     };
     const engine = new ModerationEngine(
@@ -1216,7 +1232,10 @@ describe("!ass and !booty", () => {
       undefined,
       {
         imageSearch: search,
-        fetchImage: async () => ({ bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/jpeg" }),
+        fetchImage: async (url) => ({
+          bytes: Uint8Array.from([4, 5, distinctByte(url)]),
+          mimeType: "image/jpeg",
+        }),
       },
     );
     return { engine, client, search };
@@ -1239,7 +1258,7 @@ describe("!ass and !booty", () => {
       },
       {
         conversationId: groupId,
-        url: "https://i.redd.it/adult-butt.jpg",
+        url: "https://i.redd.it/adult-butt-2.jpg",
         mimeType: "image/jpeg",
         bytes: 3,
       },

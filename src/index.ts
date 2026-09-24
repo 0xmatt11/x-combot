@@ -8,6 +8,12 @@ import { ModerationEngine } from "./bot/engine.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
 import { createImageSearch } from "./bot/image-search.js";
+import {
+  createImagineClient,
+  DEFAULT_IMAGINE_MODEL,
+  resolveAdultImageProvider,
+  resolveImagineApiKey,
+} from "./bot/imagine.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
 import { startActivityStream } from "./chat/activity-stream.js";
 import {
@@ -71,18 +77,44 @@ async function main(): Promise<void> {
   if (env.xpEnabled !== undefined) {
     defaults.xp = normalizeXpConfig({ ...defaults.xp, enabled: env.xpEnabled });
   }
-  const provider = env.boobsSearchProvider ?? "duckduckgo";
+  const searchProvider = env.boobsSearchProvider ?? "duckduckgo";
+  const imagineKey = resolveImagineApiKey(env);
+  const imageChoice = resolveAdultImageProvider({
+    provider: env.boobsImageProvider,
+    apiKey: imagineKey,
+  });
+  const imagineModel = env.boobsImagineModel ?? DEFAULT_IMAGINE_MODEL;
+  const imagine = imagineKey
+    ? createImagineClient({
+        apiKey: imagineKey,
+        model: imagineModel,
+        aspectRatio: env.boobsImagineAspectRatio,
+      })
+    : undefined;
+  if (imageChoice.imagineKeyMissing) {
+    log.warn(
+      "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine stays off until XAI_API_KEY is set (or the grok LLM key stack).",
+    );
+  }
   if (defaults.boobs?.enabled) {
-    const needsKey = provider === "serpapi" || provider === "bing";
+    const needsKey = searchProvider === "serpapi" || searchProvider === "bing";
     if (needsKey && !env.boobsSearchApiKey) {
       log.warn(
-        `Adult image commands are enabled with provider ${provider} but BOOBS_SEARCH_API_KEY is unset.`,
-      );
-    } else {
-      log.info(
-        `Adult image commands enabled (!boobs, !ass, !booty, provider=${provider}, vision=${defaults.boobs.vision === true ? "on" : "off"}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
+        imageChoice.provider === "search"
+          ? `Adult image commands are enabled with provider ${searchProvider} but BOOBS_SEARCH_API_KEY is unset.`
+          : `Adult image search fallback uses ${searchProvider} but BOOBS_SEARCH_API_KEY is unset.`,
       );
     }
+    if (!(needsKey && !env.boobsSearchApiKey && imageChoice.provider === "search")) {
+      const source =
+        imageChoice.provider === "imagine" ? `imagine model=${imagineModel}` : `search ${searchProvider}`;
+      log.info(
+        `Adult image commands enabled (!boobs, !ass, !booty, provider=${source}, vision=${defaults.boobs.vision === true ? "on" : "off"}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
+      );
+    }
+  }
+  if (imagine) {
+    log.info(`!imagine enabled (model=${imagineModel}).`);
   }
 
   const llmClient = buildLlmClient(env, defaults);
@@ -117,10 +149,12 @@ async function main(): Promise<void> {
     llmClient,
     {
       imageSearch: createImageSearch({
-        provider,
+        provider: searchProvider,
         apiKey: env.boobsSearchApiKey,
       }),
       fetchImage: fetchAdultImage,
+      imagine,
+      adultImageProvider: imageChoice.provider,
       adultVision: llmClient?.completeVision
         ? createAdultVisionJudge({
             completeVision: (prompt, image) => llmClient.completeVision!(prompt, image),

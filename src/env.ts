@@ -1,5 +1,12 @@
 import "dotenv/config";
 import path from "node:path";
+import {
+  normalizeAdultImageProvider,
+  normalizeImagineAspectRatio,
+  normalizeImagineModel,
+  type AdultImageProviderName,
+  type ImagineAspectRatio,
+} from "./bot/imagine.js";
 import { parseChatConversationIds } from "./chat/ids.js";
 
 function required(name: string): string {
@@ -30,6 +37,34 @@ function optionalNumber(name: string): number | undefined {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`${name} must be a number`);
   return parsed;
+}
+
+function optionalAdultImageProvider(name: string): AdultImageProviderName | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const provider = normalizeAdultImageProvider(value);
+  if (!provider) throw new Error(`${name} must be imagine or search`);
+  return provider;
+}
+
+function optionalImagineModel(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const model = normalizeImagineModel(value);
+  if (!model) {
+    throw new Error(
+      `${name} must be a grok-imagine-image model id (for example grok-imagine-image-quality)`,
+    );
+  }
+  return model;
+}
+
+function optionalImagineAspectRatio(name: string): ImagineAspectRatio | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const ratio = normalizeImagineAspectRatio(value);
+  if (!ratio) throw new Error(`${name} must be an Imagine aspect ratio such as 3:4, 2:3, or auto`);
+  return ratio;
 }
 
 function optionalBoobsProvider(
@@ -120,6 +155,15 @@ export interface Env {
   boobsSearchProvider?: "duckduckgo" | "reddit" | "serpapi" | "bing";
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
   boobsSearchApiKey?: string;
+  /**
+   * Adult-image source. `imagine` or `search`. Unset means Imagine when an xAI
+   * key is present, otherwise the search cascade.
+   */
+  boobsImageProvider?: AdultImageProviderName;
+  /** Imagine model id. Unset uses `grok-imagine-image-quality`. */
+  boobsImagineModel?: string;
+  /** Optional Imagine aspect ratio. Unset lets the model choose. */
+  boobsImagineAspectRatio?: ImagineAspectRatio;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -172,5 +216,8 @@ export function loadEnv(requireOwner = true): Env {
     xpEnabled: optionalBool("XP_ENABLED"),
     boobsSearchProvider: optionalBoobsProvider("BOOBS_SEARCH_PROVIDER"),
     boobsSearchApiKey: optional("BOOBS_SEARCH_API_KEY"),
+    boobsImageProvider: optionalAdultImageProvider("BOOBS_IMAGE_PROVIDER"),
+    boobsImagineModel: optionalImagineModel("BOOBS_IMAGINE_MODEL"),
+    boobsImagineAspectRatio: optionalImagineAspectRatio("BOOBS_IMAGINE_ASPECT_RATIO"),
   };
 }
