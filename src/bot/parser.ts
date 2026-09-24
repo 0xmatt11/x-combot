@@ -47,7 +47,15 @@ export type ParsedCommand =
   | { name: "connect4"; args?: string }
   | { name: "duel"; args?: string }
   | { name: "hangman"; args?: string }
-  | { name: "story"; args?: string };
+  | { name: "story"; args?: string }
+  | { name: "slots"; args: string }
+  | { name: "blackjack"; args: string }
+  | { name: "poker"; args: string }
+  | { name: "roulette"; args: string }
+  | { name: "crash"; args: string }
+  | { name: "trivia"; args: string }
+  | { name: "hit"; args: string }
+  | { name: "stand"; args: string };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -108,6 +116,17 @@ const KNOWN_COMMAND_NAMES = new Set([
   "duel",
   "hangman",
   "story",
+  "slots",
+  "slot",
+  "blackjack",
+  "bj",
+  "poker",
+  "roulette",
+  "crash",
+  "trivia",
+  "quiz",
+  "hit",
+  "stand",
 ]);
 
 /**
@@ -300,6 +319,25 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
     case "hangman":
     case "story":
       return rest ? { name: name, args: rest } : { name: name };
+    case "slots":
+    case "slot":
+      return { name: "slots", args: rest };
+    case "blackjack":
+    case "bj":
+      return { name: "blackjack", args: rest };
+    case "poker":
+      return { name: "poker", args: rest };
+    case "roulette":
+      return { name: "roulette", args: rest };
+    case "crash":
+      return { name: "crash", args: rest };
+    case "trivia":
+    case "quiz":
+      return { name: "trivia", args: rest };
+    case "hit":
+      return { name: "hit", args: rest };
+    case "stand":
+      return { name: "stand", args: rest };
     default:
       return undefined;
   }

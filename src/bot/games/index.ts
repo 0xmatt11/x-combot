@@ -125,3 +125,19 @@ export { STORY_HELP, STORY_MAX_CHARS, oneSentence, parseStoryArgs } from "./stor
 export { TICTACTOE_HELP, parseTictactoeSquare, renderTictactoe, tictactoeWinner } from "./tictactoe.js";
 export { CHALLENGE_TTL_MS, GameRoom, PLAY_TTL_MS, STORY_TTL_MS } from "./room.js";
 export type { MultiplayerKind, PlayInput } from "./room.js";
+export { CasinoTable, playCasino } from "./casino.js";
+export type { CasinoGame } from "./casino.js";
+export { BLACKJACK_HELP, playBlackjack } from "./blackjack.js";
+export { CRASH_HELP, flyingCents, playCrash, rollCrashCents } from "./crash.js";
+export { POKER_HELP, playPoker } from "./poker.js";
+export { ROULETTE_HELP, playRoulette, rouletteColor, spinWheel } from "./roulette.js";
+export { SLOTS_HELP, playSlots } from "./slots.js";
+export { TRIVIA_HELP, TRIVIA_QUESTIONS, playTrivia } from "./trivia.js";
+export { SESSION_TTL_MS, SessionMap } from "./session.js";
+export {
+  DEFAULT_BET,
+  FUN_START,
+  MAX_BET,
+  MIN_BET,
+} from "./stake.js";
+export { blackjackTotal, evaluateFive } from "./cards.js";

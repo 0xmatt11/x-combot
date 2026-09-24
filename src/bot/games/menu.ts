@@ -46,13 +46,13 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
     ],
   },
   {
-    title: "XP/casino (coming)",
+    title: "XP/casino",
     games: [
-      { command: "!slots", blurb: "slots" },
-      { command: "!blackjack", blurb: "blackjack" },
-      { command: "!poker", blurb: "poker" },
+      { command: "!slots", blurb: "slot machine" },
+      { command: "!blackjack", blurb: "blackjack vs the dealer" },
+      { command: "!poker", blurb: "5-card draw vs the bot" },
       { command: "!roulette", blurb: "roulette" },
-      { command: "!crash", blurb: "crash" },
+      { command: "!crash", blurb: "crash multiplier" },
       { command: "!trivia", blurb: "trivia" },
     ],
   },

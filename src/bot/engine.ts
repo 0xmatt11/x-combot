@@ -76,6 +76,7 @@ import {
   higherLowerReply,
   minesweeperReply,
   namedPlayer,
+  playCasino,
   resolveDiceRoller,
   rpsReply,
   scrambleReply,
@@ -83,6 +84,8 @@ import {
   truthOrDareReply,
   wordleReply,
   wouldYouRatherReply,
+  CasinoTable,
+  type CasinoGame,
   type GamePlayer,
   type MultiplayerKind,
 } from "./games/index.js";
@@ -168,6 +171,7 @@ export interface EngineDeps {
 
 export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
+  private readonly casino = new CasinoTable();
   /** Users we have already resolved to a handle or display name. */
   private readonly namedUsers = new Map<string, XUser>();
   /**
@@ -892,6 +896,40 @@ export class ModerationEngine {
     );
   }
 
+  /**
+   * Casino games share the dice name lookup. Fun chips stay in memory.
+   * An XP wager debits the wallet only when the balance covers it.
+   */
+  private async handleCasino(
+    event: DmEvent,
+    game: CasinoGame,
+    args: string,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const userId = event.senderId!;
+    const label = await this.diceRoller(event);
+    const bare = event.sender?.username?.replace(/^@/, "");
+    const username = bare && !isNumericUserId(bare) ? bare : undefined;
+    const text = playCasino(this.casino, {
+      game,
+      args,
+      conversationId,
+      userId,
+      label,
+      nowMs,
+      rng: () => this.nextRandom(),
+      xp: {
+        enabled: settings.xpEnabled,
+        get: () => this.store.getUserXp(conversationId, userId).xp,
+        set: (xp) => this.store.setUserXp(conversationId, userId, xp, username),
+      },
+    });
+    await this.reply(conversationId, text, actions);
+  }
+
   private async lookupDiceUser(userId: string): Promise<XUser | undefined> {
     try {
       return await this.client.getUserById(userId);
@@ -1144,6 +1182,16 @@ export class ModerationEngine {
       case "hangman":
       case "story":
         await this.handleMultiplayer(event, command, actions, nowMs);
+        return;
+      case "slots":
+      case "blackjack":
+      case "poker":
+      case "roulette":
+      case "crash":
+      case "trivia":
+      case "hit":
+      case "stand":
+        await this.handleCasino(event, command.name, command.args, settings, actions, nowMs);
         return;
       default:
         break;
