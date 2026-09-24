@@ -1,7 +1,9 @@
 /**
  * Noor alert: relay new public posts from one X account into a chat.
  * `!noor on` starts at the current time so older posts are not dumped.
+ * A photo is described with the chat vision call, then parodied with Imagine.
  */
+import { Buffer } from "node:buffer";
 import { containsBannedAgeTerm } from "./adult-filter.js";
 import type { ChatMessage } from "../llm/client.js";
 import type { UserTweet } from "../x/client.js";
@@ -11,6 +13,15 @@ export const DEFAULT_NOOR_USERNAME = "noorrietje";
 
 /** One timeline read shared by every conversation that has the alert on. */
 export const NOOR_ALERT_POLL_MS = 60_000;
+
+/** Photos described and attached per post. Extra photos stay as links. */
+export const NOOR_MEDIA_LIMIT = 3;
+
+export const NOOR_VISION_PROMPT = `Describe this photo in 2 to 4 sentences for someone who cannot see it.
+Include the subject, pose, setting, clothing, and any words written in the image.
+Do not guess a real person's name.
+If anyone in the photo appears to be under 18, reply with only "skip".
+No hashtags and no list.`;
 
 const USERNAME_RE = /^[A-Za-z0-9_]{1,15}$/;
 const TWEET_ID_RE = /^\d+$/;
@@ -30,7 +41,7 @@ export const NOOR_SYSTEM_PROMPT = `You rewrite one public post as what an insecu
 Rules:
 - One or two sentences, in her voice, sarcastic and reverse-psychological.
 - She wants eyes on her. Translate the post into that: neediness, performance, "notice me".
-- Use the post's actual topic. Do not invent a different event.
+- Use the post's actual topic and the photo description when one is included. Do not invent a different event.
 - Cruel and funny. Degrading, not a threat. No slurs.
 - Never mention minors. No sexual content involving anyone under 18.
 - No hashtags, no lists, no quotes around the whole answer.
@@ -137,19 +148,67 @@ export function planNoorRelay(
   return { relay, next: { sinceMs, tweetId } };
 }
 
-export function buildNoorRoastMessages(tweetText: string): ChatMessage[] {
+export function buildNoorRoastMessages(
+  tweetText: string,
+  imageNotes: readonly string[] = [],
+): ChatMessage[] {
   const clip = clipNoorSource(tweetText) || "(empty)";
+  const notes = imageNotes.map((note) => clipNoorVision(note)).filter(Boolean);
+  const lines = ["Post:", clip];
+  if (notes.length > 0) {
+    lines.push("What the photo shows:");
+    for (const note of notes) lines.push(`- ${note}`);
+  }
+  lines.push(
+    notes.length > 0
+      ? "Rewrite what she really means, in one or two sentences. Use the photo."
+      : "Rewrite what she really means, in one or two sentences.",
+  );
   return [
     { role: "system", content: NOOR_SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        "Post:",
-        clip,
-        "Rewrite what she really means, in one or two sentences.",
-      ].join("\n"),
-    },
+    { role: "user", content: lines.join("\n") },
   ];
+}
+
+/** Drop a vision reply that is empty, a skip, or not safe to quote. */
+export function sanitizeNoorVision(text: string): string {
+  return clipNoorVision(text);
+}
+
+/**
+ * Imagine prompt for one parody of her photo. Undefined when there is nothing
+ * safe to condition on. Text-only posts do not call this.
+ */
+export function buildNoorImaginePrompt(
+  tweetText: string,
+  imageNotes: readonly string[],
+): string | undefined {
+  if (containsBannedAgeTerm(tweetText)) return undefined;
+  const text = clipNoorSource(tweetText);
+  const notes = imageNotes.map((note) => clipNoorVision(note)).filter(Boolean);
+  if (!text && notes.length === 0) return undefined;
+  const parts = [
+    "Satirical parody illustration of an insecure adult woman fishing for attention.",
+    text ? `Public post: ${text}` : "",
+    notes.length > 0 ? `The photo shows: ${notes.join(" ")}` : "",
+    "Keep the same setting and outfit idea, but make the pose and expression a comic notice-me performance.",
+    "Cruel and funny, not a threat. Adults only. No text, no watermark, no logo.",
+  ].filter(Boolean);
+  const prompt = parts.join(" ");
+  if (containsBannedAgeTerm(prompt)) return undefined;
+  return prompt.length > 900 ? `${prompt.slice(0, 897).trimEnd()}...` : prompt;
+}
+
+/** Bytes for `completeVision`. The data URI is built by the chat client. */
+export function noorVisionPayload(image: {
+  bytes: Uint8Array;
+  mimeType: string;
+}): { mimeType: string; base64: string } {
+  const mime =
+    image.mimeType === "image/jpg" || image.mimeType === "image/pjpeg"
+      ? "image/jpeg"
+      : image.mimeType;
+  return { mimeType: mime, base64: Buffer.from(image.bytes).toString("base64") };
 }
 
 export function fallbackNoorRoast(text: string): string {
@@ -180,4 +239,10 @@ function clipNoorSource(text: string): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned || containsBannedAgeTerm(cleaned)) return "";
   return cleaned.length > 160 ? `${cleaned.slice(0, 157)}...` : cleaned;
+}
+
+function clipNoorVision(text: string): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned || /^skip$/i.test(cleaned) || containsBannedAgeTerm(cleaned)) return "";
+  return cleaned.length > 400 ? `${cleaned.slice(0, 397)}...` : cleaned;
 }

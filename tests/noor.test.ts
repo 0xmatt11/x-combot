@@ -1,16 +1,21 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
+import type { ImagineGenerator } from "../src/bot/imagine.js";
 import {
+  buildNoorImaginePrompt,
+  buildNoorRoastMessages,
   fallbackNoorRoast,
   formatNoorPost,
   noorMeansLine,
   NOOR_ALERT_POLL_MS,
   planNoorRelay,
   sanitizeNoorRoast,
+  sanitizeNoorVision,
   snowflakeTimeMs,
 } from "../src/bot/noor.js";
 import { loadDefaults } from "../src/config.js";
 import { loadEnv } from "../src/env.js";
+import type { LlmVisionImage } from "../src/llm/client.js";
 import { MockLlmClient } from "../src/llm/mock.js";
 import { Store } from "../src/store.js";
 import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
@@ -58,6 +63,16 @@ function runtime(): BotRuntimeConfig {
   };
 }
 
+class VisionMock extends MockLlmClient {
+  readonly visionCalls: LlmVisionImage[] = [];
+  visionReply = "She holds a latte toward the camera in a cafe.";
+
+  async completeVision(_prompt: string, image: LlmVisionImage): Promise<string> {
+    this.visionCalls.push(image);
+    return this.visionReply;
+  }
+}
+
 function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "text">): DmEvent {
   return {
     eventType: "MessageCreate",
@@ -103,6 +118,23 @@ describe("Noor alert shaping", () => {
     expect(sanitizeNoorRoast("that teen bit", "hello")).toBe(fallbackNoorRoast("hello"));
     expect(sanitizeNoorRoast("that teen bit", "also a teen post")).toBe(fallbackNoorRoast(""));
     expect(fallbackNoorRoast("a teen post")).not.toMatch(/teen/i);
+  });
+
+  it("feeds a vision note into the roast and the Imagine parody", () => {
+    const messages = buildNoorRoastMessages("coffee outside", [
+      "She holds a latte toward the camera in a cafe.",
+    ]);
+    expect(messages[1]?.content).toContain("What the photo shows:");
+    expect(messages[1]?.content).toContain("latte");
+    const prompt = buildNoorImaginePrompt("coffee outside", [
+      "She holds a latte toward the camera in a cafe.",
+    ]);
+    expect(prompt).toContain("coffee outside");
+    expect(prompt).toContain("latte");
+    expect(prompt).toContain("notice-me");
+    expect(sanitizeNoorVision("skip")).toBe("");
+    expect(sanitizeNoorVision("a teen in frame")).toBe("");
+    expect(buildNoorImaginePrompt("that teen show", ["a cafe"])).toBeUndefined();
   });
 
   it("reads a snowflake timestamp", () => {
@@ -198,6 +230,7 @@ describe("Noor alert relay", () => {
   function setup(options?: {
     llm?: MockLlmClient;
     fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
+    imagine?: ImagineGenerator;
     username?: string;
   }) {
     const store = new Store(":memory:");
@@ -211,7 +244,7 @@ describe("Noor alert relay", () => {
       client,
       { ...runtime(), noorUsername: options?.username },
       options?.llm,
-      { fetchImage: options?.fetchImage },
+      { fetchImage: options?.fetchImage, imagine: options?.imagine },
     );
     return { engine, client, store };
   }
@@ -316,6 +349,82 @@ describe("Noor alert relay", () => {
     expect(llm.calls).toHaveLength(0);
     expect(client.sent[0]?.text).toContain("that teen show");
     expect(client.sent[1]?.text.toLowerCase()).not.toContain("teen");
+  });
+
+  it("describes a photo, roasts with that context, then posts an Imagine remix", async () => {
+    const llm = new VisionMock("please look at my little coffee moment");
+    const imaginePrompts: string[] = [];
+    const imagine: ImagineGenerator = {
+      async generate(prompt) {
+        imaginePrompts.push(prompt);
+        return { bytes: Uint8Array.from([8, 8, 8]), mimeType: "image/png" };
+      },
+    };
+    const media = "https://pbs.twimg.com/media/abc.jpg";
+    const bytes = Uint8Array.from([1, 2, 3, 4]);
+    const { engine, client } = setup({
+      llm,
+      imagine,
+      fetchImage: async (url) =>
+        url === media ? { bytes, mimeType: "image/jpeg" } : undefined,
+    });
+    const order: string[] = [];
+    const sendMessage = client.sendMessage.bind(client);
+    const sendImage = client.sendImage.bind(client);
+    client.sendMessage = async (conversationId, text) => {
+      order.push(`text:${text}`);
+      return sendMessage(conversationId, text);
+    };
+    client.sendImage = async (conversationId, image) => {
+      order.push(`image:${image.url}`);
+      return sendImage(conversationId, image);
+    };
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    client.sent.length = 0;
+    order.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "coffee outside", now + 10, [media])]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+
+    expect(llm.visionCalls).toHaveLength(1);
+    expect(llm.visionCalls[0]?.mimeType).toBe("image/jpeg");
+    expect(llm.visionCalls[0]?.base64.length).toBeGreaterThan(0);
+    expect(llm.calls[0]?.[1]?.content).toContain("latte");
+    expect(imaginePrompts).toHaveLength(1);
+    expect(imaginePrompts[0]).toContain("coffee outside");
+    expect(imaginePrompts[0]).toContain("latte");
+    expect(order[0]).toMatch(/^text:coffee outside\nhttps:\/\/x\.com\/noorrietje\/status\/20/);
+    expect(order[1]).toBe(`image:${media}`);
+    expect(order[2]).toMatch(/^text:what she really means to say is "/);
+    expect(order[3]).toBe("image:https://api.x.ai/v1/images/generations");
+    expect(client.images).toHaveLength(2);
+    expect(client.sent[1]?.text).toBe(
+      `what she really means to say is "please look at my little coffee moment"`,
+    );
+  });
+
+  it("does not call vision or Imagine for a text-only post", async () => {
+    const llm = new VisionMock("notice me");
+    const imaginePrompts: string[] = [];
+    const { engine, client } = setup({
+      llm,
+      imagine: {
+        async generate(prompt) {
+          imaginePrompts.push(prompt);
+          return { bytes: Uint8Array.from([1]), mimeType: "image/png" };
+        },
+      },
+    });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "just words", now + 10)]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(llm.visionCalls).toHaveLength(0);
+    expect(imaginePrompts).toEqual([]);
+    expect(client.images).toHaveLength(0);
+    expect(client.sent).toHaveLength(2);
+    expect(client.sent[1]?.text.startsWith("what she really means to say is ")).toBe(true);
   });
 
   it("attaches a photo when fetch works, otherwise puts the link in the text", async () => {

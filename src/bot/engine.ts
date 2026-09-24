@@ -34,14 +34,19 @@ import {
   TROLL_COOLDOWN_MS,
 } from "./troll.js";
 import {
+  buildNoorImaginePrompt,
   buildNoorRoastMessages,
   fallbackNoorRoast,
   formatNoorPost,
   NOOR_ALERT_POLL_MS,
+  NOOR_MEDIA_LIMIT,
+  NOOR_VISION_PROMPT,
   noorMeansLine,
+  noorVisionPayload,
   normalizeNoorUsername,
   planNoorRelay,
   sanitizeNoorRoast,
+  sanitizeNoorVision,
   snowflakeTimeMs,
 } from "./noor.js";
 import type { NoorAlert } from "../store.js";
@@ -1202,8 +1207,8 @@ export class ModerationEngine {
   }
 
   /**
-   * Post the tweet (text, status URL, photo when the image attach path works),
-   * then the roast line. The roast is composed first so a model failure still
+   * Post her text and photo, then the roast, then one Imagine parody when the
+   * post had a photo. The roast is composed first so a model failure still
    * uses the fallback template before anything is sent.
    */
   private async postNoorTweet(
@@ -1211,26 +1216,35 @@ export class ModerationEngine {
     tweet: UserTweet,
     username: string,
   ): Promise<void> {
-    const inner = await this.composeNoorRoast(conversationId, tweet.text);
     const mediaUrls = tweet.mediaUrls.filter((url) => url.startsWith("https://"));
-    const first = mediaUrls[0];
-    const image = first ? await this.loadNoorImage(first) : undefined;
-    const extraLinks = image ? mediaUrls.slice(1) : mediaUrls;
+    const loaded: { url: string; image: AdultVisionImage }[] = [];
+    const missed: string[] = [];
+    for (const url of mediaUrls.slice(0, NOOR_MEDIA_LIMIT)) {
+      const image = await this.loadNoorImage(url);
+      if (image) loaded.push({ url, image });
+      else missed.push(url);
+    }
+    const extraLinks = [...missed, ...mediaUrls.slice(NOOR_MEDIA_LIMIT)];
+    const notes = await this.describeNoorPhotos(
+      conversationId,
+      loaded.map((photo) => photo.image),
+    );
+    const inner = await this.composeNoorRoast(conversationId, tweet.text, notes);
     await this.client.sendMessage(
       conversationId,
       formatNoorPost(tweet, username, extraLinks),
     );
-    if (image && first) {
+    for (const photo of loaded) {
       try {
         await this.client.sendImage(conversationId, {
-          url: first,
-          bytes: image.bytes,
-          mimeType: image.mimeType,
+          url: photo.url,
+          bytes: photo.image.bytes,
+          mimeType: photo.image.mimeType,
         });
       } catch (error) {
         log.warn(`Noor media attach failed conversation=${conversationId}`, error);
         try {
-          await this.client.sendMessage(conversationId, first);
+          await this.client.sendMessage(conversationId, photo.url);
         } catch (linkError) {
           log.warn(`Noor media link failed conversation=${conversationId}`, linkError);
         }
@@ -1240,6 +1254,75 @@ export class ModerationEngine {
       await this.client.sendMessage(conversationId, noorMeansLine(inner));
     } catch (error) {
       log.warn(`Noor roast post failed conversation=${conversationId} tweet=${tweet.id}`, error);
+    }
+    if (mediaUrls.length > 0) {
+      await this.postNoorRemix(conversationId, tweet.text, notes);
+    }
+  }
+
+  /** Grok vision description of each downloaded photo. Failures stay text-only. */
+  private async describeNoorPhotos(
+    conversationId: string,
+    photos: readonly AdultVisionImage[],
+  ): Promise<string[]> {
+    const llm = this.llmClient;
+    if (!llm?.completeVision || photos.length === 0) return [];
+    if (!this.conversationConfig(conversationId).llmEnabled) return [];
+    const notes: string[] = [];
+    for (const photo of photos) {
+      try {
+        const reply = await llm.completeVision(NOOR_VISION_PROMPT, noorVisionPayload(photo));
+        const note = sanitizeNoorVision(reply);
+        if (note) notes.push(note);
+      } catch (error) {
+        log.warn(`Noor vision failed conversation=${conversationId}`, error);
+      }
+    }
+    return notes;
+  }
+
+  /**
+   * One Imagine parody of her photo, posted after the roast. A missing key or
+   * a failed generation leaves the text relay in place.
+   */
+  private async postNoorRemix(
+    conversationId: string,
+    tweetText: string,
+    imageNotes: readonly string[],
+  ): Promise<void> {
+    const imagine = this.deps.imagine;
+    if (!imagine) {
+      log.info(`Noor remix skipped conversation=${conversationId} (imagine unavailable)`);
+      return;
+    }
+    const built = buildNoorImaginePrompt(tweetText, imageNotes);
+    if (!built) {
+      log.info(`Noor remix skipped conversation=${conversationId} (no safe prompt)`);
+      return;
+    }
+    const normalized = normalizeImaginePrompt(built);
+    if (!normalized.ok) {
+      log.info(`Noor remix skipped conversation=${conversationId} (${normalized.reason})`);
+      return;
+    }
+    let generated: ImagineImage;
+    try {
+      generated = await imagine.generate(normalized.prompt);
+    } catch (error) {
+      log.warn(`Noor remix failed conversation=${conversationId}`, error);
+      return;
+    }
+    const actions: EngineActions = {
+      replies: [],
+      deletes: [],
+      notifies: [],
+      muted: false,
+      warned: false,
+      llm: false,
+    };
+    const outcome = await this.postGeneratedImage(conversationId, generated, actions, "Noor remix");
+    if (outcome !== "posted") {
+      log.warn(`Noor remix was not posted conversation=${conversationId} (${outcome})`);
     }
   }
 
@@ -1255,13 +1338,19 @@ export class ModerationEngine {
     }
   }
 
-  private async composeNoorRoast(conversationId: string, tweetText: string): Promise<string> {
+  private async composeNoorRoast(
+    conversationId: string,
+    tweetText: string,
+    imageNotes: readonly string[] = [],
+  ): Promise<string> {
     const fallback = () => fallbackNoorRoast(tweetText);
-    if (containsBannedAgeTerm(tweetText)) return fallbackNoorRoast("");
+    if (containsBannedAgeTerm(tweetText) || imageNotes.some((note) => containsBannedAgeTerm(note))) {
+      return fallbackNoorRoast("");
+    }
     const settings = this.conversationConfig(conversationId);
     if (!this.llmClient || !settings.llmEnabled) return fallback();
     try {
-      const answer = await this.llmClient.complete(buildNoorRoastMessages(tweetText));
+      const answer = await this.llmClient.complete(buildNoorRoastMessages(tweetText, imageNotes));
       return sanitizeNoorRoast(answer, tweetText);
     } catch (error) {
       log.warn(`Noor roast failed conversation=${conversationId}`, error);
