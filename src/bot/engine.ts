@@ -58,7 +58,11 @@ import {
   type GeneratedVideo,
   type VideoGenerator,
 } from "./video.js";
-import { imaginePublicUrlFor, type ImaginePublicUrls } from "./imagine-public.js";
+import {
+  imaginePublicUrlsFor,
+  pickImaginePublicUrl,
+  type ImaginePublicUrls,
+} from "./imagine-public.js";
 import {
   parseVoiceRequest,
   VOICE_ATTACH_FAILED_MESSAGE,
@@ -181,6 +185,7 @@ export interface EngineDeps {
   /**
    * Optional already-hosted Imagine public JPEGs. Tried after API Imagine
    * misses and before search. Absent means that step is off.
+   * `bootyUrls` is the `!ass` / `!booty` bank; a single `bootyUrl` still works.
    * `!imagine` does not use this.
    */
   imaginePublic?: ImaginePublicUrls;
@@ -1931,38 +1936,57 @@ export class ModerationEngine {
   }
 
   /**
-   * Attach one JPEG the operator already has on imagine-public.x.ai.
-   * A miss returns false so search can run. This does not call grok.com.
+   * Download a JPEG the operator already has on imagine-public.x.ai and attach
+   * those bytes on the existing photo path (`sendImage` → classic `dm_image`
+   * or Chat `encryptStream` + `/2/chat/media/upload`). The CDN address is not
+   * posted as text.
+   * `!boobs` uses one chest URL. `!ass` / `!booty` use the booty bank when
+   * more than one URL is configured, otherwise the single booty URL.
+   * A recent URL, a repeated byte hash, a non-JPEG download, or a failed
+   * attach is skipped and another bank URL is tried. A miss returns false so
+   * search can run. This does not call grok.com.
    */
   private async tryImaginePublic(
     conversationId: string,
     command: AdultImageCommand,
-    actions: EngineActions,
+    _actions: EngineActions,
     label: string,
   ): Promise<boolean> {
-    const url = imaginePublicUrlFor(this.deps.imaginePublic, command);
-    if (!url) return false;
-    if (this.recentImages.hasUrl(conversationId, url)) {
-      log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
-      return false;
+    const pending = imaginePublicUrlsFor(this.deps.imaginePublic, command);
+    while (pending.length > 0) {
+      const url = pickImaginePublicUrl(pending, () => this.nextRandom());
+      if (!url) return false;
+      const index = pending.indexOf(url);
+      if (index >= 0) pending.splice(index, 1);
+      if (this.recentImages.hasUrl(conversationId, url)) {
+        log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
+        continue;
+      }
+      const fetched = await this.loadImaginePublic(url, conversationId, label);
+      if (!fetched) continue;
+      const hash = imageContentHash(fetched.bytes);
+      if (this.recentImages.hasHash(conversationId, hash)) {
+        log.warn(`${label} Imagine public image repeated a recent hash conversation=${conversationId}`);
+        continue;
+      }
+      try {
+        await this.client.sendImage(conversationId, {
+          url,
+          bytes: fetched.bytes,
+          mimeType: fetched.mimeType,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        log.warn(
+          `${label} Imagine public attach failed conversation=${conversationId} host=${imageHost(url)} (${detail})`,
+        );
+        continue;
+      }
+      this.recentImages.remember(conversationId, { url, hash });
+      log.info(`${label} posted native image conversation=${conversationId} host=${imageHost(url)}`);
+      return true;
     }
-    const fetched = await this.loadImaginePublic(url, conversationId, label);
-    if (!fetched) return false;
-    const hash = imageContentHash(fetched.bytes);
-    if (this.recentImages.hasHash(conversationId, hash)) {
-      log.warn(`${label} Imagine public image repeated a recent hash conversation=${conversationId}`);
-      return false;
-    }
-    const delivery = await this.deliverAdultImage(
-      conversationId,
-      { url, adult: true },
-      actions,
-      label,
-      fetched,
-    );
-    if (!delivery.posted) return false;
-    this.recentImages.remember(conversationId, { url, hash: delivery.hash ?? hash });
-    return true;
+    return false;
   }
 
   private async loadImaginePublic(

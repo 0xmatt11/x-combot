@@ -89,6 +89,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "boobs",
   "ass",
   "booty",
+  "booties",
   "imagine",
   "video",
   "voice",
@@ -270,6 +271,7 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
     case "ass":
       return rest ? { name: "ass", extra: rest } : { name: "ass" };
     case "booty":
+    case "booties":
       return rest ? { name: "booty", extra: rest } : { name: "booty" };
     case "imagine":
       return { name: "imagine", prompt: rest };
