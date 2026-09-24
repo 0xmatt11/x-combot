@@ -183,9 +183,10 @@ describe("!games menu", () => {
     expect(menu).toContain("Instant:\n!dice — roll dice");
     expect(menu).toContain("Multiplayer:\n!tictactoe — tic-tac-toe");
     expect(menu).toContain("Word/solo (coming):");
-    expect(menu).toContain("XP/casino (coming):");
+    expect(menu).toContain("XP/casino:\n!slots — slot machine");
     expect(menu).toContain("Board:\n!minesweeper — minesweeper");
     expect(menu).not.toContain("minesweeper (coming)");
+    expect(menu).not.toContain("XP/casino (coming)");
 
     const commands = GAME_CATALOG.flatMap((group) => group.games.map((game) => game.command));
     expect(commands).toEqual(PLANNED);

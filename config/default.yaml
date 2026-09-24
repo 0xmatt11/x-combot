@@ -47,6 +47,12 @@ help: |
     !duel [@user] — turn-based HP duel (attack or defend)
     !hangman [start|@user] — solo or challenge; guess a letter
     !story start|stop|status — one sentence each
+    !slots [bet|xp bet] — slot machine (default 10 fun chips)
+    !blackjack [bet] — hit/stand vs the dealer (!hit, !stand, !bj)
+    !poker [bet] — 5-card draw vs the bot (one draw)
+    !roulette <red|black|number> [bet] — spin
+    !crash [bet] — cash out with !crash out, or !crash auto 2.5
+    !trivia — multiple choice; !trivia a to answer, !trivia score
     !games — full list; more games are listed there
     !wordle [word] — daily 5-letter puzzle, then a practice round; marks are correct, present, or absent
     !anagram [word] — unscramble a longer word; score drops on each miss

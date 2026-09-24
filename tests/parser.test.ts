@@ -228,6 +228,30 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("/story stop")).toBeUndefined();
   });
 
+  it("parses casino games instead of leaving them unknown", () => {
+    expect(parseCommand("!slots")).toEqual({ name: "slots", args: "" });
+    expect(parseCommand("!slot xp 10")).toEqual({ name: "slots", args: "xp 10" });
+    expect(parseCommand("!blackjack")).toEqual({ name: "blackjack", args: "" });
+    expect(parseCommand("/BJ hit")).toEqual({ name: "blackjack", args: "hit" });
+    expect(parseCommand("!blackjack stand")).toEqual({ name: "blackjack", args: "stand" });
+    expect(parseCommand("!poker draw 1 3")).toEqual({ name: "poker", args: "draw 1 3" });
+    expect(parseCommand("!roulette red 10")).toEqual({ name: "roulette", args: "red 10" });
+    expect(parseCommand("!crash out")).toEqual({ name: "crash", args: "out" });
+    expect(parseCommand("!crash auto 2.5")).toEqual({ name: "crash", args: "auto 2.5" });
+    expect(parseCommand("!trivia")).toEqual({ name: "trivia", args: "" });
+    expect(parseCommand("/quiz b")).toEqual({ name: "trivia", args: "b" });
+    expect(parseCommand("!hit")).toEqual({ name: "hit", args: "" });
+    expect(parseCommand("!stand")).toEqual({ name: "stand", args: "" });
+    expect(parseUnknownBang("!blackjack")).toBeUndefined();
+    expect(parseUnknownBang("!slots xp 10")).toBeUndefined();
+    expect(parseUnknownBang("!poker")).toBeUndefined();
+    expect(parseUnknownBang("!roulette 17")).toBeUndefined();
+    expect(parseUnknownBang("!crash")).toBeUndefined();
+    expect(parseUnknownBang("!trivia a")).toBeUndefined();
+    expect(parseUnknownBang("!hit")).toBeUndefined();
+    expect(parseUnknownBang("!stand")).toBeUndefined();
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",
@@ -277,7 +301,6 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!minesweeper easy")).toBeUndefined();
     expect(parseUnknownBang("!12345")).toBeUndefined();
     expect(parseCommand("!12345")).toBeUndefined();
-    expect(parseCommand("!slots")).toBeUndefined();
     expect(parseUnknownBang("!summary focus")).toBeUndefined();
     expect(parseUnknownBang("!delete 12")).toBeUndefined();
     expect(parseUnknownBang("!warn")).toBeUndefined();
