@@ -34,7 +34,8 @@ export type ParsedCommand =
   | { name: "rps"; choice?: string }
   | { name: "coinflip"; call?: string }
   | { name: "eightball"; question?: string }
-  | { name: "games" };
+  | { name: "games" }
+  | { name: "minesweeper"; args?: string };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -82,6 +83,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "8ball",
   "eightball",
   "games",
+  "minesweeper",
 ]);
 
 /**
@@ -252,6 +254,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "eightball", question: rest } : { name: "eightball" };
     case "games":
       return { name: "games" };
+    case "minesweeper":
+      return rest ? { name: "minesweeper", args: rest } : { name: "minesweeper" };
     default:
       return undefined;
   }

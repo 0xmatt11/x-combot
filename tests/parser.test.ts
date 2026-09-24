@@ -178,6 +178,10 @@ describe("parseCommand", () => {
     expect(parseCommand("!games")).toEqual({ name: "games" });
     expect(parseCommand("  /GAMES  ")).toEqual({ name: "games" });
     expect(parseCommand("!games extra")).toEqual({ name: "games" });
+    expect(parseCommand("!minesweeper")).toEqual({ name: "minesweeper" });
+    expect(parseCommand("/MINESWEEPER easy")).toEqual({ name: "minesweeper", args: "easy" });
+    expect(parseCommand("!minesweeper r B3")).toEqual({ name: "minesweeper", args: "r B3" });
+    expect(parseCommand("!minesweeper f C2")).toEqual({ name: "minesweeper", args: "f C2" });
   });
 
   it("parses LLM ask, summarize, and analyze commands", () => {
@@ -226,6 +230,7 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!8ball will it rain?")).toBeUndefined();
     expect(parseUnknownBang("!eightball")).toBeUndefined();
     expect(parseUnknownBang("!games")).toBeUndefined();
+    expect(parseUnknownBang("!minesweeper easy")).toBeUndefined();
     expect(parseUnknownBang("!12345")).toBeUndefined();
     expect(parseCommand("!12345")).toBeUndefined();
     expect(parseCommand("!tictactoe")).toBeUndefined();

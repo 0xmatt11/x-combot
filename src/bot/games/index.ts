@@ -22,6 +22,21 @@ export { EIGHT_BALL_ANSWERS, EIGHT_BALL_HELP, eightBallReply } from "./eightball
 export type { EightBallAnswer, EightBallTone } from "./eightball.js";
 export { GAME_CATALOG, gamesMenu } from "./menu.js";
 export type { GameCatalogEntry, GameCatalogGroup } from "./menu.js";
+export {
+  MINESWEEPER_HELP,
+  MINESWEEPER_SIZES,
+  MINESWEEPER_TIMEOUT_MS,
+  minesweeperReply,
+  minesweeperSnapshot,
+  parseMinesweeperCommand,
+  resetMinesweeperBoards,
+} from "./minesweeper.js";
+export type {
+  MinesweeperCommand,
+  MinesweeperDifficulty,
+  MinesweeperSnapshot,
+  MinesweeperStatus,
+} from "./minesweeper.js";
 export { pickIndex, playerName } from "./random.js";
 export { RPS_CHOICES, RPS_HELP, parseRpsChoice, rpsOutcome, rpsReply } from "./rps.js";
 export type { RpsChoice, RpsOutcome } from "./rps.js";

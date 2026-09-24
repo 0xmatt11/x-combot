@@ -184,7 +184,8 @@ describe("!games menu", () => {
     expect(menu).toContain("Multiplayer (coming):");
     expect(menu).toContain("Word/solo (coming):");
     expect(menu).toContain("XP/casino (coming):");
-    expect(menu).toContain("Board:\n!minesweeper — minesweeper (coming)");
+    expect(menu).toContain("Board:\n!minesweeper — minesweeper");
+    expect(menu).not.toContain("minesweeper (coming)");
 
     const commands = GAME_CATALOG.flatMap((group) => group.games.map((game) => game.command));
     expect(commands).toEqual(PLANNED);
@@ -323,6 +324,7 @@ describe("instant game commands", () => {
     expect(loaded.help).toMatch(/!flip/);
     expect(loaded.help).toMatch(/!8ball/);
     expect(loaded.help).toMatch(/!eightball/);
+    expect(loaded.help).toMatch(/!minesweeper/);
     expect(loaded.help).toMatch(/more games/i);
   });
 });
