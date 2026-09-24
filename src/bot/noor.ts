@@ -57,25 +57,29 @@ export function tweetStatusUrl(username: string, tweetId: string): string {
   return `https://x.com/${normalizeNoorUsername(username)}/status/${tweetId}`;
 }
 
-/** Tweet text, the status URL, and any media links the caller could not attach. */
+/**
+ * Her post, labeled so it is not the roast. The status URL is always first
+ * after the label. Media links are only the photos that could not be attached.
+ */
 export function formatNoorPost(
   tweet: NoorTweet,
   username: string,
   mediaLinks: readonly string[] = [],
 ): string {
-  const parts: string[] = [];
+  const handle = normalizeNoorUsername(username);
+  const parts = [`📌 @${handle} original`, tweetStatusUrl(username, tweet.id)];
   const text = tweet.text.replace(/\s+/g, " ").trim();
   if (text) parts.push(text);
-  parts.push(tweetStatusUrl(username, tweet.id));
   for (const link of mediaLinks) {
     if (link.startsWith("https://")) parts.push(link);
   }
   return parts.join("\n");
 }
 
+/** The roast, in its own message, never written as if she said it. */
 export function noorMeansLine(inner: string): string {
   const cleaned = inner.replace(/"/g, "'").replace(/\s+/g, " ").trim();
-  return `what she really means to say is "${cleaned}"`;
+  return `🪞 What she really means to say is:\n"${cleaned}"`;
 }
 
 export function snowflakeTimeMs(id: string): number | undefined {
@@ -219,7 +223,7 @@ export function fallbackNoorRoast(text: string): string {
 
 export function sanitizeNoorRoast(text: string, source: string): string {
   let cleaned = text.replace(/\s+/g, " ").trim();
-  cleaned = cleaned.replace(/^what she really means to say is\s+/i, "");
+  cleaned = cleaned.replace(/^(?:🪞\s*)?what she really means to say is:?\s+/i, "");
   cleaned = cleaned.replace(/^["“”']+|["“”']+$/g, "").trim();
   cleaned = leadingSentences(cleaned, 2);
   if (cleaned.length > 280) {

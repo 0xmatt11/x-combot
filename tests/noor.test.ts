@@ -87,22 +87,23 @@ function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "text">): DmEv
 }
 
 describe("Noor alert shaping", () => {
-  it("formats the post as text, status URL, and leftover media links", () => {
+  it("labels her original post, always with the status URL, apart from the translation", () => {
     const post = tweet("55", "  hello   there  ", 10, [
       "https://pbs.twimg.com/media/abc.jpg",
     ]);
-    expect(formatNoorPost(post, "noorrietje")).toBe(
-      "hello there\nhttps://x.com/noorrietje/status/55",
+    const original = formatNoorPost(post, "noorrietje");
+    expect(original).toBe(
+      "📌 @noorrietje original\nhttps://x.com/noorrietje/status/55\nhello there",
     );
+    expect(original).toContain("https://x.com/noorrietje/status/55");
+    expect(original).not.toMatch(/really means/i);
     expect(formatNoorPost(post, "@NoorRietje", post.mediaUrls)).toBe(
-      "hello there\nhttps://x.com/noorrietje/status/55\nhttps://pbs.twimg.com/media/abc.jpg",
+      "📌 @noorrietje original\nhttps://x.com/noorrietje/status/55\nhello there\nhttps://pbs.twimg.com/media/abc.jpg",
     );
-  });
-
-  it("wraps the roast in the fixed line", () => {
-    expect(noorMeansLine('  notice me "now"  ')).toBe(
-      `what she really means to say is "notice me 'now'"`,
-    );
+    const translation = noorMeansLine('  notice me "now"  ');
+    expect(translation).toBe(`🪞 What she really means to say is:\n"notice me 'now'"`);
+    expect(translation).not.toContain("https://x.com/");
+    expect(translation).not.toMatch(/original/i);
   });
 
   it("keeps a model rewrite and falls back when it is empty or unsafe", () => {
@@ -110,6 +111,9 @@ describe("Noor alert shaping", () => {
       "please look at my coffee",
     );
     expect(sanitizeNoorRoast('what she really means to say is "clap for me"', "coffee")).toBe(
+      "clap for me",
+    );
+    expect(sanitizeNoorRoast('🪞 What she really means to say is:\n"clap for me"', "coffee")).toBe(
       "clap for me",
     );
     expect(sanitizeNoorRoast("   ", "I invented a holiday")).toBe(
@@ -284,10 +288,10 @@ describe("Noor alert relay", () => {
     ]);
     await engine.pollNoorAlerts(now + 5_000);
     expect(client.sent.map((row) => row.text)).toEqual([
-      "brand new\nhttps://x.com/noorrietje/status/20",
-      `what she really means to say is "${fallbackNoorRoast("brand new")}"`,
-      "even newer\nhttps://x.com/noorrietje/status/30",
-      `what she really means to say is "${fallbackNoorRoast("even newer")}"`,
+      "📌 @noorrietje original\nhttps://x.com/noorrietje/status/20\nbrand new",
+      `🪞 What she really means to say is:\n"${fallbackNoorRoast("brand new")}"`,
+      "📌 @noorrietje original\nhttps://x.com/noorrietje/status/30\neven newer",
+      `🪞 What she really means to say is:\n"${fallbackNoorRoast("even newer")}"`,
     ]);
     expect(store.getNoorAlert(groupId)?.tweetId).toBe("30");
 
@@ -307,7 +311,7 @@ describe("Noor alert relay", () => {
     expect(client.sent).toHaveLength(4);
     await engine.pollNoorAlerts(now + 5_000 + NOOR_ALERT_POLL_MS * 2);
     expect(client.sent.at(-2)?.text).toContain("later");
-    expect(client.sent.at(-1)?.text.startsWith("what she really means to say is ")).toBe(true);
+    expect(client.sent.at(-1)?.text.startsWith("🪞 What she really means to say is:")).toBe(true);
     expect(store.getNoorAlert(groupId)?.tweetId).toBe("40");
   });
 
@@ -320,8 +324,11 @@ describe("Noor alert relay", () => {
     client.tweets.set(noor.id, [tweet("20", "coffee outside", now + 10)]);
     await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
     expect(client.sent[1]?.text).toBe(
-      `what she really means to say is "notice me, this latte is my whole personality"`,
+      `🪞 What she really means to say is:\n"notice me, this latte is my whole personality"`,
     );
+    expect(client.sent[0]?.text).toContain("https://x.com/noorrietje/status/20");
+    expect(client.sent[0]?.text).toMatch(/^📌 @noorrietje original/);
+    expect(client.sent[1]?.text).not.toContain("https://x.com/");
     expect(llm.calls).toHaveLength(1);
 
     const failing = new MockLlmClient();
@@ -334,7 +341,7 @@ describe("Noor alert relay", () => {
     again.client.tweets.set(noor.id, [tweet("21", "another coffee", now + 10)]);
     await again.engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
     expect(again.client.sent[1]?.text).toBe(
-      `what she really means to say is "${fallbackNoorRoast("another coffee")}"`,
+      `🪞 What she really means to say is:\n"${fallbackNoorRoast("another coffee")}"`,
     );
   });
 
@@ -393,10 +400,14 @@ describe("Noor alert relay", () => {
     expect(imaginePrompts).toHaveLength(1);
     expect(imaginePrompts[0]).toContain("coffee outside");
     expect(imaginePrompts[0]).toContain("latte");
-    expect(order[0]).toMatch(/^text:coffee outside\nhttps:\/\/x\.com\/noorrietje\/status\/20/);
+    expect(order[0]).toMatch(
+      /^text:📌 @noorrietje original\nhttps:\/\/x\.com\/noorrietje\/status\/20\ncoffee outside/,
+    );
     expect(order[0]).not.toContain(media);
+    expect(order[0]).not.toMatch(/really means/i);
     expect(order[1]).toBe(`image:${media}`);
-    expect(order[2]).toMatch(/^text:what she really means to say is "/);
+    expect(order[2]).toMatch(/^text:🪞 What she really means to say is:\n"/);
+    expect(order[2]).not.toContain("https://x.com/");
     expect(order[3]).toBe("image:https://api.x.ai/v1/images/generations");
     expect(client.images).toEqual([
       { conversationId: groupId, url: media, mimeType: "image/jpeg", bytes: bytes.byteLength },
@@ -409,7 +420,7 @@ describe("Noor alert relay", () => {
     ]);
     expect(client.images.every((row) => row.bytes > 0)).toBe(true);
     expect(client.sent[1]?.text).toBe(
-      `what she really means to say is "please look at my little coffee moment"`,
+      `🪞 What she really means to say is:\n"please look at my little coffee moment"`,
     );
   });
 
@@ -458,7 +469,9 @@ describe("Noor alert relay", () => {
     ]);
     expect(order[1]).toBe(`image:${herA}:4`);
     expect(order[2]).toBe(`image:${herB}:4`);
-    expect(order[3]).toMatch(/^text:what she really means to say is "/);
+    expect(order[3]).toMatch(/^text:🪞 What she really means to say is:\n"/);
+    expect(order[0]).toContain("https://x.com/noorrietje/status/21");
+    expect(order[0]).not.toMatch(/really means/i);
     expect(order[4]).toBe(`image:${remixUrl}:5`);
     expect(client.sent.map((row) => row.text).some((text) => text === herA || text === herB || text === remixUrl)).toBe(
       false,
@@ -487,7 +500,10 @@ describe("Noor alert relay", () => {
     expect(imaginePrompts).toEqual([]);
     expect(client.images).toHaveLength(0);
     expect(client.sent).toHaveLength(2);
-    expect(client.sent[1]?.text.startsWith("what she really means to say is ")).toBe(true);
+    expect(client.sent[0]?.text).toContain("https://x.com/noorrietje/status/20");
+    expect(client.sent[0]?.text.startsWith("📌 @noorrietje original")).toBe(true);
+    expect(client.sent[1]?.text.startsWith("🪞 What she really means to say is:")).toBe(true);
+    expect(client.sent[1]?.text).not.toContain("https://x.com/");
   });
 
   it("attaches a photo when fetch works, otherwise puts the link in the text", async () => {
@@ -501,7 +517,9 @@ describe("Noor alert relay", () => {
     client.sent.length = 0;
     client.tweets.set(noor.id, [tweet("20", "pic", now + 10, [media])]);
     await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
-    expect(client.sent[0]?.text).toBe("pic\nhttps://x.com/noorrietje/status/20");
+    expect(client.sent[0]?.text).toBe(
+      "📌 @noorrietje original\nhttps://x.com/noorrietje/status/20\npic",
+    );
     expect(client.sent[0]?.text).not.toContain(media);
     expect(client.images).toEqual([
       { conversationId: groupId, url: media, mimeType: "image/jpeg", bytes: bytes.byteLength },
@@ -514,7 +532,7 @@ describe("Noor alert relay", () => {
     plain.client.tweets.set(noor.id, [tweet("21", "pic", now + 10, [media])]);
     await plain.engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
     expect(plain.client.sent[0]?.text).toBe(
-      `pic\nhttps://x.com/noorrietje/status/21\n${media}`,
+      `📌 @noorrietje original\nhttps://x.com/noorrietje/status/21\npic\n${media}`,
     );
     expect(plain.client.images).toHaveLength(0);
   });
