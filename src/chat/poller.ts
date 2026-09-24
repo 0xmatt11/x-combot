@@ -24,6 +24,11 @@ export interface ChatPollerOptions {
   discoveryIntervalMs?: number;
   discoveryMaxPages?: number;
   maxPollsPerTick?: number;
+  /**
+   * Last tick outcome for `!status`. `ok` after a finished poll, `degraded`
+   * when the tick is waiting out an API error. Does not add a request.
+   */
+  onPipeline?: (state: "ok" | "degraded", detail?: string) => void;
 }
 
 export class ChatPoller {
@@ -40,6 +45,7 @@ export class ChatPoller {
   private nextDiscoveryAt = 0;
   private inboxListed = false;
   private discoveryDisabled = false;
+  private readonly onPipeline?: (state: "ok" | "degraded", detail?: string) => void;
 
   constructor(
     private readonly chat: ChatService,
@@ -58,6 +64,7 @@ export class ChatPoller {
     this.discoveryIntervalMs = options.discoveryIntervalMs ?? CHAT_DISCOVERY_INTERVAL_MS;
     this.discoveryMaxPages = options.discoveryMaxPages ?? CHAT_DISCOVERY_MAX_PAGES;
     this.maxPollsPerTick = options.maxPollsPerTick ?? CHAT_POLLS_PER_TICK;
+    this.onPipeline = options.onPipeline;
   }
 
   get conversationIds(): readonly string[] {
@@ -118,11 +125,16 @@ export class ChatPoller {
       }
       delayMs = this.idleMs;
       if (delayMs > this.intervalMs) reason = "idle";
+      this.onPipeline?.("ok");
     } catch (error) {
       log.error("Chat poll failed", error);
       this.idleMs = this.intervalMs;
       delayMs = nextPollDelayMs(this.intervalMs, error);
       if (delayMs > this.intervalMs) reason = "backoff";
+      this.onPipeline?.(
+        "degraded",
+        reason === "backoff" ? `backoff ${Math.max(1, Math.ceil(delayMs / 1000))}s` : "poll failed",
+      );
     } finally {
       if (!this.stopped) {
         if (reason === "backoff") {

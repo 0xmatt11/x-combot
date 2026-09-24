@@ -83,6 +83,7 @@ import {
   suggestSofterImaginePrompts,
   type AdultImageCommand,
   type AdultImageProviderName,
+  type ImagineBackend,
   type ImagineGenerator,
   type ImagineImage,
 } from "./imagine.js";
@@ -161,6 +162,13 @@ import {
   type UnknownBangCommand,
   type UserRef,
 } from "./parser.js";
+import {
+  formatStatusReport,
+  readBuildVersion,
+  statusMediaCounts,
+  type RuntimeHealth,
+  type StatusKeyHealth,
+} from "./status.js";
 import {
   alreadyMaxLevelMessage,
   alreadyMinLevelMessage,
@@ -244,6 +252,19 @@ export interface EngineDeps {
   /** Last posted image URLs and content hashes. Defaults to an in-memory window. */
   recentImages?: RecentImageMemory;
   random?: () => number;
+  /** Chat poller and Activity notes. Absent when those loops are not running. */
+  health?: RuntimeHealth;
+  /** Cached public_keys state. Absent when Chat is not loaded. Never fetches. */
+  publicKeys?: { publicKeyHealth(nowMs?: number): StatusKeyHealth };
+  /** Provider and model only. Never an API key or base URL. */
+  llmMode?: string;
+  /**
+   * `IMAGINE_BACKEND`. `browser` is grok.com/imagine in Chrome.
+   * `api` is api.x.ai. Absent in tests that only pass a generator.
+   */
+  imagineBackend?: ImagineBackend;
+  /** Package version and short git sha. Defaults to a one-time local read. */
+  buildVersion?: { version?: string; sha?: string };
 }
 
 export class ModerationEngine {
@@ -262,6 +283,8 @@ export class ModerationEngine {
   private noorAccount?: { username: string; id: string };
   private noorLastPollMs = 0;
   private noorPollInFlight = false;
+  /** Used when no shared RuntimeHealth was passed in. */
+  private readonly startedAtMs = Date.now();
 
   constructor(
     private readonly store: Store,
@@ -1821,6 +1844,35 @@ export class ModerationEngine {
     await this.reply(conversationId, `Troll mode off for ${label}.`, actions);
   }
 
+  private statusReport(
+    conversationId: string,
+    settings: ResolvedConversationConfig,
+    nowMs: number,
+  ): string {
+    const troll = this.store.getTrollTarget(conversationId);
+    const noor = this.store.getNoorAlert(conversationId);
+    const build = this.deps.buildVersion ?? readBuildVersion();
+    const imagine = imagineModeLabel(this.deps);
+    return formatStatusReport({
+      username: this.config.botUsername,
+      userId: this.config.botUserId,
+      startedAtMs: this.deps.health?.startedAtMs ?? this.startedAtMs,
+      nowMs,
+      pipeline: this.deps.health?.view(),
+      keys: this.deps.publicKeys?.publicKeyHealth(nowMs),
+      llm: this.deps.llmMode ?? (this.llmClient ? "on" : "off"),
+      imagine,
+      welcome: settings.welcomeEnabled,
+      troll: troll ? trollHandle(troll.username) : "off",
+      noor: Boolean(noor?.enabled),
+      noorAbs: Boolean(noor?.enabled && noor.absEnabled),
+      linkroast: this.store.isLinkroastEnabled(conversationId),
+      media: statusMediaCounts(this.deps.imaginePublic),
+      version: build.version,
+      sha: build.sha,
+    });
+  }
+
   private async trollLabel(
     target: { userId: string; username?: string },
     conversationId: string,
@@ -1918,6 +1970,9 @@ export class ModerationEngine {
     switch (command.name) {
       case "help":
         await this.reply(conversationId, settings.help.trim(), actions);
+        return;
+      case "status":
+        await this.reply(conversationId, this.statusReport(conversationId, settings, nowMs), actions);
         return;
       case "rules":
         await this.reply(conversationId, settings.rules.trim(), actions);
@@ -3332,6 +3387,22 @@ function parseSetting(key: string, value: string): ConversationSettings | undefi
     return { xp_enabled: ["1", "true", "on", "yes"].includes(value.toLowerCase()) };
   }
   return undefined;
+}
+
+function imagineModeLabel(deps: EngineDeps): string {
+  if (deps.imagineBackend === "browser") return "browser";
+  if (deps.imagineBackend === "api" && !deps.imagine && !deps.video) return "api off";
+  const parts: string[] = [];
+  if (deps.imagineBackend === "api" || deps.imagine) parts.push("api");
+  if (deps.video) parts.push("video");
+  return parts.length > 0 ? parts.join(", ") : "off";
+}
+
+/** `@handle` when we have one. A numeric id stays unprinted (`on`). */
+function trollHandle(username: string | undefined): string {
+  const name = username?.replace(/^@/, "").trim();
+  if (name && /^[A-Za-z0-9_]{1,15}$/.test(name) && !/^\d+$/.test(name)) return `@${name}`;
+  return "on";
 }
 
 function formatFloodSetting(settings: ResolvedConversationConfig): string {

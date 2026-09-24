@@ -929,6 +929,11 @@ describe("Chat transport into the moderation engine", () => {
     await expect(service.pullNew(GROUP, undefined, 10)).rejects.toThrow(/Rate limited/);
     expect(cipher.signingKeySets).toBe(0);
     expect(http.keyGets).toEqual(["alice-1"]);
+    const blocked = service.publicKeyHealth();
+    expect(blocked.cachedUsers).toBe(0);
+    expect(blocked.signingKeys).toBe(0);
+    expect(blocked.backoffMs).toBeGreaterThan(0);
+    expect(blocked.backoffMs).toBeLessThanOrEqual(40);
 
     http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }] });
     await expect(service.pullNew(GROUP, undefined, 10)).rejects.toThrow(/backoff/);
@@ -939,6 +944,10 @@ describe("Chat transport into the moderation engine", () => {
     await service.pullNew(GROUP, undefined, 10);
     expect(cipher.signingKeySets).toBe(1);
     expect(http.keyGets).toEqual(["alice-1", "alice-1"]);
+    const ready = service.publicKeyHealth();
+    expect(ready.backoffMs).toBe(0);
+    expect(ready.cachedUsers).toBe(1);
+    expect(ready.signingKeys).toBeGreaterThan(0);
   });
 
   it("wraps the loaded identity and refuses a newer account key without --force", async () => {

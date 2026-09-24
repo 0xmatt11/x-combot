@@ -58,6 +58,26 @@ export class ChatService {
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
 
+  /**
+   * In-memory public_keys / decrypt cache. Does not fetch.
+   * `backoffMs` is how long new signing-key loads stay blocked after a 429/402.
+   */
+  publicKeyHealth(nowMs = Date.now()): {
+    cachedUsers: number;
+    signingKeys: number;
+    conversationKeys: number;
+    backoffMs: number;
+  } {
+    let signingKeys = 0;
+    for (const entries of this.signingByUser.values()) signingKeys += entries.length;
+    return {
+      cachedUsers: this.remoteByUser.size,
+      signingKeys,
+      conversationKeys: this.conversationKeys.size,
+      backoffMs: Math.max(0, this.publicKeyBlockedUntil - nowMs),
+    };
+  }
+
   constructor(
     private readonly http: ChatHttp,
     private readonly cipher: ChatCipher,

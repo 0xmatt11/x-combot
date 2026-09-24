@@ -15,6 +15,15 @@ describe("parseCommand", () => {
     expect(parseCommand("  !HELP  ")).toEqual({ name: "help" });
   });
 
+  it("parses !status like other bangs and ignores extra words", () => {
+    expect(parseCommand("!status")).toEqual({ name: "status" });
+    expect(parseCommand("!STATUS")).toEqual({ name: "status" });
+    expect(parseCommand("  /Status  ")).toEqual({ name: "status" });
+    expect(parseCommand("!status please")).toEqual({ name: "status" });
+    expect(parseUnknownBang("!status")).toBeUndefined();
+    expect(parseUnknownBang("/STATUS now")).toBeUndefined();
+  });
+
   it("returns undefined for plain chat", () => {
     expect(parseCommand("hello there")).toBeUndefined();
     expect(parseCommand("")).toBeUndefined();

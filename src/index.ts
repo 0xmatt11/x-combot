@@ -7,6 +7,7 @@ import { normalizeNoorUsername } from "./bot/noor.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { readBuildVersion, RuntimeHealth } from "./bot/status.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
 import { createImageSearch } from "./bot/image-search.js";
@@ -208,7 +209,8 @@ async function main(): Promise<void> {
     log.info(`!voice enabled (language=${voiceLanguage}).`);
   }
 
-  const llmClient = buildLlmClient(env, defaults);
+  const llm = buildLlmClient(env, defaults);
+  const llmClient = llm.client;
   if (defaults.boobs?.vision === true && !llmClient?.completeVision) {
     log.warn(
       "BOOBS_VISION is on but no vision-capable LLM is configured. !boobs, !ass, and !booty will ask the user to retry until one is set.",
@@ -227,6 +229,7 @@ async function main(): Promise<void> {
   if (!chatService) listen = { ...listen, enabled: false };
   const xClient: XClient = chatService ? new RoutedXClient(client, chatService) : client;
 
+  const health = new RuntimeHealth();
   const engine = new ModerationEngine(
     store,
     xClient,
@@ -256,6 +259,11 @@ async function main(): Promise<void> {
             completeVision: (prompt, image) => llmClient.completeVision!(prompt, image),
           })
         : undefined,
+      health,
+      publicKeys: chatService,
+      llmMode: llm.mode,
+      imagineBackend: backend,
+      buildVersion: readBuildVersion(),
     },
   );
 
@@ -300,9 +308,11 @@ async function main(): Promise<void> {
           discoveryIntervalMs: activityOn
             ? CHAT_DISCOVERY_INTERVAL_MS
             : CHAT_DISCOVERY_INTERVAL_WITHOUT_ACTIVITY_MS,
+          onPipeline: (state, detail) => health.noteChat(state, detail),
         },
       )
     : undefined;
+  if (chatPoller) health.markChatRunning();
   chatPoller?.start();
   const noorHandle = normalizeNoorUsername(env.noorUsername);
   log.info(`Noor alert watches @${noorHandle} when a chat sends !noor on.`);
@@ -323,6 +333,7 @@ async function main(): Promise<void> {
         webhookPort: activity.webhookPort,
         webhookPath: activity.webhookPath,
         webhookPublicUrl: activity.webhookPublicUrl,
+        health,
         policy: listen.policy,
         onSeen: (conversationId, eventId) => chatPoller?.observeFromActivity(conversationId, eventId),
       })
@@ -397,10 +408,12 @@ async function startActivityRuntime(options: {
   webhookPort: number;
   webhookPath: string;
   webhookPublicUrl?: string;
+  health: RuntimeHealth;
   policy: ChatListenPolicy;
   onSeen?: (conversationId: string, eventId: string | undefined) => void;
 }): Promise<{ stop(): void; webhook?: ActivityWebhook } | undefined> {
   if (!options.enabled) return undefined;
+  options.health.markActivityEnabled();
   const intake = new ChatActivityIntake(options.chat, options.engine, options.policy, options.onSeen);
 
   if (options.subscribe) {
@@ -427,8 +440,10 @@ async function startActivityRuntime(options: {
         nextToken: async () => streamToken,
         open: (token, signal) => options.client.openActivityStream(token, signal),
         onEvent: (body) => intake.handle(body),
+        onState: (state, detail) => options.health.noteActivityStream(state, detail),
       });
     } catch (error) {
+      options.health.noteActivityStream("degraded", "not started");
       log.error(error instanceof Error ? error.message : String(error));
     }
   }
@@ -436,6 +451,7 @@ async function startActivityRuntime(options: {
   let webhook: ActivityWebhook | undefined;
   if (options.transport !== "stream") {
     if (!options.env.clientSecret) {
+      options.health.noteActivityWebhook("degraded", "not started");
       log.error(
         "Activity webhook transport needs CLIENT_SECRET to answer CRC checks. The webhook server was not started.",
       );
@@ -446,6 +462,7 @@ async function startActivityRuntime(options: {
         clientSecret: options.env.clientSecret,
         onEvent: (body) => intake.handle(body),
       });
+      options.health.noteActivityWebhook("ok", "webhook");
       if (options.webhookPublicUrl) {
         log.info(
           `Register this HTTPS URL with POST /2/webhooks (app-only bearer): ${options.webhookPublicUrl}`,
@@ -470,9 +487,9 @@ async function startActivityRuntime(options: {
   };
 }
 
-function buildLlmClient(env: Env, defaults: DefaultsConfig): LlmClient | undefined {
+function buildLlmClient(env: Env, defaults: DefaultsConfig): { client?: LlmClient; mode: string } {
   if (defaults.llm?.enabled === false) {
-    return undefined;
+    return { mode: "off" };
   }
 
   const resolved = resolveLlmConnection({
@@ -492,7 +509,7 @@ function buildLlmClient(env: Env, defaults: DefaultsConfig): LlmClient | undefin
       throw new Error(resolved.message);
     }
     log.warn(`${resolved.message} !ask / @bot will explain how to configure it.`);
-    return undefined;
+    return { mode: "off" };
   }
 
   const connection = resolved.connection;
@@ -504,11 +521,14 @@ function buildLlmClient(env: Env, defaults: DefaultsConfig): LlmClient | undefin
   log.info(
     `LLM enabled (provider=${connection.provider} model=${connection.model} base=${connection.baseUrl})`,
   );
-  return new OpenAiCompatibleClient({
-    apiKey: connection.apiKey,
-    baseUrl: connection.baseUrl,
-    model: connection.model,
-  });
+  return {
+    client: new OpenAiCompatibleClient({
+      apiKey: connection.apiKey,
+      baseUrl: connection.baseUrl,
+      model: connection.model,
+    }),
+    mode: `${connection.provider} ${connection.model}`,
+  };
 }
 
 function isLoopback(url: string): boolean {

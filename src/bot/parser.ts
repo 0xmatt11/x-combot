@@ -61,7 +61,8 @@ export type ParsedCommand =
   | { name: "untroll"; target?: UserRef }
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "noor"; mode?: "on" | "off" }
-  | { name: "noorabs"; mode?: "on" | "off" };
+  | { name: "noorabs"; mode?: "on" | "off" }
+  | { name: "status" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -140,6 +141,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "linkroast",
   "noor",
   "noorabs",
+  "status",
 ]);
 
 /**
@@ -364,6 +366,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseNoor(rest);
     case "noorabs":
       return parseNoorAbs(rest);
+    case "status":
+      return { name: "status" };
     default:
       return undefined;
   }
