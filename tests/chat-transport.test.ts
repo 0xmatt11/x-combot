@@ -606,10 +606,10 @@ describe("Chat transport into the moderation engine", () => {
     });
     await poller.pollOnce();
 
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(http.sends).toHaveLength(1);
     expect(http.sends[0]).toMatchObject({
-      encoded_message_create_event: "enc:CHAT_HELP_OK",
+      encoded_message_create_event: "enc:someone CHAT_HELP_OK",
       encoded_message_event_signature: "sig",
       conversation_token: "tok",
     });
@@ -742,7 +742,7 @@ describe("Chat transport into the moderation engine", () => {
       ],
     });
     await poller.pollOnce();
-    expect(cipher.texts).toEqual([rolled, "CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual([rolled, "someone CHAT_HELP_OK"]);
   });
 
   it("does not rerun a command already indexed under another id for that sequence", async () => {
@@ -800,7 +800,7 @@ describe("Chat transport into the moderation engine", () => {
     });
     await poller.pollOnce();
     expect(cipher.batches[2]).toEqual(["b64-help", "b64-dead"]);
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(store.getWatermark(`chat_events:${GROUP}`)).toBe("evt-1");
 
     cipher.events.set("b64-dead", {
@@ -923,7 +923,7 @@ describe("Chat transport into the moderation engine", () => {
     });
     await vi.advanceTimersByTimeAsync(48_000);
     expect(http.gets).toBe(4);
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
 
     http.pages.push({ data: [] });
     await vi.advanceTimersByTimeAsync(12_000);
@@ -1418,7 +1418,7 @@ describe("Chat group discovery", () => {
         },
       },
     });
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
 
     http.inboxPages.push({ data: [] });
@@ -1429,7 +1429,7 @@ describe("Chat group discovery", () => {
       ],
     });
     await poller.pollOnce();
-    expect(cipher.texts).toEqual(["CHAT_HELP_OK"]);
+    expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
     expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
   });
 });

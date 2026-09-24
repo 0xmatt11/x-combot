@@ -125,8 +125,8 @@ describe("reply-target moderation", () => {
     expect(store.getWarnCount(groupId, alice.id)).toBe(0);
     expect(store.isMuted(groupId, bob.id)).toBe(false);
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Who? Reply to their message, or pass @user.",
-      "Who? Reply to their message, or pass @user.",
+      "@owner Who? Reply to their message, or pass @user.",
+      "@owner Who? Reply to their message, or pass @user.",
     ]);
   });
 
@@ -239,8 +239,8 @@ describe("reply-target moderation", () => {
     );
     expect(store.getWarnCount(groupId, bob.id)).toBe(0);
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Type !rules",
-      "No notes stored for this group.",
+      "@owner Type !rules",
+      "@owner No notes stored for this group.",
     ]);
   });
 });

@@ -48,6 +48,11 @@ export class MockXClient implements XClient {
     bytes: number;
     durationMillis?: number;
     voiceId?: string;
+    caption?: string;
+    mention?: string;
+    replyToSequenceId?: string;
+    replyToSenderId?: string;
+    replyToEvent?: string;
   }[] = [];
   readonly direct: { participantId: string; text: string }[] = [];
   readonly deleted: string[] = [];
@@ -194,6 +199,7 @@ export class MockXClient implements XClient {
       bytes: audio.bytes.byteLength,
       durationMillis: audio.durationMillis,
       voiceId: audio.voiceId,
+      ...captionRecord(audio.caption),
     });
     return { dmEventId: `aud-${this.audios.length}`, dmConversationId: conversationId };
   }

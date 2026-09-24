@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   DEFAULT_LEAVE_TEXT,
   isFullContextMode,
@@ -262,6 +263,14 @@ export interface EngineDeps {
   buildVersion?: { version?: string; sha?: string };
 }
 
+/**
+ * The inbound event whose command (or other handled message) is in progress.
+ * `reply` and command media posts read it so every command response tags the
+ * sender and, in encrypted Chat, threads under that event. Background `!video`
+ * work re-enters this store. Scheduled Noor relays do not.
+ */
+const commandContext = new AsyncLocalStorage<DmEvent>();
+
 export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
   private readonly casino = new CasinoTable();
@@ -293,6 +302,10 @@ export class ModerationEngine {
   }
 
   async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
+    return commandContext.run(event, () => this.handleIncoming(event, nowMs));
+  }
+
+  private async handleIncoming(event: DmEvent, nowMs: number): Promise<EngineActions> {
     const actions: EngineActions = {
       replies: [],
       deletes: [],
@@ -2509,7 +2522,7 @@ export class ModerationEngine {
     // call the Imagine generate client (browser or api.x.ai). An empty or
     // exhausted bank falls through to search. The post mentions the requester
     // and, in encrypted Chat, replies to their command.
-    const caption = await this.adultMediaCaption(event);
+    const caption = await this.commandCaption(event);
     if (await this.tryImaginePublic(conversationId, command, actions, label, caption)) return;
 
     const search = this.deps.imageSearch;
@@ -2643,8 +2656,9 @@ export class ModerationEngine {
   }
 
   private enqueueBackground(work: () => Promise<void>): void {
+    const event = commandContext.getStore();
     const job = Promise.resolve()
-      .then(work)
+      .then(() => (event ? commandContext.run(event, work) : work()))
       .catch((error: unknown) => {
         const detail = redactSecrets(error instanceof Error ? error.message : "video failed");
         log.warn(`!video background failed: ${detail}`);
@@ -2691,13 +2705,16 @@ export class ModerationEngine {
       }
       if (fetched && fetched.bytes.byteLength > 0) {
         try {
-          await this.client.sendVideo(conversationId, {
-            url: shareable ? video.url : GROK_IMAGINE_PAGE,
-            bytes: fetched.bytes,
-            mimeType: fetched.mimeType,
-            width: video.width,
-            height: video.height,
-          });
+          await this.client.sendVideo(
+            conversationId,
+            await this.withCommandCaption({
+              url: shareable ? video.url : GROK_IMAGINE_PAGE,
+              bytes: fetched.bytes,
+              mimeType: fetched.mimeType,
+              width: video.width,
+              height: video.height,
+            }),
+          );
           log.info(
             `!video posted native video conversation=${conversationId} host=${imageHost(shareable ? video.url : GROK_IMAGINE_PAGE)}`,
           );
@@ -2755,12 +2772,15 @@ export class ModerationEngine {
       return;
     }
     try {
-      await this.client.sendAudio(conversationId, {
-        bytes: spoken.bytes,
-        mimeType: spoken.mimeType,
-        durationMillis: spoken.durationMillis,
-        voiceId: spoken.voiceId,
-      });
+      await this.client.sendAudio(
+        conversationId,
+        await this.withCommandCaption({
+          bytes: spoken.bytes,
+          mimeType: spoken.mimeType,
+          durationMillis: spoken.durationMillis,
+          voiceId: spoken.voiceId,
+        }),
+      );
       log.info(
         `!voice posted audio conversation=${conversationId} persona=${normalized.personaId} voice=${spoken.voiceId} bytes=${spoken.bytes.byteLength}`,
       );
@@ -2811,11 +2831,14 @@ export class ModerationEngine {
 
     if (!url && materialized.fetched) {
       try {
-        await this.client.sendImage(conversationId, {
-          url: GROK_IMAGINE_PAGE,
-          bytes: materialized.fetched.bytes,
-          mimeType: materialized.fetched.mimeType,
-        });
+        await this.client.sendImage(
+          conversationId,
+          await this.withCommandCaption({
+            url: GROK_IMAGINE_PAGE,
+            bytes: materialized.fetched.bytes,
+            mimeType: materialized.fetched.mimeType,
+          }),
+        );
         this.recentImages.remember(conversationId, { hash });
         log.info(
           `${label} posted native image conversation=${conversationId} host=${imageHost(GROK_IMAGINE_PAGE)}`,
@@ -2835,7 +2858,7 @@ export class ModerationEngine {
       { url: url!, adult: true },
       actions,
       label,
-      undefined,
+      await this.commandCaption(),
       materialized.fetched,
     );
     if (!delivery.posted) return "failed";
@@ -2880,7 +2903,7 @@ export class ModerationEngine {
     command: AdultImageCommand,
     _actions: EngineActions,
     label: string,
-    caption: MediaCaption,
+    caption?: MediaCaption,
   ): Promise<boolean> {
     const pending = imaginePublicPoolFor(this.deps.imaginePublic, command);
     let notedVideoSkip = false;
@@ -2911,7 +2934,7 @@ export class ModerationEngine {
     conversationId: string,
     url: string,
     label: string,
-    caption: MediaCaption,
+    caption?: MediaCaption,
   ): Promise<boolean> {
     if (this.recentImages.hasUrl(conversationId, url)) {
       log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
@@ -2947,7 +2970,7 @@ export class ModerationEngine {
     conversationId: string,
     url: string,
     label: string,
-    caption: MediaCaption,
+    caption?: MediaCaption,
   ): Promise<boolean> {
     if (this.recentImages.hasUrl(conversationId, url)) {
       log.warn(`${label} Imagine public video was already posted conversation=${conversationId}`);
@@ -3066,40 +3089,69 @@ export class ModerationEngine {
       }
     }
 
-    if (caption) {
-      const link = `${caption.text} ${image.url}`;
-      await this.client.sendMessage(conversationId, link, caption);
-      actions.replies.push(link);
-    } else {
-      await this.reply(conversationId, image.url, actions);
-    }
+    await this.reply(conversationId, image.url, actions);
     log.info(`${label} posted image link conversation=${conversationId} host=${host}`);
     return { posted: true, hash };
   }
 
   /**
    * `@handle` when we know one, otherwise the same chat label other commands use.
-   * Encrypted Chat also threads the post under the command via `encryptReply`.
+   * Encrypted Chat threads the post under the triggering event via `encryptReply`.
+   * No sender (a leave with only a participant list) means no mention.
    */
-  private async adultMediaCaption(event: DmEvent): Promise<MediaCaption> {
-    const senderId = event.senderId ?? "";
-    const text = await this.chatLabel(event.sender, senderId, event.conversationId);
+  private async commandCaption(event?: DmEvent): Promise<MediaCaption | undefined> {
+    const source = event ?? commandContext.getStore();
+    if (!source?.senderId && !source?.sender) return undefined;
+    const senderId = source.senderId ?? "";
+    const text = await this.chatLabel(source.sender, senderId, source.conversationId);
     const mention = handleMention(text);
-    const canReply = Boolean(event.sequenceId || event.encodedEvent);
+    const canReply = Boolean(source.sequenceId || source.encodedEvent);
     return {
       text,
       ...(mention ? { mention } : {}),
       ...(canReply
         ? {
             replyTo: {
-              ...(event.sequenceId ? { sequenceId: event.sequenceId } : {}),
-              ...(event.senderId ? { senderId: event.senderId } : {}),
-              ...(event.text ? { previewText: event.text } : {}),
-              ...(event.encodedEvent ? { rawEvent: event.encodedEvent } : {}),
+              ...(source.sequenceId ? { sequenceId: source.sequenceId } : {}),
+              ...(source.senderId ? { senderId: source.senderId } : {}),
+              ...(source.text ? { previewText: source.text } : {}),
+              ...(source.encodedEvent ? { rawEvent: source.encodedEvent } : {}),
             },
           }
         : {}),
     };
+  }
+
+  /** Attach the command mention when this send is handling an inbound event. */
+  private async withCommandCaption<T extends object>(
+    media: T,
+  ): Promise<T & { caption?: MediaCaption }> {
+    if ("caption" in media && media.caption) return media as T & { caption?: MediaCaption };
+    const caption = await this.commandCaption();
+    if (!caption) return media;
+    return { ...media, caption };
+  }
+
+  /**
+   * Prefix the sender label and pass a Chat mention + reply target.
+   * A body that already starts with that label is not prefixed again.
+   * Outside a handled event (Noor relays call `sendMessage` directly) the text is unchanged.
+   */
+  private async addressText(body: string): Promise<{ text: string; caption?: MediaCaption }> {
+    const event = commandContext.getStore();
+    // Welcome and leave lines already name the member. They are not replies to a command.
+    if (
+      !event ||
+      event.eventType === "ParticipantsJoin" ||
+      event.eventType === "ParticipantsLeave"
+    ) {
+      return { text: body };
+    }
+    const caption = await this.commandCaption(event);
+    if (!caption) return { text: body };
+    const label = caption.text;
+    const prefixed = alreadyAddresses(body, label) ? body : `${label} ${body}`;
+    return { text: prefixed, caption };
   }
 
   private async applyWarn(
@@ -3249,8 +3301,9 @@ export class ModerationEngine {
     text: string,
     actions: EngineActions,
   ): Promise<void> {
-    await this.client.sendMessage(conversationId, text);
-    actions.replies.push(text);
+    const addressed = await this.addressText(text);
+    await this.client.sendMessage(conversationId, addressed.text, addressed.caption);
+    actions.replies.push(addressed.text);
   }
 
   private async notifyAdmins(
@@ -3276,6 +3329,14 @@ export class ModerationEngine {
 }
 
 /** A cap applies only when some count is positive and the window is positive. `0` is unlimited. */
+/** The body already leads with this sender label, including `@bob, …`. */
+function alreadyAddresses(body: string, label: string): boolean {
+  if (body === label || body.startsWith(`${label} `) || body.startsWith(`${label}\n`)) return true;
+  if (!body.startsWith(label)) return false;
+  const next = body[label.length];
+  return next !== undefined && !/^[\p{L}\p{N}_]$/u.test(next);
+}
+
 /** `@handle` covering the whole label. Display names are not a Chat mention entity. */
 function handleMention(text: string): MediaCaption["mention"] | undefined {
   const match = /^@([A-Za-z0-9_]{1,15})$/.exec(text);

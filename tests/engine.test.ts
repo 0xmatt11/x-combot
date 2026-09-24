@@ -76,6 +76,29 @@ describe("ModerationEngine", () => {
     return row.count;
   }
 
+  it("tags the requester and replies to their command", async () => {
+    const { engine, client } = setup();
+    const actions = await engine.processEvent(
+      message({
+        id: "help-reply",
+        senderId: alice.id,
+        text: "!help",
+        sequenceId: "55",
+        encodedEvent: "blob-help",
+      }),
+    );
+    expect(actions.replies).toEqual(["@alice Type !rules"]);
+    expect(client.sent).toEqual([
+      {
+        conversationId: groupId,
+        text: "@alice Type !rules",
+        replyToSequenceId: "55",
+        replyToEvent: "blob-help",
+      },
+    ]);
+    expect(JSON.stringify(client.sent)).not.toContain("18+");
+  });
+
   it("sends a welcome on ParticipantsJoin", async () => {
     const { engine, client } = setup();
     await engine.processEvent({
@@ -177,7 +200,7 @@ describe("ModerationEngine", () => {
       participants: [alice],
       mentions: [],
     });
-    expect(client.sent.map((row) => row.text)).toEqual(["Updated leave_enabled."]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@owner Updated leave_enabled."]);
   });
 
   it("uses a per-conversation leave_text", async () => {
@@ -241,7 +264,7 @@ describe("ModerationEngine", () => {
     await engine.processEvent(
       message({ id: "help-2", senderId: alice.id, text: "!help", sequenceId: "89" }),
     );
-    expect(client.sent.map((row) => row.text)).toEqual([rolled, "Type !rules"]);
+    expect(client.sent.map((row) => row.text)).toEqual([rolled, "@alice Type !rules"]);
   });
 
   it("posts the unresolved +/− error once when that reply is delivered twice", async () => {
@@ -289,7 +312,7 @@ describe("ModerationEngine", () => {
     await engine.processEvent(
       message({ id: "msg-rules", senderId: alice.id, text: "!rules" }),
     );
-    expect(client.sent.map((row) => row.text)).toEqual(["Be nice."]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice Be nice."]);
   });
 
   it("says someone when a leaver cannot be resolved", async () => {
@@ -326,7 +349,7 @@ describe("ModerationEngine", () => {
     const { engine, client } = setup();
     await engine.processEvent(message({ id: "m1", senderId: alice.id, text: "!rules" }));
     await engine.processEvent(message({ id: "m2", senderId: alice.id, text: "!help" }));
-    expect(client.sent.map((row) => row.text)).toEqual(["Be nice.", "Type !rules"]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice Be nice.", "@alice Type !rules"]);
   });
 
   it("rejects mod commands from non-admins", async () => {
@@ -369,8 +392,8 @@ describe("ModerationEngine", () => {
     );
     await engine.processEvent(message({ id: "n2", senderId: owner.id, text: "!get topic" }));
     expect(client.sent.map((row) => row.text)).toEqual([
-      'Saved note "topic".',
-      "topic: meetup friday",
+      '@owner Saved note "topic".',
+      "@owner topic: meetup friday",
     ]);
   });
 

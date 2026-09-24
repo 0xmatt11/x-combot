@@ -1183,6 +1183,7 @@ describe("!boobs engine", () => {
     expect(loaded.help).toMatch(/saved imagine-public bank/);
     expect(loaded.help).toMatch(/does not open grok\.com\/imagine/);
     expect(loaded.help).toMatch(/Tags you and replies to your command/);
+    expect(loaded.help).toMatch(/Every reply tags you/);
     expect(loaded.help).toMatch(/!imagine/);
     expect(loaded.boobs?.enabled).toBe(false);
     expect(loaded.boobs?.rate_limit_per_user).toBe(0);
@@ -1309,8 +1310,8 @@ describe("!ass and !booty", () => {
     await disabled.engine.processEvent(message({ id: "d2", senderId: alice.id, text: "!booty" }));
     expect(disabled.search.calls).toBe(0);
     expect(disabled.client.sent.map((row) => row.text)).toEqual([
-      "!ass is disabled on this bot.",
-      "!booty is disabled on this bot.",
+      "@alice !ass is disabled on this bot.",
+      "@alice !booty is disabled on this bot.",
     ]);
   });
 

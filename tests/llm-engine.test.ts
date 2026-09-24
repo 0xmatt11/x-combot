@@ -93,7 +93,7 @@ describe("LLM engine", () => {
       message({ id: "q1", senderId: alice.id, text: "!ask when is standup?" }),
     );
     expect(result.llm).toBe(true);
-    expect(client.sent.at(-1)?.text).toBe("standup is at 10");
+    expect(client.sent.at(-1)?.text).toBe("@alice standup is at 10");
     expect(client.conversationListCalls[0]?.conversationId).toBe(groupId);
     const userContent = llm.calls[0]?.[1]?.content ?? "";
     expect(userContent).toContain("when is standup?");
@@ -107,7 +107,7 @@ describe("LLM engine", () => {
     await engine.processEvent(
       message({ id: "q2", senderId: alice.id, text: "@modbot hello" }),
     );
-    expect(client.sent.at(-1)?.text).toBe("hi alice");
+    expect(client.sent.at(-1)?.text).toBe("@alice hi alice");
     expect(llm.calls).toHaveLength(1);
   });
 
@@ -122,7 +122,7 @@ describe("LLM engine", () => {
     await engine.processEvent(
       message({ id: "s1", senderId: alice.id, text: "!summarize" }),
     );
-    expect(client.sent.at(-1)?.text).toBe("thread summary");
+    expect(client.sent.at(-1)?.text).toBe("@alice thread summary");
     const userContent = llm.calls[0]?.[1]?.content ?? "";
     expect(userContent).toMatch(/mode=full/);
     expect(userContent).toContain("ship friday");
@@ -163,8 +163,8 @@ describe("LLM engine", () => {
     await engine.processEvent(message({ id: "k2", senderId: alice.id, text: "!boobs" }));
     await engine.processEvent(message({ id: "k3", senderId: alice.id, text: "hello there" }));
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Type !rules",
-      "!boobs is disabled on this bot.",
+      "@alice Type !rules",
+      "@alice !boobs is disabled on this bot.",
     ]);
     expect(llm.calls).toHaveLength(0);
     expect(client.conversationListCalls).toHaveLength(0);
@@ -180,7 +180,7 @@ describe("LLM engine", () => {
       message({ id: "u1", senderId: alice.id, text: "!diediesillygoat" }),
     );
     expect(result.llm).toBe(true);
-    expect(client.sent.at(-1)?.text).toBe("the goat has left the chat");
+    expect(client.sent.at(-1)?.text).toBe("@alice the goat has left the chat");
     expect(client.conversationListCalls).toHaveLength(0);
     const system = llm.calls[0]?.[0]?.content ?? "";
     const user = llm.calls[0]?.[1]?.content ?? "";
@@ -207,7 +207,8 @@ describe("LLM engine", () => {
     const llm = new MockLlmClient("x".repeat(100));
     const { engine, client } = setup(llm, { max_reply_chars: 20 });
     await engine.processEvent(message({ id: "u3", senderId: alice.id, text: "!banana" }));
-    expect(client.sent[0]?.text.length).toBeLessThanOrEqual(20);
+    expect(client.sent[0]?.text.startsWith("@alice ")).toBe(true);
+    expect((client.sent[0]?.text.length ?? 0) - "@alice ".length).toBeLessThanOrEqual(20);
   });
 
   it("stays quiet when the LLM is disabled, unconfigured, admin-only, or rate-limited", async () => {
@@ -230,7 +231,7 @@ describe("LLM engine", () => {
       message({ id: "a2", senderId: owner.id, text: "!banana" }),
     );
     expect(allowed.llm).toBe(true);
-    expect(adminSetup.client.sent.at(-1)?.text).toBe("admin joke");
+    expect(adminSetup.client.sent.at(-1)?.text).toBe("@owner admin joke");
 
     const limited = new MockLlmClient("once");
     const limitedSetup = setup(limited, { rate_limit_per_user: 1, rate_limit_window_ms: 60_000 });
@@ -243,7 +244,7 @@ describe("LLM engine", () => {
       2001,
     );
     expect(limited.calls).toHaveLength(1);
-    expect(limitedSetup.client.sent.map((row) => row.text)).toEqual(["once"]);
+    expect(limitedSetup.client.sent.map((row) => row.text)).toEqual(["@alice once"]);
 
     const missingStore = new Store(":memory:");
     stores.push(missingStore);
@@ -264,7 +265,7 @@ describe("LLM engine", () => {
     await engine.processEvent(message({ id: "b1", senderId: alice.id, text: "!banana" }), 3000);
     await engine.processEvent(message({ id: "b2", senderId: alice.id, text: "!goatnoise" }), 3001);
     expect(llm.calls).toHaveLength(1);
-    expect(client.sent.map((row) => row.text)).toEqual(["once"]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice once"]);
   });
 
   it("does not spend an LLM call on an unknown bang from a muted user", async () => {

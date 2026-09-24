@@ -515,7 +515,9 @@ describe("engine Imagine and search dedupe", () => {
     expect(imagine.prompts).toHaveLength(0);
     expect(search.calls).toBe(2);
     expect(client.images.map((row) => row.url)).toEqual([URL_B]);
-    expect(client.sent.map((row) => row.text)).toEqual(["No matching image came back. Try again."]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "@alice No matching image came back. Try again.",
+    ]);
   });
 
   it("attaches a configured imagine-public JPEG, mentions the requester, and does not call Imagine", async () => {
@@ -1002,7 +1004,9 @@ describe("engine Imagine and search dedupe", () => {
     await engine.processEvent(message({ id: "h1", text: "!boobs" }));
     await engine.processEvent(message({ id: "h2", text: "!boobs" }));
     expect(client.images.map((row) => row.url)).toEqual([URL_A]);
-    expect(client.sent.map((row) => row.text)).toEqual(["No matching image came back. Try again."]);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "@alice No matching image came back. Try again.",
+    ]);
   });
 
   it("keeps the recent window per conversation", async () => {
@@ -1107,6 +1111,8 @@ describe("!imagine command", () => {
         url: "https://imgen.x.ai/user.jpg",
         mimeType: "image/jpeg",
         bytes: 3,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -1120,7 +1126,7 @@ describe("!imagine command", () => {
       message({ id: "free-link", text: "!imagine a neon cat" }),
     );
     expect(client.images).toHaveLength(0);
-    expect(actions.replies).toEqual(["https://imgen.x.ai/user.jpg"]);
+    expect(actions.replies).toEqual(["@alice https://imgen.x.ai/user.jpg"]);
   });
 
   it("rejects an empty prompt, minor wording, and a missing key, and sends a long prompt", async () => {
@@ -1152,7 +1158,7 @@ describe("!imagine command", () => {
     await engine.processEvent(message({ id: "api-long", text: `!imagine ${"b".repeat(2000)}` }));
     expect(imagine.prompts[0]).toHaveLength(2000);
     expect(client.images).toHaveLength(0);
-    expect(client.sent.map((row) => row.text)).toEqual([IMAGINE_TOO_LONG_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${IMAGINE_TOO_LONG_MESSAGE}`]);
   });
 
   it("is listed in the default help text", () => {
@@ -1171,7 +1177,7 @@ describe("!imagine command", () => {
     expect(client.images).toHaveLength(0);
     expect(client.sent).toHaveLength(1);
     const text = client.sent[0]?.text ?? "";
-    expect(text.startsWith(IMAGINE_MODERATED_INTRO)).toBe(true);
+    expect(text.startsWith(`@alice ${IMAGINE_MODERATED_INTRO}`)).toBe(true);
     expect(numberedPrompts(text)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
     expect(text).not.toMatch(/cost_ticks|imagine:content-moderated|\{/);
     expect(text).not.toMatch(/\b(nude|naked|cleavage|porn)\b/i);
@@ -1228,7 +1234,7 @@ describe("!imagine command", () => {
     });
     await engine.processEvent(message({ id: "down", text: "!imagine a neon cat" }));
     expect(client.images).toHaveLength(0);
-    expect(client.sent.map((row) => row.text)).toEqual([IMAGINE_FAILED_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${IMAGINE_FAILED_MESSAGE}`]);
   });
 });
 

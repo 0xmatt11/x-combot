@@ -296,11 +296,12 @@ export interface SendMessageResult {
 
 /**
  * Minimal caption for one media post.
- * Adult commands set `text` to `@handle` (or a display name) and, in encrypted
- * Chat, `replyTo` so the post threads under the command message.
+ * Command replies set `text` to `@handle` (or a display name) and, in encrypted
+ * Chat, `replyTo` so the post threads under the triggering message.
+ * Media posts use only that label. Text replies prefix it onto the body.
  */
 export interface MediaCaption {
-  /** Visible text. Adult posts use only the requester's label. No 18+ line. */
+  /** Visible label. Media posts use only this. Text replies prefix it. No 18+ line. */
   text: string;
   /**
    * UTF-8 byte range of an `@handle` inside `text`.
@@ -326,7 +327,7 @@ export interface OutboundImage {
   url: string;
   bytes?: Uint8Array;
   mimeType?: string;
-  /** Mention and reply target. Absent means no caption, as `!imagine` does. */
+  /** Mention and reply target. Command posts set the requester's `@handle`. */
   caption?: MediaCaption;
 }
 
@@ -338,7 +339,7 @@ export interface OutboundVideo {
   mimeType?: string;
   width?: number;
   height?: number;
-  /** Mention and reply target. Absent means no caption, as `!video` does. */
+  /** Mention and reply target. Command posts set the requester's `@handle`. */
   caption?: MediaCaption;
 }
 
@@ -352,6 +353,8 @@ export interface OutboundAudio {
   durationMillis?: number;
   /** Voice id for logs. Not sent to X. */
   voiceId?: string;
+  /** Mention and reply target. `!voice` sets the requester's `@handle`. */
+  caption?: MediaCaption;
 }
 
 export interface DeleteResult {

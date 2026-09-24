@@ -364,6 +364,8 @@ describe("browser Imagine in the engine", () => {
         url: "https://grok.com/imagine",
         mimeType: "image/jpeg",
         bytes: jpeg.byteLength,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -398,7 +400,7 @@ describe("browser Imagine in the engine", () => {
     );
     await engine.waitForBackgroundWork();
     expect(downloads).toEqual([]);
-    expect(actions.replies).toEqual([VIDEO_STARTED_MESSAGE]);
+    expect(actions.replies).toEqual([`@alice ${VIDEO_STARTED_MESSAGE}`]);
     expect(client.videos).toEqual([
       {
         conversationId: chatGroupId,
@@ -407,6 +409,8 @@ describe("browser Imagine in the engine", () => {
         bytes: mp4.byteLength,
         width: 1280,
         height: 720,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
   });
@@ -446,10 +450,10 @@ describe("browser Imagine in the engine", () => {
     expect(searches).toBe(3);
     expect(client.images).toHaveLength(0);
     expect(client.sent.map((row) => row.text)).toEqual([
-      ADULT_IMAGE_RETRY_MESSAGE,
-      ADULT_IMAGE_RETRY_MESSAGE,
-      ADULT_IMAGE_RETRY_MESSAGE,
-      IMAGINE_BROWSER_LOGIN_MESSAGE,
+      `@alice ${ADULT_IMAGE_RETRY_MESSAGE}`,
+      `@alice ${ADULT_IMAGE_RETRY_MESSAGE}`,
+      `@alice ${ADULT_IMAGE_RETRY_MESSAGE}`,
+      `@alice ${IMAGINE_BROWSER_LOGIN_MESSAGE}`,
     ]);
     expect(client.sent.map((row) => row.text).join("\n")).not.toMatch(/XAI_API_KEY/);
   });
@@ -468,7 +472,7 @@ describe("browser Imagine in the engine", () => {
     });
     const engine = new ModerationEngine(store, client, runtime(), undefined, { imagine });
     await engine.processEvent(message({ id: "mod-1", text: "!imagine a neon cat" }));
-    expect(client.sent[0]?.text.startsWith(IMAGINE_MODERATED_INTRO)).toBe(true);
+    expect(client.sent[0]?.text.startsWith(`@alice ${IMAGINE_MODERATED_INTRO}`)).toBe(true);
     expect(client.sent[0]?.text.match(/^\d\./gm)).toHaveLength(5);
   });
 });

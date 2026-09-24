@@ -274,7 +274,7 @@ describe("!dice command", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     const { engine, client } = setup();
     await engine.processEvent(message({ id: "d1", senderId: alice.id, text: "!dice" }));
-    expect(client.sent.map((row) => row.text)).toEqual(["🎲 @alice rolled a 4"]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice 🎲 @alice rolled a 4"]);
   });
 
   it("accepts /dice notation and answers invalid args with help", async () => {
@@ -283,8 +283,8 @@ describe("!dice command", () => {
     await engine.processEvent(message({ id: "d2", senderId: alice.id, text: "/dice d20" }));
     await engine.processEvent(message({ id: "d3", senderId: alice.id, text: "!dice 99d6" }));
     expect(client.sent.map((row) => row.text)).toEqual([
-      "🎲 @alice rolled a 1",
-      DICE_HELP,
+      "@alice 🎲 @alice rolled a 1",
+      `@alice ${DICE_HELP}`,
     ]);
     expect(client.sent.some((row) => /admins/i.test(row.text))).toBe(false);
   });
@@ -303,8 +303,8 @@ describe("!dice command", () => {
       message({ id: "d5", senderId: idOnly.id, sender: idOnly, text: "/dice" }),
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "🎲 Ada rolled a 4",
-      "🎲 someone rolled a 4",
+      "Ada 🎲 Ada rolled a 4",
+      "someone 🎲 someone rolled a 4",
     ]);
     expect(client.sent.some((row) => row.text.includes("99"))).toBe(false);
   });
@@ -334,9 +334,9 @@ describe("!dice command", () => {
     );
 
     expect(client.sent.map((row) => row.text)).toEqual([
-      "🎲 @HisHandle rolled a 1",
-      "🎲 Ada rolled a 1",
-      "🎲 someone rolled a 1",
+      "@HisHandle 🎲 @HisHandle rolled a 1",
+      "Ada 🎲 Ada rolled a 1",
+      "someone 🎲 someone rolled a 1",
     ]);
     for (const row of client.sent) {
       expect(row.text).not.toContain(snowflake);

@@ -301,13 +301,18 @@ export class ChatService {
       throw new Error("No audio bytes to attach to Chat.");
     }
     const duration = positiveDuration(audio.durationMillis) ?? 1;
-    return this.sendChatMedia(conversationId, bytes, {
-      width: 1,
-      height: 1,
-      filename: "voice.mp3",
-      mediaType: CHAT_MEDIA_TYPE_AUDIO,
-      durationMillis: duration,
-    });
+    return this.sendChatMedia(
+      conversationId,
+      bytes,
+      {
+        width: 1,
+        height: 1,
+        filename: "voice.mp3",
+        mediaType: CHAT_MEDIA_TYPE_AUDIO,
+        durationMillis: duration,
+      },
+      audio.caption,
+    );
   }
 
   /**

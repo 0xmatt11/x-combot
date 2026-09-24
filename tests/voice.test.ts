@@ -371,6 +371,8 @@ describe("!voice command", () => {
         bytes: mp3.byteLength,
         durationMillis: estimateMp3DurationMillis(mp3.byteLength),
         voiceId: "ara",
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -402,7 +404,7 @@ describe("!voice command", () => {
     );
     expect(voice.prompts).toHaveLength(0);
     expect(client.audios).toHaveLength(0);
-    expect(actions.replies).toEqual([VOICE_CHAT_REQUIRED_MESSAGE]);
+    expect(actions.replies).toEqual([`@alice ${VOICE_CHAT_REQUIRED_MESSAGE}`]);
   });
 
   it("says to try again when the Chat upload fails", async () => {
@@ -412,7 +414,7 @@ describe("!voice command", () => {
     );
     expect(voice.prompts).toHaveLength(1);
     expect(client.audios).toHaveLength(0);
-    expect(actions.replies).toEqual([VOICE_ATTACH_FAILED_MESSAGE]);
+    expect(actions.replies).toEqual([`@alice ${VOICE_ATTACH_FAILED_MESSAGE}`]);
     expect(actions.replies[0]).not.toContain("hello from the group");
   });
 
@@ -443,7 +445,7 @@ describe("!voice command", () => {
     await missing.engine.processEvent(
       message({ id: "nokey", conversationId: chatGroupId, text: "!voice sexy hello from the group" }),
     );
-    expect(missing.client.sent[0]?.text).toBe(VOICE_UNAVAILABLE_MESSAGE);
+    expect(missing.client.sent[0]?.text).toBe(`@alice ${VOICE_UNAVAILABLE_MESSAGE}`);
     expect(missing.client.sent[0]?.text).toMatch(/XAI_API_KEY/);
   });
 
@@ -464,7 +466,7 @@ describe("!voice command", () => {
     await engine.processEvent(
       message({ id: "down", conversationId: chatGroupId, text: "!voice scared hello from the group" }),
     );
-    expect(client.sent.map((row) => row.text)).toEqual([VOICE_FAILED_MESSAGE]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${VOICE_FAILED_MESSAGE}`]);
     expect(client.audios).toHaveLength(0);
     expect(client.sent[0]?.text).not.toMatch(/api_key|overloaded|\{/);
   });
