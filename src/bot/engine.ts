@@ -58,6 +58,7 @@ import {
   type GeneratedVideo,
   type VideoGenerator,
 } from "./video.js";
+import { imaginePublicUrlFor, type ImaginePublicUrls } from "./imagine-public.js";
 import {
   parseVoiceRequest,
   VOICE_ATTACH_FAILED_MESSAGE,
@@ -177,6 +178,12 @@ export interface EngineDeps {
    * `!imagine` always uses the Imagine client.
    */
   adultImageProvider?: AdultImageProviderName;
+  /**
+   * Optional already-hosted Imagine public JPEGs. Tried after API Imagine
+   * misses and before search. Absent means that step is off.
+   * `!imagine` does not use this.
+   */
+  imaginePublic?: ImaginePublicUrls;
   /** Last posted image URLs and content hashes. Defaults to an in-memory window. */
   recentImages?: RecentImageMemory;
   random?: () => number;
@@ -1533,8 +1540,10 @@ export class ModerationEngine {
     if (provider === "imagine" && this.deps.imagine) {
       const posted = await this.tryAdultImagine(conversationId, command, actions, label);
       if (posted) return;
-      log.warn(`${label} Imagine unavailable; falling back to image search conversation=${conversationId}`);
+      log.warn(`${label} Imagine unavailable; trying the next adult image source conversation=${conversationId}`);
     }
+
+    if (await this.tryImaginePublic(conversationId, command, actions, label)) return;
 
     const search = this.deps.imageSearch;
     if (!search) {
@@ -1919,6 +1928,67 @@ export class ModerationEngine {
       };
     }
     return { url: image.url };
+  }
+
+  /**
+   * Attach one JPEG the operator already has on imagine-public.x.ai.
+   * A miss returns false so search can run. This does not call grok.com.
+   */
+  private async tryImaginePublic(
+    conversationId: string,
+    command: AdultImageCommand,
+    actions: EngineActions,
+    label: string,
+  ): Promise<boolean> {
+    const url = imaginePublicUrlFor(this.deps.imaginePublic, command);
+    if (!url) return false;
+    if (this.recentImages.hasUrl(conversationId, url)) {
+      log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
+      return false;
+    }
+    const fetched = await this.loadImaginePublic(url, conversationId, label);
+    if (!fetched) return false;
+    const hash = imageContentHash(fetched.bytes);
+    if (this.recentImages.hasHash(conversationId, hash)) {
+      log.warn(`${label} Imagine public image repeated a recent hash conversation=${conversationId}`);
+      return false;
+    }
+    const delivery = await this.deliverAdultImage(
+      conversationId,
+      { url, adult: true },
+      actions,
+      label,
+      fetched,
+    );
+    if (!delivery.posted) return false;
+    this.recentImages.remember(conversationId, { url, hash: delivery.hash ?? hash });
+    return true;
+  }
+
+  private async loadImaginePublic(
+    url: string,
+    conversationId: string,
+    label: string,
+  ): Promise<AdultVisionImage | undefined> {
+    if (!this.deps.fetchImage) {
+      log.warn(`${label} Imagine public JPEG skipped; no image fetch conversation=${conversationId}`);
+      return undefined;
+    }
+    try {
+      const fetched = await this.deps.fetchImage(url);
+      if (!fetched || fetched.bytes.byteLength === 0 || fetched.mimeType !== "image/jpeg") {
+        log.warn(
+          `${label} Imagine public JPEG unavailable conversation=${conversationId} host=${imageHost(url)}`,
+        );
+        return undefined;
+      }
+      return fetched;
+    } catch {
+      log.warn(
+        `${label} Imagine public download failed conversation=${conversationId} host=${imageHost(url)}`,
+      );
+      return undefined;
+    }
   }
 
   private adultProvider(): AdultImageProviderName {
