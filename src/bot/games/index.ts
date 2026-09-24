@@ -1,7 +1,6 @@
 /**
- * Group chat games. Each game is a sibling module. Wire its command next to
- * `!dice` in the parser and engine. `!games` is the catalog, including games
- * that are not registered yet.
+ * Group chat games. Each game is a sibling module, wired next to `!dice`
+ * in the parser and engine. `!games` prints the catalog.
  */
 import { clearAnagramSessions } from "./anagram.js";
 import { clearGuessSessions } from "./guess.js";

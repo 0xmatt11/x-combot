@@ -1,6 +1,5 @@
 /**
- * Catalog of planned group games. `!games` prints this even when a command
- * is not registered yet, so other slices can land without rewriting the menu.
+ * Live game catalog. `!games` prints every command in these groups.
  */
 
 export type GameCatalogEntry = {
@@ -34,7 +33,7 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
     ],
   },
   {
-    title: "Word/solo (coming)",
+    title: "Word/solo",
     games: [
       { command: "!wordle", blurb: "wordle" },
       { command: "!anagram", blurb: "anagram" },

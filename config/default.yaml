@@ -53,7 +53,6 @@ help: |
     !roulette <red|black|number> [bet] — spin
     !crash [bet] — cash out with !crash out, or !crash auto 2.5
     !trivia — multiple choice; !trivia a to answer, !trivia score
-    !games — full list; more games are listed there
     !wordle [word] — daily 5-letter puzzle, then a practice round; marks are correct, present, or absent
     !anagram [word] — unscramble a longer word; score drops on each miss
     !scramble [word] — short-word streak; different list and score from !anagram
@@ -61,6 +60,7 @@ help: |
     !higherlower [higher|lower] — card streak
     !wouldyourather [A|B] — vote; the tally stays in this chat until it expires
     !truthordare [truth|dare] — PG-13 prompt; refuses minors
+    !games — grouped catalog of the games above
 
   Admin commands:
     Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.

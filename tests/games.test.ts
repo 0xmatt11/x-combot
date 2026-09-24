@@ -176,17 +176,16 @@ describe("!8ball", () => {
 });
 
 describe("!games menu", () => {
-  it("lists every planned game once, grouped, one line each", () => {
+  it("lists every live game once, grouped, one line each", () => {
     const menu = gamesMenu();
     const lines = menu.split("\n");
     expect(lines[0]).toBe("Games:");
     expect(menu).toContain("Instant:\n!dice — roll dice");
     expect(menu).toContain("Multiplayer:\n!tictactoe — tic-tac-toe");
-    expect(menu).toContain("Word/solo (coming):");
+    expect(menu).toContain("Word/solo:\n!wordle — wordle");
     expect(menu).toContain("XP/casino:\n!slots — slot machine");
     expect(menu).toContain("Board:\n!minesweeper — minesweeper");
-    expect(menu).not.toContain("minesweeper (coming)");
-    expect(menu).not.toContain("XP/casino (coming)");
+    expect(menu).not.toContain("(coming)");
 
     const commands = GAME_CATALOG.flatMap((group) => group.games.map((game) => game.command));
     expect(commands).toEqual(PLANNED);
@@ -326,6 +325,6 @@ describe("instant game commands", () => {
     expect(loaded.help).toMatch(/!8ball/);
     expect(loaded.help).toMatch(/!eightball/);
     expect(loaded.help).toMatch(/!minesweeper/);
-    expect(loaded.help).toMatch(/more games/i);
+    expect(loaded.help).toMatch(/grouped catalog of the games above/);
   });
 });
