@@ -41,6 +41,7 @@ help: |
     !rps rock|paper|scissors — rock-paper-scissors
     !coinflip [heads|tails] — flip a coin (!flip)
     !8ball <question> — magic 8-ball (!eightball)
+    !minesweeper [easy|medium] — text minesweeper (5×5 or 7×7). Full catalog: !games
     !games — full list; more games are listed there
 
   Admin commands:

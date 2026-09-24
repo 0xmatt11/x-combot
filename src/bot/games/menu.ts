@@ -58,7 +58,7 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
   },
   {
     title: "Board",
-    games: [{ command: "!minesweeper", blurb: "minesweeper (coming)" }],
+    games: [{ command: "!minesweeper", blurb: "minesweeper" }],
   },
 ];
 

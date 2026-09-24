@@ -69,6 +69,7 @@ import {
   diceReply,
   eightBallReply,
   gamesMenu,
+  minesweeperReply,
   resolveDiceRoller,
   rpsReply,
 } from "./games/index.js";
@@ -793,7 +794,7 @@ export class ModerationEngine {
    * Same resolution as a leave announcement: use the profile on the event
    * when it already has a username, otherwise `GET /2/users/:id`.
    * Encrypted Chat messages usually arrive with only the numeric sender id.
-   * Dice and the other instant games share this label.
+   * Dice, minesweeper, and the other games share this label.
    */
   private async diceRoller(event: DmEvent): Promise<string> {
     return resolveDiceRoller(event, (userId) => this.lookupDiceUser(userId));
@@ -950,6 +951,15 @@ export class ModerationEngine {
         return;
       case "games":
         await this.reply(conversationId, gamesMenu(), actions);
+        return;
+      case "minesweeper":
+        await this.reply(
+          conversationId,
+          minesweeperReply(conversationId, command.args, await this.diceRoller(event), {
+            now: nowMs,
+          }),
+          actions,
+        );
         return;
       default:
         break;
