@@ -159,6 +159,27 @@ describe("parseCommand", () => {
     expect(parseCommand("!dice 1d6+2")).toEqual({ name: "dice", notation: "1d6+2" });
   });
 
+  it("parses rps, coinflip, 8ball, and the games menu", () => {
+    expect(parseCommand("!rps")).toEqual({ name: "rps" });
+    expect(parseCommand("!rps ROCK")).toEqual({ name: "rps", choice: "ROCK" });
+    expect(parseCommand("/rps s")).toEqual({ name: "rps", choice: "s" });
+    expect(parseCommand("!coinflip")).toEqual({ name: "coinflip" });
+    expect(parseCommand("!flip heads")).toEqual({ name: "coinflip", call: "heads" });
+    expect(parseCommand("/COINFLIP tails")).toEqual({ name: "coinflip", call: "tails" });
+    expect(parseCommand("!8ball")).toEqual({ name: "eightball" });
+    expect(parseCommand("!8ball will it rain?")).toEqual({
+      name: "eightball",
+      question: "will it rain?",
+    });
+    expect(parseCommand("/eightball  really?")).toEqual({
+      name: "eightball",
+      question: "really?",
+    });
+    expect(parseCommand("!games")).toEqual({ name: "games" });
+    expect(parseCommand("  /GAMES  ")).toEqual({ name: "games" });
+    expect(parseCommand("!games extra")).toEqual({ name: "games" });
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",
@@ -199,6 +220,15 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!ass")).toBeUndefined();
     expect(parseUnknownBang("!booty extra")).toBeUndefined();
     expect(parseUnknownBang("!dice 2d20")).toBeUndefined();
+    expect(parseUnknownBang("!rps rock")).toBeUndefined();
+    expect(parseUnknownBang("!flip")).toBeUndefined();
+    expect(parseUnknownBang("!coinflip heads")).toBeUndefined();
+    expect(parseUnknownBang("!8ball will it rain?")).toBeUndefined();
+    expect(parseUnknownBang("!eightball")).toBeUndefined();
+    expect(parseUnknownBang("!games")).toBeUndefined();
+    expect(parseUnknownBang("!12345")).toBeUndefined();
+    expect(parseCommand("!12345")).toBeUndefined();
+    expect(parseCommand("!tictactoe")).toBeUndefined();
     expect(parseUnknownBang("!summary focus")).toBeUndefined();
     expect(parseUnknownBang("!delete 12")).toBeUndefined();
     expect(parseUnknownBang("!warn")).toBeUndefined();
