@@ -246,6 +246,37 @@ describe("LiveXClient 429 and 402", () => {
   });
 });
 
+describe("user timeline", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("reads recent posts from GET /2/users/:id/tweets", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: [{ id: "1", text: "hello timeline" }, { text: "  " }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(client().listRecentPosts("998877")).resolves.toEqual(["hello timeline"]);
+    const url = new URL(String((fetchMock.mock.calls as unknown[][])[0]?.[0]));
+    expect(url.pathname).toBe("/2/users/998877/tweets");
+    expect(url.searchParams.get("max_results")).toBe("5");
+    expect(url.searchParams.get("tweet.fields")).toBe("text");
+    expect(url.searchParams.get("exclude")).toBe("retweets,replies");
+  });
+});
+
 describe("DM image attach", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

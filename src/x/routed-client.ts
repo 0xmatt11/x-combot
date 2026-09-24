@@ -34,6 +34,10 @@ export class RoutedXClient implements XClient {
     return this.dm.getUserById(id);
   }
 
+  listRecentPosts(userId: string): Promise<string[]> {
+    return this.dm.listRecentPosts(userId);
+  }
+
   listDmEvents(params: {
     maxResults?: number;
     paginationToken?: string;

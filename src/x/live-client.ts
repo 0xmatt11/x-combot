@@ -105,6 +105,30 @@ export class LiveXClient implements XClient {
     }
   }
 
+  /**
+   * Public posts for `!troll`. Uses the user token (`tweet.read`, `users.read`).
+   * `max_results` must be 5–100. Failures propagate so the caller can roast
+   * from chat context alone.
+   */
+  async listRecentPosts(userId: string): Promise<string[]> {
+    const payload = await this.request<{ data?: { text?: string }[] }>(
+      `/2/users/${encodeURIComponent(userId)}/tweets`,
+      {
+        search: {
+          max_results: "5",
+          "tweet.fields": "text",
+          exclude: "retweets,replies",
+        },
+      },
+    );
+    const posts: string[] = [];
+    for (const tweet of payload.data ?? []) {
+      const text = tweet.text?.trim();
+      if (text) posts.push(text);
+    }
+    return posts;
+  }
+
   async getUserById(id: string): Promise<XUser | undefined> {
     try {
       const data = await this.request<{ data: XUser }>(`/2/users/${encodeURIComponent(id)}`, {
