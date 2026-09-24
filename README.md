@@ -269,8 +269,8 @@ Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin a
 | `!del [event_id]` | Classic DMs: own events only. Chat: `delete_for_all` for own messages, or others' when this account is a group admin. A numeric id is a sequence id. UUID message ids are not accepted. With no argument, Chat uses the last user message this process saw |
 | `!note` / `!note key` / `!note key text` | List or save a note |
 | `!get key` | Read a note |
-| `!set <key> <value>` | Per conversation. Keys: `welcome_enabled`, `welcome_text`, `leave_enabled`, `leave_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`\|`admins`), `llm_context_mode` (`none`\|`recent`\|`full`\|`conversation`), `llm_recent_messages`, `xp_enabled` (`on`\|`off`) |
-| `!settings` | Show this conversation's settings |
+| `!set <key> <value>` | Per conversation. Keys: `welcome_enabled`, `welcome_text`, `leave_enabled`, `leave_text`, `rules`, `help`, `flood_max_messages`, `flood_window_ms`, `flood_mute_ms`, `warn_limit`, `auto_mute_ms`, `llm_enabled`, `llm_allow` (`everyone`\|`admins`), `llm_context_mode` (`none`\|`recent`\|`full`\|`conversation`), `llm_recent_messages`, `xp_enabled` (`on`\|`off`). `flood_max_messages` of `0` or less, or `flood_window_ms` of `0`, disables flood for that conversation |
+| `!settings` | Show this conversation's settings. The flood line says `off` when it is disabled, and always notes that `0` disables flood |
 | `!admin add\|remove @user` | Per-group admin allowlist |
 | `!admins` | List admins |
 
@@ -493,7 +493,7 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `DATABASE_PATH` | Default `data/bot.sqlite` |
 | `TOKEN_PATH` | Default `data/tokens.json` |
 
-`config/default.yaml` holds welcome and leave text (leave is on), rules, help (including `!imagine` and `!video`), flood (more than 5 messages in 8 seconds, then a 5-minute mute), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, and the video model, duration, aspect ratio, and resolution are env-only. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits, reaction removals, and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
+`config/default.yaml` holds welcome and leave text (leave is on), rules, help (including `!imagine` and `!video`), flood (off by default: `max_messages: 0` disables it; `window_ms` stays 8000 and `mute_ms` stays 300000 so a group can turn it back on with `!set flood_max_messages` above 0), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, and the video model, duration, aspect ratio, and resolution are env-only. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits, reaction removals, and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
 
 SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
 
