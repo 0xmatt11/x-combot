@@ -34,10 +34,12 @@ import {
   TROLL_COOLDOWN_MS,
 } from "./troll.js";
 import {
+  buildNoorAbsPrompt,
   buildNoorImaginePrompt,
   buildNoorRoastMessages,
   fallbackNoorRoast,
   formatNoorPost,
+  NOOR_ABS_CODA,
   NOOR_ALERT_POLL_MS,
   NOOR_MEDIA_LIMIT,
   NOOR_VISION_PROMPT,
@@ -1111,15 +1113,53 @@ export class ModerationEngine {
       return;
     }
     if (command.mode === "off") {
+      const hadAbs = this.store.getNoorAlert(conversationId)?.absEnabled === true;
       const result = this.store.disableNoorAlert(conversationId);
       await this.reply(
         conversationId,
-        result === "already" ? "Noor alert is already off." : "Noor alert off.",
+        result === "already"
+          ? "Noor alert is already off."
+          : hadAbs
+            ? "Noor alert off. Abs coda off too."
+            : "Noor alert off.",
         actions,
       );
       return;
     }
     await this.reply(conversationId, "Use !noor on or !noor off.", actions);
+  }
+
+  /**
+   * `!noorabs on` / `!noorabs off`. Abs mode does not turn Noor on.
+   * `!noor off` clears the abs flag in the store.
+   */
+  private async handleNoorAbs(
+    event: DmEvent,
+    command: { name: "noorabs"; mode?: "on" | "off" },
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (command.mode === "on") {
+      const result = this.store.enableNoorAbs(conversationId);
+      const text =
+        result === "need-noor"
+          ? "Turn on !noor first."
+          : result === "already"
+            ? "Noor abs is already on. !noorabs off to stop."
+            : "Noor abs on. New posts end with the abs coda. !noorabs off to stop.";
+      await this.reply(conversationId, text, actions);
+      return;
+    }
+    if (command.mode === "off") {
+      const result = this.store.disableNoorAbs(conversationId);
+      await this.reply(
+        conversationId,
+        result === "already" ? "Noor abs is already off." : "Noor abs off.",
+        actions,
+      );
+      return;
+    }
+    await this.reply(conversationId, "Use !noorabs on or !noorabs off.", actions);
   }
 
   /**
@@ -1184,7 +1224,7 @@ export class ModerationEngine {
     let sinceMs = alert.sinceMs;
     for (const tweet of relay) {
       try {
-        await this.postNoorTweet(alert.conversationId, tweet, username);
+        await this.postNoorTweet(alert.conversationId, tweet, username, alert.absEnabled);
       } catch (error) {
         log.warn(
           `Noor relay failed conversation=${alert.conversationId} tweet=${tweet.id}`,
@@ -1215,6 +1255,7 @@ export class ModerationEngine {
     conversationId: string,
     tweet: UserTweet,
     username: string,
+    absEnabled: boolean,
   ): Promise<void> {
     const mediaUrls = tweet.mediaUrls.filter((url) => url.startsWith("https://"));
     const loaded: { url: string; image: AdultVisionImage }[] = [];
@@ -1248,6 +1289,9 @@ export class ModerationEngine {
     }
     if (mediaUrls.length > 0) {
       await this.postNoorRemix(conversationId, tweet.text, notes);
+    }
+    if (absEnabled) {
+      await this.postNoorAbs(conversationId);
     }
   }
 
@@ -1341,6 +1385,42 @@ export class ModerationEngine {
           log.warn(`Noor remix link failed conversation=${conversationId}`, error);
         }
       }
+      return;
+    }
+    await this.sendNoorAttachedImage(conversationId, attached);
+  }
+
+  /**
+   * After the normal relay, post the abs line and one new Imagine still.
+   * Each relay calls Imagine again (a fresh framing token, no static file).
+   * A failed generation is logged and the text coda still stands.
+   */
+  private async postNoorAbs(conversationId: string): Promise<void> {
+    try {
+      await this.client.sendMessage(conversationId, NOOR_ABS_CODA);
+    } catch (error) {
+      log.warn(`Noor abs coda failed conversation=${conversationId}`, error);
+    }
+    const imagine = this.deps.imagine;
+    if (!imagine) {
+      log.info(`Noor abs image skipped conversation=${conversationId} (imagine unavailable)`);
+      return;
+    }
+    const normalized = normalizeImaginePrompt(buildNoorAbsPrompt());
+    if (!normalized.ok) {
+      log.info(`Noor abs image skipped conversation=${conversationId} (${normalized.reason})`);
+      return;
+    }
+    let generated: ImagineImage;
+    try {
+      generated = await imagine.generate(normalized.prompt);
+    } catch (error) {
+      log.warn(`Noor abs image failed conversation=${conversationId}`, error);
+      return;
+    }
+    const attached = await this.noorRemixBytes(generated);
+    if (!attached) {
+      log.warn(`Noor abs image had no bytes conversation=${conversationId}`);
       return;
     }
     await this.sendNoorAttachedImage(conversationId, attached);
@@ -1747,6 +1827,9 @@ export class ModerationEngine {
         return;
       case "noor":
         await this.handleNoor(event, command, actions, nowMs);
+        return;
+      case "noorabs":
+        await this.handleNoorAbs(event, command, actions);
         return;
       case "dice":
         await this.reply(

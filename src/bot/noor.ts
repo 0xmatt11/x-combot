@@ -203,6 +203,25 @@ export function buildNoorImaginePrompt(
   return prompt.length > 900 ? `${prompt.slice(0, 897).trimEnd()}...` : prompt;
 }
 
+/** Exact chat line posted after a Noor relay when `!noorabs` is on. */
+export const NOOR_ABS_CODA = "but look at muh pretty abs";
+
+/**
+ * Imagine prompt for one abs still. A new framing token on every call so each
+ * relay asks for a new image. There is no on-disk cache and no static file.
+ * Must stay free of banned age terms (`normalizeImaginePrompt`).
+ */
+export function buildNoorAbsPrompt(random: () => number = Math.random): string {
+  const framing = Math.min(999_999, Math.max(0, Math.floor(random() * 1_000_000))).toString(36);
+  return [
+    "Close-up photograph of a skinny adult woman's tanned abs and midriff.",
+    "Fitness and beach vibe, tasteful crop from just below the chest to the hips, no face in frame.",
+    "A sports top and high-waist bottoms stay on. Nothing explicit beyond the midriff crop.",
+    "Adults only. No text, no watermark, no logo.",
+    `Unique framing ${framing}.`,
+  ].join(" ");
+}
+
 /** Bytes for `completeVision`. The data URI is built by the chat client. */
 export function noorVisionPayload(image: {
   bytes: Uint8Array;

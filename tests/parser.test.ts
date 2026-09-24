@@ -423,6 +423,22 @@ describe("parseCommand !noor", () => {
     expect(parseCommand("!noor later")).toEqual({ name: "noor" });
     expect(parseCommand("!unnoor")).toBeUndefined();
     expect(parseUnknownBang("!unnoor")).toEqual({ token: "!unnoor", args: "" });
+    expect(parseCommand("!noor abs")).toEqual({ name: "noor" });
+  });
+});
+
+describe("parseCommand !noorabs", () => {
+  it("folds the command name and on/off the same way as !noor", () => {
+    for (const text of ["!noorabs on", "!NoorAbs on", "!NOORABS ON", "!nOoRaBs On", "/noorabs ON"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noorabs", mode: "on" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    for (const text of ["!noorabs off", "!NoorAbs off", "!NOORABS OFF", "!nOoRaBs oFf"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noorabs", mode: "off" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    expect(parseCommand("!noorabs")).toEqual({ name: "noorabs" });
+    expect(parseCommand("!noorabs later")).toEqual({ name: "noorabs" });
   });
 });
 

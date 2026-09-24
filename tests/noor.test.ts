@@ -1,12 +1,19 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import type { ImagineGenerator } from "../src/bot/imagine.js";
+import { normalizeImaginePrompt } from "../src/bot/imagine.js";
 import {
+  buildNoorAbsPrompt,
   buildNoorImaginePrompt,
   buildNoorRoastMessages,
   fallbackNoorRoast,
   formatNoorPost,
   noorMeansLine,
+  NOOR_ABS_CODA,
   NOOR_ALERT_POLL_MS,
   planNoorRelay,
   sanitizeNoorRoast,
@@ -141,6 +148,16 @@ describe("Noor alert shaping", () => {
     expect(buildNoorImaginePrompt("that teen show", ["a cafe"])).toBeUndefined();
   });
 
+  it("asks Imagine for a new adult abs still on every call", () => {
+    const first = buildNoorAbsPrompt(() => 0.1);
+    const second = buildNoorAbsPrompt(() => 0.2);
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/skinny adult woman/i);
+    expect(first).toMatch(/midriff/i);
+    expect(normalizeImaginePrompt(first)).toEqual({ ok: true, prompt: first });
+    expect(normalizeImaginePrompt(second).ok).toBe(true);
+  });
+
   it("reads a snowflake timestamp", () => {
     const ms = 1_700_000_000_000;
     expect(snowflakeTimeMs(idAt(ms))).toBe(ms);
@@ -191,6 +208,7 @@ describe("Noor alert store", () => {
       enabled: true,
       sinceMs: 1_000,
       tweetId: undefined,
+      absEnabled: false,
     });
     store.setNoorWatermark("c1", 1_500, "55");
     expect(store.enableNoorAlert("c1", 9_000)).toBe("already");
@@ -219,7 +237,53 @@ describe("Noor alert store", () => {
       enabled: true,
       sinceMs: 5_000,
       tweetId: undefined,
+      absEnabled: false,
     });
+  });
+
+  it("requires Noor on before abs, and clears abs when Noor turns off", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    expect(store.enableNoorAbs("c1")).toBe("need-noor");
+    expect(store.getNoorAlert("c1")).toBeUndefined();
+    store.enableNoorAlert("c1", 1_000);
+    expect(store.enableNoorAbs("c1")).toBe("enabled");
+    expect(store.enableNoorAbs("c1")).toBe("already");
+    expect(store.getNoorAlert("c1")?.absEnabled).toBe(true);
+    expect(store.listEnabledNoorAlerts()[0]?.absEnabled).toBe(true);
+    expect(store.disableNoorAlert("c1")).toBe("disabled");
+    expect(store.getNoorAlert("c1")?.absEnabled).toBe(false);
+    expect(store.enableNoorAlert("c1", 2_000)).toBe("enabled");
+    expect(store.getNoorAlert("c1")?.absEnabled).toBe(false);
+    expect(store.enableNoorAbs("c1")).toBe("enabled");
+    expect(store.disableNoorAbs("c1")).toBe("disabled");
+    expect(store.disableNoorAbs("c1")).toBe("already");
+    expect(store.getNoorAlert("c1")).toMatchObject({ enabled: true, absEnabled: false });
+  });
+
+  it("adds abs_enabled when an older database is missing that column", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "noor-abs-"));
+    const file = path.join(dir, "bot.sqlite");
+    const db = new Database(file);
+    db.exec(`CREATE TABLE noor_alerts (
+      conversation_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL,
+      since_ms INTEGER NOT NULL,
+      tweet_id TEXT
+    )`);
+    db.prepare(
+      `INSERT INTO noor_alerts (conversation_id, enabled, since_ms, tweet_id) VALUES ('old', 1, 10, '3')`,
+    ).run();
+    db.close();
+    const store = new Store(file);
+    stores.push(store);
+    expect(store.getNoorAlert("old")).toMatchObject({
+      enabled: true,
+      absEnabled: false,
+      tweetId: "3",
+    });
+    expect(store.enableNoorAbs("old")).toBe("enabled");
+    expect(store.getNoorAlert("old")?.absEnabled).toBe(true);
   });
 });
 
@@ -558,10 +622,134 @@ describe("Noor alert relay", () => {
     expect(store.getNoorAlert(otherGroupId)?.tweetId).toBeUndefined();
   });
 
+  it("appends the abs coda and a fresh Imagine still when abs mode is on", async () => {
+    const prompts: string[] = [];
+    const { engine, client, store } = setup({
+      imagine: {
+        async generate(prompt) {
+          prompts.push(prompt);
+          return { bytes: Uint8Array.from([7, 7, 7]), mimeType: "image/jpeg" };
+        },
+      },
+    });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "abs-first", text: "!noorabs on" }), now);
+    expect(client.sent.at(-1)?.text).toBe("Turn on !noor first.");
+    expect(store.getNoorAlert(groupId)).toBeUndefined();
+
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now + 1);
+    await engine.processEvent(message({ id: "abs", text: "!NoorAbs ON" }), now + 2);
+    expect(client.sent.at(-1)?.text).toBe(
+      "Noor abs on. New posts end with the abs coda. !noorabs off to stop.",
+    );
+    expect(store.getNoorAlert(groupId)?.absEnabled).toBe(true);
+    await engine.processEvent(message({ id: "abs2", text: "!noorabs on" }), now + 3);
+    expect(client.sent.at(-1)?.text).toBe("Noor abs is already on. !noorabs off to stop.");
+
+    client.sent.length = 0;
+    client.images.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "just words", now + 10)]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatch(/abs/i);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "📌 @noorrietje original\nhttps://x.com/noorrietje/status/20\njust words",
+      expect.stringMatching(/^🪞 What she really means to say is:\n"/),
+      NOOR_ABS_CODA,
+    ]);
+    expect(client.images).toEqual([
+      {
+        conversationId: groupId,
+        url: "https://api.x.ai/v1/images/generations",
+        mimeType: "image/jpeg",
+        bytes: 3,
+      },
+    ]);
+  });
+
+  it("sends the abs coda after a photo remix, and still sends the text when Imagine fails", async () => {
+    const her = "https://pbs.twimg.com/media/abs.jpg";
+    const prompts: string[] = [];
+    const { engine, client } = setup({
+      llm: new VisionMock("beach pose"),
+      fetchImage: async (url) =>
+        url === her ? { bytes: Uint8Array.from([1, 2]), mimeType: "image/jpeg" } : undefined,
+      imagine: {
+        async generate(prompt) {
+          prompts.push(prompt);
+          if (prompts.length === 1) return { bytes: Uint8Array.from([9]), mimeType: "image/png" };
+          throw new Error("rate limited");
+        },
+      },
+    });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    await engine.processEvent(message({ id: "abs", text: "!noorabs on" }), now + 1);
+    client.sent.length = 0;
+    client.images.length = 0;
+    client.tweets.set(noor.id, [tweet("21", "photo", now + 10, [her])]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("photo");
+    expect(prompts[1]).toMatch(/midriff/i);
+    expect(client.sent.map((row) => row.text).at(-1)).toBe(NOOR_ABS_CODA);
+    expect(client.sent[0]?.text.startsWith("📌 @noorrietje original")).toBe(true);
+    expect(client.sent.some((row) => row.text.startsWith("🪞 What she really means to say is:"))).toBe(
+      true,
+    );
+    expect(client.images.map((row) => row.bytes)).toEqual([2, 1]);
+    expect(client.images[0]?.url).toBe(her);
+
+    const broken = setup({
+      imagine: {
+        async generate() {
+          throw new Error("imagine down");
+        },
+      },
+    });
+    await broken.engine.processEvent(message({ id: "on2", text: "!noor on" }), now);
+    await broken.engine.processEvent(message({ id: "abs2", text: "!noorabs on" }), now + 1);
+    broken.client.sent.length = 0;
+    broken.client.tweets.set(noor.id, [tweet("22", "words only", now + 10)]);
+    await broken.engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(broken.client.sent.map((row) => row.text).at(-1)).toBe(NOOR_ABS_CODA);
+    expect(broken.client.images).toHaveLength(0);
+  });
+
+  it("drops the abs coda when !noor off clears it", async () => {
+    const prompts: string[] = [];
+    const { engine, client, store } = setup({
+      imagine: {
+        async generate(prompt) {
+          prompts.push(prompt);
+          return { bytes: Uint8Array.from([4]), mimeType: "image/jpeg" };
+        },
+      },
+    });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    await engine.processEvent(message({ id: "abs", text: "!noorabs on" }), now + 1);
+    await engine.processEvent(message({ id: "off", text: "!NOOR OFF" }), now + 2);
+    expect(client.sent.at(-1)?.text).toBe("Noor alert off. Abs coda off too.");
+    expect(store.getNoorAlert(groupId)?.absEnabled).toBe(false);
+    await engine.processEvent(message({ id: "on2", text: "!noor on" }), now + 3);
+    expect(store.getNoorAlert(groupId)?.absEnabled).toBe(false);
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("23", "after", now + 10)]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(prompts).toEqual([]);
+    expect(client.sent.map((row) => row.text).some((text) => text === NOOR_ABS_CODA)).toBe(false);
+    expect(client.images).toHaveLength(0);
+    await engine.processEvent(message({ id: "abs-off", text: "!noorabs off" }), now + 4);
+    expect(client.sent.at(-1)?.text).toBe("Noor abs is already off.");
+  });
+
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!noor on/);
     expect(loaded.help).toMatch(/!noor off/);
+    expect(loaded.help).toMatch(/!noorabs on/);
+    expect(loaded.help).toMatch(/!noorabs off/);
   });
 });
 
