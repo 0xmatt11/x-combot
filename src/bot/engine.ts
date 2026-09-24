@@ -76,7 +76,9 @@ import {
   ImagineError,
   IMAGINE_FAILED_MESSAGE,
   IMAGINE_UNAVAILABLE_MESSAGE,
+  isImagineGenerationApiUrl,
   isImagineModerationError,
+  isImagineSessionError,
   normalizeImaginePrompt,
   suggestSofterImaginePrompts,
   type AdultImageCommand,
@@ -86,8 +88,10 @@ import {
 } from "./imagine.js";
 import {
   formatVideoReadyMessage,
+  isShareableVideoUrl,
   isVideoModerationError,
   normalizeVideoPrompt,
+  VIDEO_ATTACH_FAILED_MESSAGE,
   VIDEO_FAILED_MESSAGE,
   VIDEO_MODERATED_INTRO,
   VIDEO_STARTED_MESSAGE,
@@ -175,6 +179,14 @@ import {
   xpDisabledMessage,
 } from "./xp.js";
 
+/** Label for a bytes-only Imagine attachment. Not requested, and not remembered as an image URL. */
+const GROK_IMAGINE_PAGE = "https://grok.com/imagine";
+
+function inlineVideo(video: GeneratedVideo): { bytes: Uint8Array; mimeType: string } | undefined {
+  if (!video.bytes || video.bytes.byteLength === 0) return undefined;
+  return { bytes: video.bytes, mimeType: video.mimeType ?? "video/mp4" };
+}
+
 const SETTING_KEYS = new Set([
   "welcome_enabled",
   "welcome_text",
@@ -240,7 +252,7 @@ export class ModerationEngine {
   /** Users we have already resolved to a handle or display name. */
   private readonly namedUsers = new Map<string, XUser>();
   /**
-   * `!video` keeps generating after the ack so a multi-minute poll does not
+   * `!video` keeps generating after the ack so a multi-minute render does not
    * stall moderation. Tests await this before reading the finished reply.
    */
   private readonly backgroundWork = new Set<Promise<void>>();
@@ -1392,7 +1404,7 @@ export class ModerationEngine {
     const attached = await this.noorRemixBytes(generated);
     if (!attached) {
       log.warn(`Noor remix had no image bytes conversation=${conversationId}`);
-      if (generated.url?.startsWith("https://")) {
+      if (generated.url?.startsWith("https://") && !isImagineGenerationApiUrl(generated.url)) {
         try {
           await this.client.sendMessage(conversationId, generated.url);
         } catch (error) {
@@ -1453,7 +1465,9 @@ export class ModerationEngine {
         mimeType: image.mimeType,
       };
     }
-    if (!image.url?.startsWith("https://") || !this.deps.fetchImage) return undefined;
+    if (!image.url?.startsWith("https://") || isImagineGenerationApiUrl(image.url) || !this.deps.fetchImage) {
+      return undefined;
+    }
     try {
       const fetched = await this.deps.fetchImage(image.url);
       if (!fetched?.bytes?.byteLength) return undefined;
@@ -2522,7 +2536,7 @@ export class ModerationEngine {
 
   /**
    * Ack immediately, then generate in the background. The poller must keep
-   * moving while xAI renders a clip. `waitForBackgroundWork` joins that work.
+   * moving while Imagine renders a clip. `waitForBackgroundWork` joins that work.
    */
   private async handleVideo(event: DmEvent, prompt: string, actions: EngineActions): Promise<void> {
     const conversationId = event.conversationId;
@@ -2583,34 +2597,45 @@ export class ModerationEngine {
     video: GeneratedVideo,
     actions: EngineActions,
   ): Promise<void> {
-    if (isChatGroupId(conversationId) && this.deps.fetchVideo) {
-      let fetched: { bytes: Uint8Array; mimeType: string } | undefined;
-      try {
-        fetched = await this.deps.fetchVideo(video.url);
-      } catch {
-        log.warn(`!video download failed conversation=${conversationId} host=${imageHost(video.url)}`);
+    const inline = inlineVideo(video);
+    const shareable = isShareableVideoUrl(video.url);
+    if (isChatGroupId(conversationId) && (inline || (this.deps.fetchVideo && shareable))) {
+      let fetched = inline;
+      if (!fetched && this.deps.fetchVideo) {
+        try {
+          fetched = await this.deps.fetchVideo(video.url);
+        } catch {
+          log.warn(`!video download failed conversation=${conversationId} host=${imageHost(video.url)}`);
+        }
       }
       if (fetched && fetched.bytes.byteLength > 0) {
         try {
           await this.client.sendVideo(conversationId, {
-            url: video.url,
+            url: shareable ? video.url : GROK_IMAGINE_PAGE,
             bytes: fetched.bytes,
             mimeType: fetched.mimeType,
             width: video.width,
             height: video.height,
           });
-          log.info(`!video posted native video conversation=${conversationId} host=${imageHost(video.url)}`);
+          log.info(
+            `!video posted native video conversation=${conversationId} host=${imageHost(shareable ? video.url : GROK_IMAGINE_PAGE)}`,
+          );
           return;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           log.warn(
-            `!video native attach failed; posting the temporary link. conversation=${conversationId} host=${imageHost(video.url)} (${detail})`,
+            `!video native attach failed conversation=${conversationId} host=${imageHost(shareable ? video.url : GROK_IMAGINE_PAGE)} (${detail})`,
           );
         }
       }
     }
-    await this.reply(conversationId, formatVideoReadyMessage(video.url), actions);
-    log.info(`!video posted video link conversation=${conversationId} host=${imageHost(video.url)}`);
+    if (shareable) {
+      await this.reply(conversationId, formatVideoReadyMessage(video.url), actions);
+      log.info(`!video posted video link conversation=${conversationId} host=${imageHost(video.url)}`);
+      return;
+    }
+    await this.reply(conversationId, VIDEO_ATTACH_FAILED_MESSAGE, actions);
+    log.warn(`!video had no shareable link conversation=${conversationId}`);
   }
 
   /**
@@ -2689,8 +2714,9 @@ export class ModerationEngine {
   /**
    * One fresh Imagine image for an adult command. A repeated URL or byte hash
    * is tried once more. Content moderation is explained in the conversation
-   * and does not fall back to search. Any other failure returns false so
-   * search can run.
+   * and does not fall back to search. A signed-out browser session is also
+   * explained and does not fall back to search or the API. Any other failure
+   * returns false so the public CDN and then search can run.
    */
   private async tryAdultImagine(
     conversationId: string,
@@ -2709,7 +2735,7 @@ export class ModerationEngine {
       } catch (error) {
         const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
         log.warn(`${label} Imagine failed conversation=${conversationId}: ${detail}`);
-        if (isImagineModerationError(error)) {
+        if (isImagineModerationError(error) || isImagineSessionError(error)) {
           await this.replyImagineFailure(conversationId, prompt, error, actions);
           return true;
         }
@@ -2749,17 +2775,19 @@ export class ModerationEngine {
     if (!url && materialized.fetched) {
       try {
         await this.client.sendImage(conversationId, {
-          url: "https://api.x.ai/v1/images/generations",
+          url: GROK_IMAGINE_PAGE,
           bytes: materialized.fetched.bytes,
           mimeType: materialized.fetched.mimeType,
         });
         this.recentImages.remember(conversationId, { hash });
-        log.info(`${label} posted native image conversation=${conversationId} host=api.x.ai`);
+        log.info(
+          `${label} posted native image conversation=${conversationId} host=${imageHost(GROK_IMAGINE_PAGE)}`,
+        );
         return "posted";
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         log.warn(
-          `${label} native attach failed conversation=${conversationId} host=api.x.ai (${detail})`,
+          `${label} native attach failed conversation=${conversationId} host=${imageHost(GROK_IMAGINE_PAGE)} (${detail})`,
         );
         return "failed";
       }
@@ -2780,23 +2808,24 @@ export class ModerationEngine {
   private async materializeImagine(
     image: ImagineImage,
   ): Promise<{ url?: string; fetched?: AdultVisionImage }> {
-    if (image.url && this.deps.fetchImage) {
-      try {
-        const fetched = await this.deps.fetchImage(image.url);
-        if (fetched && fetched.bytes.byteLength > 0) {
-          return { url: image.url, fetched };
-        }
-      } catch {
-        log.warn(`Imagine image download failed host=${imageHost(image.url)}`);
-      }
-    }
+    const url = image.url && !isImagineGenerationApiUrl(image.url) ? image.url : undefined;
     if (image.bytes && image.bytes.byteLength > 0 && image.mimeType) {
       return {
-        url: image.url,
+        url,
         fetched: { bytes: image.bytes, mimeType: image.mimeType },
       };
     }
-    return { url: image.url };
+    if (url && this.deps.fetchImage) {
+      try {
+        const fetched = await this.deps.fetchImage(url);
+        if (fetched && fetched.bytes.byteLength > 0) {
+          return { url, fetched };
+        }
+      } catch {
+        log.warn(`Imagine image download failed host=${imageHost(url)}`);
+      }
+    }
+    return { url };
   }
 
   /**

@@ -1,4 +1,11 @@
-import { bodyIsModerated, bodyIsTooLong, IMAGINE_API_BASE, IMAGINE_REFUSED_MESSAGE } from "./imagine.js";
+import {
+  bodyIsModerated,
+  bodyIsTooLong,
+  IMAGINE_API_BASE,
+  IMAGINE_REFUSED_MESSAGE,
+  isImagineGenerationApiUrl,
+  isShareableMediaUrl,
+} from "./imagine.js";
 import { containsBannedAgeTerm, redactSecrets } from "./adult-filter.js";
 
 /**
@@ -33,20 +40,28 @@ export const VIDEO_TIMEOUT_MESSAGE = "Video generation timed out. Try again late
 export const VIDEO_EXPIRED_MESSAGE = "That video request expired before it finished. Try again.";
 export const VIDEO_MODERATED_INTRO =
   "That video was blocked by content moderation. Try one of these prompts with !video:";
+export const VIDEO_ATTACH_FAILED_MESSAGE =
+  "The video is ready, but this chat could not attach it. Try again in encrypted Chat.";
 
 export const VIDEO_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"] as const;
 export const VIDEO_RESOLUTIONS = ["480p", "720p", "1080p"] as const;
 
 export type VideoAspectRatio = (typeof VIDEO_ASPECT_RATIOS)[number];
 export type VideoResolution = (typeof VIDEO_RESOLUTIONS)[number];
-export type VideoErrorKind = "moderated" | "failed";
+export type VideoErrorKind = "moderated" | "failed" | "session";
 
 export interface GeneratedVideo {
-  /** Temporary https URL. Do not log it. */
+  /**
+   * Temporary https URL when the provider returned one. Empty when the browser
+   * worker only has local bytes. Do not log it.
+   */
   url: string;
   duration?: number;
   width: number;
   height: number;
+  /** Present when the bytes are already on hand (browser worker). Skips a download. */
+  bytes?: Uint8Array;
+  mimeType?: string;
 }
 
 export interface VideoGenerator {
@@ -74,6 +89,16 @@ export class VideoError extends Error {
 
 export function isVideoModerationError(error: unknown): boolean {
   return error instanceof VideoError && error.kind === "moderated";
+}
+
+/** Signed-out or unwired Chrome session. Callers must not fall through to the API. */
+export function isVideoSessionError(error: unknown): boolean {
+  return error instanceof VideoError && error.kind === "session";
+}
+
+/** True when a chat can post this URL as a temporary file link. */
+export function isShareableVideoUrl(url: string): boolean {
+  return isShareableMediaUrl(url);
 }
 
 const ASPECT_RATIO_SET = new Set<string>(VIDEO_ASPECT_RATIOS);
@@ -162,6 +187,10 @@ export function videoFrameSize(
   return { width, height };
 }
 
+/**
+ * Emergency API client. Constructed only when `IMAGINE_BACKEND=api`.
+ * Browser mode must not call this for user-facing generations.
+ */
 export function createVideoClient(options: {
   apiKey: string;
   model?: string;
@@ -237,6 +266,7 @@ export async function fetchGeneratedVideo(
     return undefined;
   }
   if (parsed.protocol !== "https:") return undefined;
+  if (isImagineGenerationApiUrl(url)) return undefined;
   if (containsBannedAgeTerm(`${parsed.hostname}${parsed.pathname}`)) return undefined;
 
   let response: Response;

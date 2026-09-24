@@ -27,8 +27,8 @@ help: |
     !rules — group rules
     !boobs — chest / cleavage photo or clip (off unless enabled)
     !ass / !booty / !booties — butt photo or clip (same switch as !boobs)
-    !imagine <prompt> — generate an image with Grok Imagine (needs an xAI key)
-    !video <prompt> — generate a short video with Grok Imagine (needs an xAI key; takes a few minutes)
+    !imagine <prompt> — image from grok.com/imagine in the signed-in Chrome session (not the xAI API)
+    !video <prompt> — short video from grok.com/imagine in that same Chrome session (takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
     !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
     !linkroast on — roast people who drop X status links in this chat until !linkroast off
@@ -156,13 +156,14 @@ xp:
 
 # Adult images (`!boobs`, and `!ass` / `!booty` / `!booties`). Off by default so a moderation
 # deploy does not post NSFW. One switch covers all of them: enabled: true or
-# BOOBS_ENABLED=true (env wins). When XAI_API_KEY (or the grok LLM key) is set,
-# the default source is Grok Imagine. BOOBS_IMAGE_PROVIDER=search keeps the
-# DuckDuckGo cascade (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits
-# are off-topic, keyless Bing HTML (adlt=off) runs next, then Reddit. Search
+# BOOBS_ENABLED=true (env wins). The default Imagine path is the grok.com/imagine
+# Chrome session (IMAGINE_BACKEND=browser). IMAGINE_BACKEND=api uses the xAI
+# image API when a key is set. BOOBS_IMAGE_PROVIDER=search keeps the DuckDuckGo
+# cascade (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are
+# off-topic, keyless Bing HTML (adlt=off) runs next, then Reddit. Search
 # also skips the last few posted URLs and image hashes in that conversation.
 # The command ignores extra text so members cannot change the prompt. See the README.
-# !imagine <prompt> uses the same Imagine client and does not use this switch.
+# !imagine <prompt> uses the same Imagine path and does not use this switch.
 # Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
 # count is enforced only when rate_limit_window_ms is also positive.
 # vision: optional download + LLM check (chest/butt subject, no genitalia).

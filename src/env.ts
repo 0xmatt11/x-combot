@@ -4,8 +4,10 @@ import {
   normalizeAdultImageProvider,
   normalizeImagineAspectRatio,
   normalizeImagineModel,
+  resolveImagineBackend,
   type AdultImageProviderName,
   type ImagineAspectRatio,
+  type ImagineBackend,
 } from "./bot/imagine.js";
 import {
   parseImaginePublicImageUrl,
@@ -168,6 +170,48 @@ function optionalVoiceLanguage(name: string): string | undefined {
   return language;
 }
 
+function resolveChromeProfile(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return path.resolve(value);
+}
+
+function optionalHttpUrl(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an http(s) URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${name} must be an http(s) URL`);
+  }
+  return url.toString();
+}
+
+function optionalBrowserChannel(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  if (!/^[a-z0-9-]{1,40}$/i.test(value)) {
+    throw new Error(`${name} must be a browser channel such as chrome`);
+  }
+  return value;
+}
+
+function optionalBrowserTimeout(name: string): number | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be a whole number of milliseconds, at least 1000`);
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1000) {
+    throw new Error(`${name} must be a whole number of milliseconds, at least 1000`);
+  }
+  return parsed;
+}
+
 function optionalVideoResolution(name: string): VideoResolution | undefined {
   const value = optional(name);
   if (!value) return undefined;
@@ -275,8 +319,8 @@ export interface Env {
   boobsImagineAspectRatio?: ImagineAspectRatio;
   /**
    * When true, adult commands may attach an already-hosted imagine-public
-   * JPEG after API Imagine misses and before search. Default off.
-   * Does not open grok.com.
+   * JPEG or mp4 after Imagine misses and before search. Default off.
+   * Static fetches only. Does not open grok.com.
    */
   boobsImagineApp?: boolean;
   /** `!boobs` JPEG on imagine-public.x.ai. Ignored unless `boobsImagineApp` is true. */
@@ -295,6 +339,21 @@ export interface Env {
   boobsImaginePublicAssVideoUrls?: string[];
   boobsImaginePublicBootyVideoUrls?: string[];
   boobsImaginePublicBoobsVideoUrls?: string[];
+  /**
+   * Where `!imagine`, `!video`, and adult Imagine gens run.
+   * Default `browser` (grok.com/imagine). `api` keeps api.x.ai generations.
+   */
+  imagineBackend: ImagineBackend;
+  /** Chrome user-data dir signed in as @0xMatt66. Browser mode only. */
+  imagineChromeProfile?: string;
+  /** Attach to a running Chrome, for example http://127.0.0.1:9222. Wins over the profile. */
+  imagineBrowserCdpUrl?: string;
+  /** Unset launches a visible window. `true` hides it. */
+  imagineBrowserHeadless?: boolean;
+  /** Playwright browser channel. Unset means `chrome`. */
+  imagineBrowserChannel?: string;
+  /** Overrides the browser wait for both image and video. Milliseconds, at least 1000. */
+  imagineBrowserTimeoutMs?: number;
   /** Video model id. Unset uses `grok-imagine-video-1.5`. */
   videoImagineModel?: string;
   /** Clip length in seconds (1–15). Unset uses 5. */
@@ -373,6 +432,15 @@ export function loadEnv(requireOwner = true): Env {
     boobsImaginePublicBoobsVideoUrls: optionalImaginePublicVideoUrls(
       "BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS",
     ),
+    imagineBackend: resolveImagineBackend({
+      imagineBackend: optional("IMAGINE_BACKEND"),
+      imagineUseBrowser: optionalBool("IMAGINE_USE_BROWSER"),
+    }),
+    imagineChromeProfile: resolveChromeProfile(optional("IMAGINE_CHROME_PROFILE")),
+    imagineBrowserCdpUrl: optionalHttpUrl("IMAGINE_BROWSER_CDP_URL"),
+    imagineBrowserHeadless: optionalBool("IMAGINE_BROWSER_HEADLESS"),
+    imagineBrowserChannel: optionalBrowserChannel("IMAGINE_BROWSER_CHANNEL"),
+    imagineBrowserTimeoutMs: optionalBrowserTimeout("IMAGINE_BROWSER_TIMEOUT_MS"),
     videoImagineModel: optionalVideoModel("VIDEO_IMAGINE_MODEL"),
     videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
