@@ -10,7 +10,7 @@ import type {
   SendMessageResult,
   XUser,
 } from "../types.js";
-import type { XClient } from "./client.js";
+import type { UserTweet, XClient } from "./client.js";
 
 /**
  * One XClient for the moderation engine. Classic group DMs stay on `/2/dm_*`.
@@ -36,6 +36,10 @@ export class RoutedXClient implements XClient {
 
   listRecentPosts(userId: string): Promise<string[]> {
     return this.dm.listRecentPosts(userId);
+  }
+
+  listUserTweets(userId: string): Promise<UserTweet[]> {
+    return this.dm.listUserTweets(userId);
   }
 
   listDmEvents(params: {

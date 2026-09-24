@@ -148,6 +148,14 @@ CREATE TABLE IF NOT EXISTS troll_targets (
   last_ms INTEGER NOT NULL DEFAULT 0,
   roast_next INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS noor_alerts (
+  conversation_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL,
+  since_ms INTEGER NOT NULL,
+  tweet_id TEXT,
+  abs_enabled INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 export class Store {
@@ -160,6 +168,17 @@ export class Store {
     this.db = new Database(filename);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
+    this.ensureNoorAbsColumn();
+  }
+
+  /**
+   * Databases created before `!noorabs` have `noor_alerts` without
+   * `abs_enabled`. `CREATE TABLE IF NOT EXISTS` does not add the column.
+   */
+  private ensureNoorAbsColumn(): void {
+    const columns = this.db.prepare("PRAGMA table_info(noor_alerts)").all() as { name: string }[];
+    if (columns.some((column) => column.name === "abs_enabled")) return;
+    this.db.exec("ALTER TABLE noor_alerts ADD COLUMN abs_enabled INTEGER NOT NULL DEFAULT 0");
   }
 
   close(): void {
@@ -776,6 +795,133 @@ export class Store {
       )
       .run(nowMs, roastNext, conversationId);
   }
+
+  /**
+   * `!noor` for this conversation. `sinceMs` is the enable time (or the newest
+   * post time already considered). `tweetId` is the highest id already seen.
+   */
+  getNoorAlert(conversationId: string): NoorAlert | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, since_ms, tweet_id, abs_enabled
+         FROM noor_alerts WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as
+      | {
+          enabled: number;
+          since_ms: number;
+          tweet_id: string | null;
+          abs_enabled: number;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return this.noorAlertFromRow(conversationId, row);
+  }
+
+  /** Conversations currently relaying new posts. */
+  listEnabledNoorAlerts(): NoorAlert[] {
+    const rows = this.db
+      .prepare(
+        `SELECT conversation_id, enabled, since_ms, tweet_id, abs_enabled
+         FROM noor_alerts WHERE enabled = 1
+         ORDER BY conversation_id`,
+      )
+      .all() as {
+      conversation_id: string;
+      enabled: number;
+      since_ms: number;
+      tweet_id: string | null;
+      abs_enabled: number;
+    }[];
+    return rows.map((row) => this.noorAlertFromRow(row.conversation_id, row));
+  }
+
+  private noorAlertFromRow(
+    conversationId: string,
+    row: {
+      enabled: number;
+      since_ms: number;
+      tweet_id: string | null;
+      abs_enabled: number;
+    },
+  ): NoorAlert {
+    return {
+      conversationId,
+      enabled: row.enabled === 1,
+      sinceMs: row.since_ms,
+      tweetId: row.tweet_id ?? undefined,
+      absEnabled: row.abs_enabled === 1,
+    };
+  }
+
+  /**
+   * Turn the alert on. The first enable (and a re-enable) sets the watermark
+   * to `sinceMs` and clears the tweet id so history is not dumped.
+   * A second `!noor on` while it is already on leaves the watermark alone.
+   */
+  enableNoorAlert(conversationId: string, sinceMs: number): "enabled" | "already" {
+    const existing = this.getNoorAlert(conversationId);
+    if (existing?.enabled) return "already";
+    this.db
+      .prepare(
+        `INSERT INTO noor_alerts (conversation_id, enabled, since_ms, tweet_id, abs_enabled)
+         VALUES (?, 1, ?, NULL, 0)
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           enabled = 1,
+           since_ms = excluded.since_ms,
+           tweet_id = NULL,
+           abs_enabled = 0`,
+      )
+      .run(conversationId, sinceMs);
+    return "enabled";
+  }
+
+  /**
+   * Turn the alert off. The row stays so a later enable can replace the watermark.
+   * Abs mode clears with it so a later `!noor on` does not resume the coda.
+   */
+  disableNoorAlert(conversationId: string): "disabled" | "already" {
+    const existing = this.getNoorAlert(conversationId);
+    if (!existing?.enabled) return "already";
+    this.db
+      .prepare(`UPDATE noor_alerts SET enabled = 0, abs_enabled = 0 WHERE conversation_id = ?`)
+      .run(conversationId);
+    return "disabled";
+  }
+
+  /**
+   * Turn the abs coda on. Requires Noor alert to already be on.
+   * Does not enable Noor by itself.
+   */
+  enableNoorAbs(conversationId: string): "enabled" | "already" | "need-noor" {
+    const existing = this.getNoorAlert(conversationId);
+    if (!existing?.enabled) return "need-noor";
+    if (existing.absEnabled) return "already";
+    this.db
+      .prepare(`UPDATE noor_alerts SET abs_enabled = 1 WHERE conversation_id = ? AND enabled = 1`)
+      .run(conversationId);
+    return "enabled";
+  }
+
+  /** Turn the abs coda off. Noor alert stays as it was. */
+  disableNoorAbs(conversationId: string): "disabled" | "already" {
+    const existing = this.getNoorAlert(conversationId);
+    if (!existing?.absEnabled) return "already";
+    this.db
+      .prepare(`UPDATE noor_alerts SET abs_enabled = 0 WHERE conversation_id = ?`)
+      .run(conversationId);
+    return "disabled";
+  }
+
+  /** Advance the watermark. No-op when the alert is off. */
+  setNoorWatermark(conversationId: string, sinceMs: number, tweetId?: string): void {
+    this.db
+      .prepare(
+        `UPDATE noor_alerts SET since_ms = ?, tweet_id = ?
+         WHERE conversation_id = ? AND enabled = 1`,
+      )
+      .run(sinceMs, tweetId ?? null, conversationId);
+  }
 }
 
 export interface TrollTarget {
@@ -784,4 +930,13 @@ export interface TrollTarget {
   lastMs: number;
   /** 1 when the next reply should use the chat and timeline roast. */
   roastNext: 0 | 1;
+}
+
+export interface NoorAlert {
+  conversationId: string;
+  enabled: boolean;
+  sinceMs: number;
+  tweetId?: string;
+  /** When true, each relay appends the abs coda and a fresh Imagine still. */
+  absEnabled: boolean;
 }
