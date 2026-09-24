@@ -1,9 +1,10 @@
 node_modules/
 dist/
 .env
-# Chat identity (mode 0600). Never commit.
+# Chat identity and member public-key cache (mode 0600). Never commit.
 data/
 chat-keys.json
+chat-remote-keys.json
 *.log
 .DS_Store
 coverage/

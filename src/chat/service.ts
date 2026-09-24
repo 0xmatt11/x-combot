@@ -24,6 +24,15 @@ import { loadWasmModule } from "./wasm-engine.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
 import { chatEventToDm } from "./normalize.js";
 import { newestRawId, nextWatermarkId, normalizeChatPage, rawEventsAfterWatermark } from "./raw.js";
+import {
+  DECRYPT_KEY_REFRESH_MIN_MS,
+  EMPTY_REMOTE_PUBLIC_KEY_TTL_MS,
+  REMOTE_PUBLIC_KEY_TTL_MS,
+  loadRemoteKeyCache,
+  saveRemoteKeyCache,
+  type CachedConversationKey,
+  type CachedRemoteUser,
+} from "./remote-key-cache.js";
 import { boundSigningEntries } from "./signing-keys.js";
 import {
   addConversationKeysBody,
@@ -34,6 +43,18 @@ import {
 } from "./wire.js";
 
 const MAX_CATCHUP_PAGES = 4;
+
+export interface ChatServiceOptions {
+  /**
+   * Disk cache for member public keys and recovered conversation keys.
+   * Unset keeps this process memory-only (unit tests). Not the identity file.
+   */
+  remoteKeyCachePath?: string;
+  now?: () => number;
+  remoteKeyTtlMs?: number;
+  emptyRemoteKeyTtlMs?: number;
+  decryptRefreshMinMs?: number;
+}
 
 export interface ChatPull {
   newestId?: string;
@@ -48,7 +69,17 @@ export interface ChatPull {
 export class ChatService {
   private readonly signingByUser = new Map<string, SigningKeyEntry[]>();
   private readonly remoteByUser = new Map<string, RemotePublicKey[]>();
+  /** When each user's public_keys list was last fetched successfully. */
+  private readonly remoteFetchedAt = new Map<string, number>();
+  /** Earliest time a decrypt failure may refresh this user's keys. */
+  private readonly forceRefreshAfter = new Map<string, number>();
+  /**
+   * `fetchedAt` of a refresh that already ran because decrypt failed.
+   * Further decrypt errors wait until the TTL replaces that fetch.
+   */
+  private readonly decryptRefreshedAt = new Map<string, number>();
   private readonly membersLoaded = new Set<string>();
+  private readonly membersByConversation = new Map<string, string[]>();
   private readonly bindingWarned = new Set<string>();
   private readonly tokens = new Map<string, string>();
   /** Key-change blobs whose decrypt did not report an error. Failures are retried. */
@@ -57,9 +88,15 @@ export class ChatService {
   private readonly conversationKeys = new Map<string, { version: string; key: Uint8Array }>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
+  private readonly remoteKeyCachePath?: string;
+  private readonly now: () => number;
+  private readonly remoteKeyTtlMs: number;
+  private readonly emptyRemoteKeyTtlMs: number;
+  private readonly decryptRefreshMinMs: number;
 
   /**
-   * In-memory public_keys / decrypt cache. Does not fetch.
+   * In-memory public_keys / decrypt cache. Does not fetch and does not read disk.
+   * Startup loads the disk cache into these maps before any public_keys request.
    * `backoffMs` is how long new signing-key loads stay blocked after a 429/402.
    */
   publicKeyHealth(nowMs = Date.now()): {
@@ -82,7 +119,15 @@ export class ChatService {
     private readonly http: ChatHttp,
     private readonly cipher: ChatCipher,
     private readonly store: Store,
-  ) {}
+    options?: ChatServiceOptions,
+  ) {
+    this.remoteKeyCachePath = options?.remoteKeyCachePath;
+    this.now = options?.now ?? Date.now;
+    this.remoteKeyTtlMs = options?.remoteKeyTtlMs ?? REMOTE_PUBLIC_KEY_TTL_MS;
+    this.emptyRemoteKeyTtlMs = options?.emptyRemoteKeyTtlMs ?? EMPTY_REMOTE_PUBLIC_KEY_TTL_MS;
+    this.decryptRefreshMinMs = options?.decryptRefreshMinMs ?? DECRYPT_KEY_REFRESH_MIN_MS;
+    if (this.remoteKeyCachePath) this.hydrateRemoteKeyCache();
+  }
 
   /**
    * Fetch the newest page (and older pages until the watermark is found).
@@ -363,7 +408,7 @@ export class ChatService {
     const identity = this.cipher.loadedIdentity();
     const publicKeys: { userId: string; publicKey: string; keyVersion: string }[] = [];
     for (const userId of memberIds) {
-      const keys = await this.loadRemoteKeys(userId);
+      const keys = await this.loadRemoteKeys(userId, { refresh: true });
       if (identity && userId === identity.userId) {
         const loaded = selectLoadedKey(keys, identity, (publicKey) =>
           this.cipher.matchesRegisteredKey(publicKey),
@@ -491,6 +536,9 @@ export class ChatService {
     const signingKeys = this.currentSigningKeys();
     const result = this.cipher.decryptEvents(encoded, signingKeys.length > 0 ? signingKeys : undefined);
     this.rememberConversationKeys(conversationId, result.conversationKeys);
+    if (decryptErrorsNeedKeyRefresh(result.errors)) {
+      this.noteDecryptKeyFailure(conversationId, senderIds);
+    }
     const messageFailed = raws.some(
       (raw) => Boolean(raw.encoded_event && result.errors[raw.encoded_event]),
     );
@@ -520,14 +568,19 @@ export class ChatService {
   }
 
   private async ensureMemberKeys(conversationId: string): Promise<boolean> {
-    if (this.membersLoaded.has(conversationId)) return true;
-    let ids: string[];
-    try {
-      ids = await this.http.getMemberIds(conversationId);
-    } catch (error) {
-      if (rateLimitWaitMs(error) !== undefined) throw error;
-      log.warn(`Could not list members of ${conversationId} before decrypt`, error);
-      return false;
+    let ids = this.membersByConversation.get(conversationId);
+    if (!ids) {
+      try {
+        ids = await this.http.getMemberIds(conversationId);
+      } catch (error) {
+        if (rateLimitWaitMs(error) !== undefined) throw error;
+        log.warn(`Could not list members of ${conversationId} before decrypt`, error);
+        return false;
+      }
+      this.membersByConversation.set(conversationId, ids);
+    }
+    if (this.membersLoaded.has(conversationId) && ids.every((id) => !this.remoteKeysDue(id))) {
+      return true;
     }
     const loaded = await this.ensureSigningKeys(ids);
     if (!loaded) return false;
@@ -538,7 +591,8 @@ export class ChatService {
   private async ensureSigningKeys(userIds: string[]): Promise<boolean> {
     let ok = true;
     for (const userId of userIds) {
-      if (!userId || this.remoteByUser.has(userId)) continue;
+      if (!userId) continue;
+      if (this.remoteByUser.has(userId) && !this.remoteKeysDue(userId)) continue;
       try {
         await this.loadRemoteKeys(userId);
       } catch (error) {
@@ -556,11 +610,13 @@ export class ChatService {
     return ok;
   }
 
-  private async loadRemoteKeys(userId: string): Promise<RemotePublicKey[]> {
+  private async loadRemoteKeys(userId: string, options?: { refresh?: boolean }): Promise<RemotePublicKey[]> {
     const cached = this.remoteByUser.get(userId);
-    if (cached) return cached;
-    const blockedFor = this.publicKeyBlockedUntil - Date.now();
+    const refresh = options?.refresh === true;
+    if (cached && !refresh && !this.remoteKeysDue(userId)) return cached;
+    const blockedFor = this.publicKeyBlockedUntil - this.now();
     if (blockedFor > 0) {
+      if (cached && (!refresh || cached.length > 0)) return cached;
       throw Object.assign(
         new Error(`GET /2/users/${userId}/public_keys is in backoff for ${blockedFor}ms`),
         { status: 429, retryAfterMs: blockedFor },
@@ -572,13 +628,59 @@ export class ChatService {
       return keys;
     } catch (error) {
       const wait = rateLimitWaitMs(error);
-      if (wait !== undefined) this.publicKeyBlockedUntil = Date.now() + wait;
+      if (wait !== undefined) this.publicKeyBlockedUntil = this.now() + wait;
+      if (cached && (!refresh || cached.length > 0)) {
+        if (this.forceRefreshAfter.has(userId)) {
+          this.forceRefreshAfter.set(userId, this.now() + this.decryptRefreshMinMs);
+        }
+        log.warn(`GET /2/users/${userId}/public_keys failed; using cached keys`, error);
+        return cached;
+      }
       throw error;
     }
   }
 
+  private remoteKeysDue(userId: string): boolean {
+    if (!userId || !this.remoteByUser.has(userId)) return true;
+    const fetchedAt = this.remoteFetchedAt.get(userId);
+    if (fetchedAt === undefined) return true;
+    const keys = this.remoteByUser.get(userId) ?? [];
+    const ttl = keys.length === 0 ? this.emptyRemoteKeyTtlMs : this.remoteKeyTtlMs;
+    if (this.now() - fetchedAt >= ttl) return true;
+    const forceAt = this.forceRefreshAfter.get(userId);
+    return forceAt !== undefined && this.now() >= forceAt;
+  }
+
+  private noteDecryptKeyFailure(conversationId: string, senderIds: Iterable<string>): void {
+    const ids = new Set<string>();
+    for (const id of this.membersByConversation.get(conversationId) ?? []) {
+      if (id) ids.add(id);
+    }
+    for (const id of senderIds) {
+      if (id) ids.add(id);
+    }
+    for (const userId of ids) {
+      if (!this.remoteByUser.has(userId) || this.forceRefreshAfter.has(userId)) continue;
+      const fetchedAt = this.remoteFetchedAt.get(userId);
+      if (fetchedAt === undefined || this.decryptRefreshedAt.get(userId) === fetchedAt) continue;
+      this.forceRefreshAfter.set(userId, fetchedAt + this.decryptRefreshMinMs);
+    }
+  }
+
   private rememberRemoteKeys(userId: string, keys: RemotePublicKey[]): void {
+    const wasForced = this.forceRefreshAfter.has(userId);
     this.remoteByUser.set(userId, keys);
+    const fetchedAt = this.now();
+    this.remoteFetchedAt.set(userId, fetchedAt);
+    this.forceRefreshAfter.delete(userId);
+    if (wasForced) this.decryptRefreshedAt.set(userId, fetchedAt);
+    else this.decryptRefreshedAt.delete(userId);
+    this.signingByUser.set(userId, this.bindRemoteKeys(userId, keys));
+    this.cipher.setSigningKeys(this.currentSigningKeys());
+    this.persistRemoteKeyCache();
+  }
+
+  private bindRemoteKeys(userId: string, keys: RemotePublicKey[]): SigningKeyEntry[] {
     const { entries, unboundVersions } = boundSigningEntries(keys, (identity, signing, signature) =>
       this.cipher.verifyKeyBinding(identity, signing, signature),
     );
@@ -590,9 +692,61 @@ export class ChatService {
         `Chat public key version ${version} for user ${userId} failed identity-binding verification. The SDK will not use it for KeyChange signatures until the identity key encoding matches the signature (SPKI bytes, standard base64).`,
       );
     }
-    this.signingByUser.set(userId, entries);
-    const flat = this.currentSigningKeys();
-    this.cipher.setSigningKeys(flat);
+    return entries;
+  }
+
+  private hydrateRemoteKeyCache(): void {
+    if (!this.remoteKeyCachePath) return;
+    const loaded = loadRemoteKeyCache(this.remoteKeyCachePath);
+    if (loaded.invalid) {
+      log.warn(
+        `Chat remote key cache ${this.remoteKeyCachePath} is unusable (${loaded.invalid}). Public keys will be fetched when needed.`,
+      );
+    } else if (loaded.skippedUsers > 0) {
+      log.warn(
+        `Chat remote key cache ${this.remoteKeyCachePath} skipped ${loaded.skippedUsers} invalid user entry(s). Those users will be fetched again.`,
+      );
+    }
+    for (const [userId, user] of loaded.users) {
+      this.remoteByUser.set(userId, user.keys);
+      this.remoteFetchedAt.set(userId, user.fetchedAt);
+      // Prefer entries derived from the stored public keys. The persisted
+      // signing list covers a file that has signatures but no re-bindable keys.
+      const entries = user.keys.length > 0 ? this.bindRemoteKeys(userId, user.keys) : user.signing;
+      this.signingByUser.set(userId, entries);
+    }
+    for (const [conversationId, saved] of loaded.conversations) {
+      this.conversationKeys.set(conversationId, { version: saved.version, key: saved.key });
+    }
+    if (this.signingByUser.size > 0) this.cipher.setSigningKeys(this.currentSigningKeys());
+    if (!loaded.invalid && (loaded.users.size > 0 || loaded.conversations.size > 0)) {
+      log.info(
+        `Loaded Chat remote key cache from ${this.remoteKeyCachePath} (${loaded.users.size} user(s), ${loaded.conversations.size} conversation key(s)).`,
+      );
+    }
+  }
+
+  private persistRemoteKeyCache(): void {
+    if (!this.remoteKeyCachePath) return;
+    const users = new Map<string, CachedRemoteUser>();
+    for (const [userId, keys] of this.remoteByUser) {
+      const fetchedAt = this.remoteFetchedAt.get(userId);
+      if (fetchedAt === undefined) continue;
+      users.set(userId, {
+        fetchedAt,
+        keys,
+        signing: this.signingByUser.get(userId) ?? [],
+      });
+    }
+    const conversations = new Map<string, CachedConversationKey>();
+    for (const [conversationId, saved] of this.conversationKeys) {
+      conversations.set(conversationId, { version: saved.version, key: saved.key });
+    }
+    try {
+      saveRemoteKeyCache(this.remoteKeyCachePath, { users, conversations });
+    } catch (error) {
+      log.warn(`Could not write Chat remote key cache ${this.remoteKeyCachePath}`, error);
+    }
   }
 
   private currentSigningKeys(): SigningKeyEntry[] {
@@ -612,7 +766,10 @@ export class ChatService {
     if (!key || key.byteLength === 0) return;
     const existing = this.conversationKeys.get(conversationId);
     if (existing && compareKeyVersions(version, existing.version) < 0) return;
-    this.conversationKeys.set(conversationId, { version, key: Uint8Array.from(key) });
+    const next = Uint8Array.from(key);
+    if (existing && existing.version === version && sameBytes(existing.key, next)) return;
+    this.conversationKeys.set(conversationId, { version, key: next });
+    this.persistRemoteKeyCache();
   }
 }
 
@@ -695,6 +852,21 @@ function selectLoadedKey(
     }
   });
   return byMaterial;
+}
+
+function decryptErrorsNeedKeyRefresh(errors: Record<string, string>): boolean {
+  for (const message of Object.values(errors)) {
+    if (/signing key|public key|no matching|not in available versions/i.test(message)) return true;
+  }
+  return false;
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 function failedDecryptBlobs(encoded: string[], errors: Record<string, string>): Set<string> {

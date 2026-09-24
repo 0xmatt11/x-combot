@@ -52,7 +52,9 @@ async function main(): Promise<void> {
     loadPublicKeys: () => client.getUserPublicKeys(userId),
   });
   const store = new Store(":memory:");
-  const service = new ChatService(chatHttpFromLive(client), cipher, store);
+  const service = new ChatService(chatHttpFromLive(client), cipher, store, {
+    remoteKeyCachePath: env.chatRemoteKeysPath,
+  });
   await service.rotateConversationKey(conversationId, { force });
   store.close();
   console.log(`Rotated keys for ${conversationId}.`);
