@@ -1,6 +1,16 @@
+import { createHash } from "node:crypto";
 import type { DmEvent, Mention, ReplyTarget } from "../types.js";
 import type { DecryptedEvent } from "./cipher.js";
 import type { RawChatEvent } from "./http.js";
+
+/**
+ * Stable id for one ciphertext. Activity delivery ids and the Chat events-list
+ * id are different strings for the same blob; the blob is not.
+ */
+export function cipherReplayKey(encoded: string | undefined): string | undefined {
+  if (!encoded) return undefined;
+  return `cipher:${createHash("sha256").update(encoded).digest("hex")}`;
+}
 
 const MENTION_RE = /@([A-Za-z0-9_]{1,15})/g;
 
@@ -27,6 +37,8 @@ export function chatEventToDm(
   const sequenceId = nonempty(decrypted.sequenceId) ?? nonempty(raw.sequence_id);
   const senderId = raw.sender_id || nonempty(decrypted.senderId);
 
+  const aliases = replayAliases(raw, decrypted, id);
+
   if (decrypted.type === "message") {
     const reaction = readReaction(decrypted);
     if (reaction) {
@@ -43,6 +55,7 @@ export function chatEventToDm(
         mentions: [],
         sequenceId,
         reactionTargetSequenceId: reaction.targetId,
+        ...aliases,
       };
     }
     const text = messageText(decrypted);
@@ -62,6 +75,7 @@ export function chatEventToDm(
       sequenceId,
       ...(replyToSenderId ? { replyToSenderId } : {}),
       ...(replyTo ? { replyTo } : {}),
+      ...aliases,
     };
   }
 
@@ -79,6 +93,7 @@ export function chatEventToDm(
         participants: memberIds.map((userId) => ({ id: userId })),
         mentions: [],
         sequenceId,
+        ...aliases,
       };
     }
     // chat-xdk GroupChange `membersRemoved` (Thrift GroupMemberRemoveChange).
@@ -94,6 +109,7 @@ export function chatEventToDm(
         participants: memberIds.map((userId) => ({ id: userId })),
         mentions: [],
         sequenceId,
+        ...aliases,
       };
     }
   }
@@ -222,6 +238,20 @@ function mentionsIn(text: string): Mention[] {
     mentions.push({ username });
   }
   return mentions;
+}
+
+function replayAliases(
+  raw: RawChatEvent,
+  decrypted: DecryptedEvent,
+  id: string,
+): { aliasIds: string[] } | undefined {
+  const aliasIds: string[] = [];
+  const decryptedId = nonempty(decrypted.id);
+  if (decryptedId && decryptedId !== id) aliasIds.push(decryptedId);
+  const cipher = cipherReplayKey(raw.encoded_event);
+  if (cipher) aliasIds.push(cipher);
+  if (aliasIds.length === 0) return undefined;
+  return { aliasIds };
 }
 
 function nonempty(value: string | null | undefined): string | undefined {

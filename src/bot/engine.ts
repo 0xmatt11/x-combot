@@ -147,10 +147,10 @@ export class ModerationEngine {
       llm: false,
     };
 
-    if (this.store.hasProcessed(event.id)) {
+    if (this.alreadyHandled(event)) {
+      this.rememberInboundAliases(event);
       return actions;
     }
-    this.store.markProcessed(event.id, event.createdAt);
 
     if (!event.conversationId || !isGroupConversation(event.conversationId)) {
       return actions;
@@ -192,10 +192,7 @@ export class ModerationEngine {
       convoAdmins,
     );
 
-    this.store.rememberMessageAuthor(event.conversationId, event.id, senderId);
-    if (event.sequenceId) {
-      this.store.rememberMessageAuthor(event.conversationId, event.sequenceId, senderId);
-    }
+    this.rememberInboundAliases(event);
 
     const vote = parseLevelVote(event.text);
     if (vote && event.replyTo && settings.xpEnabled && settings.xpLevelGrantEnabled) {
@@ -683,6 +680,49 @@ export class ModerationEngine {
       this.config.defaults,
       this.store.getSettings(conversationId),
     );
+  }
+
+  /**
+   * Claim this event before any reply, delete, XP write, or image send.
+   * Returns true when a previous delivery of the same Chat message already
+   * ran (or was claimed). Activity push and the catch-up poll decrypt one
+   * ciphertext under different raw ids. Leaves were the only path that
+   * noticed, so commands, XP errors, LLM replies, and image posts ran again
+   * on the later poll.
+   */
+  private alreadyHandled(event: DmEvent): boolean {
+    const keys = eventReplayKeys(event);
+    const leaveKey =
+      event.eventType === "ParticipantsLeave" ? leaveReplayKey(event) : undefined;
+    const seen =
+      keys.some((key) => this.store.hasProcessed(key)) ||
+      (leaveKey ? this.store.hasProcessed(leaveKey) : false) ||
+      (event.sequenceId
+        ? this.store.hasProcessedChatSequence(
+            event.conversationId,
+            event.sequenceId,
+            event.id,
+          )
+        : false);
+    for (const key of keys) this.store.markProcessed(key, event.createdAt);
+    return seen;
+  }
+
+  /** Index every id this message is known by, so a later +/− can find the author. */
+  private rememberInboundAliases(event: DmEvent): void {
+    if (event.eventType !== "MessageCreate" || !event.conversationId) return;
+    if (!isGroupConversation(event.conversationId)) return;
+    const senderId = event.senderId;
+    if (!senderId || senderId === this.config.botUserId) return;
+    const keys = [event.id, event.sequenceId];
+    for (const alias of event.aliasIds ?? []) {
+      if (!alias.startsWith("cipher:")) keys.push(alias);
+    }
+    for (const key of keys) {
+      if (!key) continue;
+      if (this.store.lookupMessageAuthor(event.conversationId, key)) continue;
+      this.store.rememberMessageAuthor(event.conversationId, key, senderId);
+    }
   }
 
   private async handleLeave(
@@ -1555,10 +1595,33 @@ function boobsRateLimitMessage(settings: ResolvedConversationConfig, label = "!b
  * Same-event key when Activity and the Chat poll decrypt one membership
  * change under different raw ids. Classic DM leaves have no sequence id and
  * rely on the event id already recorded in `processed_events`.
+ * Newer rows also store `seq:` (see `eventReplayKeys`). This key stays so a
+ * leave handled before that still will not be announced twice.
  */
 export function leaveReplayKey(event: Pick<DmEvent, "conversationId" | "sequenceId">): string | undefined {
   if (!event.sequenceId) return undefined;
   return `leave:${event.conversationId}:${event.sequenceId}`;
+}
+
+/**
+ * Ids that all mean one Chat message. Activity's delivery id, the events-list
+ * id, and a stream reconnect's id are not the same string. The sequence id,
+ * the decrypted message id, and the ciphertext hash are.
+ * Classic DMs only have `event.id`.
+ */
+export function eventReplayKeys(
+  event: Pick<DmEvent, "id" | "conversationId" | "sequenceId" | "aliasIds">,
+): string[] {
+  const keys: string[] = [];
+  const push = (key: string | undefined) => {
+    if (key && !keys.includes(key)) keys.push(key);
+  };
+  push(event.id);
+  if (event.sequenceId && event.conversationId) {
+    push(`seq:${event.conversationId}:${event.sequenceId}`);
+  }
+  for (const alias of event.aliasIds ?? []) push(alias);
+  return keys;
 }
 
 /** `{username}` is the @handle when known, otherwise the numeric id. */

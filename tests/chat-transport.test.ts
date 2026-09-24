@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { parseChatConversationIds } from "../src/chat/ids.js";
-import { chatEventToDm } from "../src/chat/normalize.js";
+import { chatEventToDm, cipherReplayKey } from "../src/chat/normalize.js";
 import { ChatActivityIntake } from "../src/chat/activity.js";
 import { chatListenPolicy } from "../src/chat/listen.js";
 import { ChatPoller } from "../src/chat/poller.js";
@@ -334,6 +334,19 @@ describe("Chat ids and wire shapes", () => {
       senderId: "owner-1",
     });
 
+    const aliased = chatEventToDm(
+      GROUP,
+      { id: "activity-uuid", encoded_event: "b64-help", sender_id: "alice-1" },
+      {
+        type: "message",
+        id: "msg-help",
+        sequenceId: "55",
+        content: { contentType: "text", text: "!help" },
+      },
+    );
+    expect(aliased?.id).toBe("activity-uuid");
+    expect(aliased?.aliasIds).toEqual(["msg-help", cipherReplayKey("b64-help")]);
+
     expect(
       chatEventToDm(
         GROUP,
@@ -647,6 +660,104 @@ describe("Chat transport into the moderation engine", () => {
     });
     await poller.pollOnce();
     expect(cipher.texts).toEqual(["@alice has left"]);
+  });
+
+  it("runs !dice once when Activity and the catch-up poll use different ids", async () => {
+    const { http, cipher, poller, service, store, dm } = setup();
+    cipher.events.set("b64-dice", {
+      type: "message",
+      id: "msg-dice",
+      sequenceId: "88",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!dice" },
+    });
+    http.pages.push({ data: [] });
+    await poller.pollOnce();
+
+    const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
+    const intake = new ChatActivityIntake(service, engine, [GROUP]);
+    await intake.handle({
+      data: {
+        event_type: "chat.received",
+        event_uuid: "activity-dice",
+        payload: {
+          id: "activity-dice",
+          sender_id: "alice-1",
+          conversation_id: GROUP,
+          encoded_event: "b64-dice",
+          sequence_id: "88",
+        },
+      },
+    });
+    expect(cipher.texts).toHaveLength(1);
+    expect(cipher.texts[0]).toMatch(/rolled/);
+    const rolled = cipher.texts[0];
+
+    http.pages.push({
+      data: [
+        {
+          id: "msg-dice",
+          sender_id: "alice-1",
+          encoded_event: "b64-dice",
+          sequence_id: "88",
+          conversation_id: GROUP,
+        },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.texts).toEqual([rolled]);
+
+    cipher.events.set("b64-help-2", {
+      type: "message",
+      id: "msg-help-2",
+      sequenceId: "89",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    http.pages.push({
+      data: [
+        {
+          id: "msg-help-2",
+          sender_id: "alice-1",
+          encoded_event: "b64-help-2",
+          sequence_id: "89",
+          conversation_id: GROUP,
+        },
+        {
+          id: "msg-dice",
+          sender_id: "alice-1",
+          encoded_event: "b64-dice",
+          sequence_id: "88",
+          conversation_id: GROUP,
+        },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.texts).toEqual([rolled, "CHAT_HELP_OK"]);
+  });
+
+  it("does not rerun a command already indexed under another id for that sequence", async () => {
+    const { http, cipher, poller, store } = setup();
+    http.pages.push({
+      data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" }],
+    });
+    await poller.pollOnce();
+    store.markProcessed("activity-help");
+    store.rememberChatMessage("activity-help", GROUP, "55");
+
+    http.pages.push({
+      data: [
+        {
+          id: "evt-2",
+          sender_id: "alice-1",
+          encoded_event: "b64-help",
+          conversation_id: GROUP,
+        },
+        { id: "evt-1", sender_id: "alice-1", encoded_event: "b64-old" },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.texts).toEqual([]);
   });
 
   it("does not advance the watermark when decrypt fails", async () => {
