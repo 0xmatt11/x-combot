@@ -202,7 +202,7 @@ The same giver can change the same target only once per `xp.level_grant_cooldown
 
 Anyone in the group can play. There is no admin gate. Games start with `!dice`.
 
-`!dice` rolls **1d6** and replies like `🎲 @handle rolled a 4`. The name is `@handle` when a username is known, otherwise the display name. With neither, the reply says `someone` and does not use the numeric user id. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice and 100 sides so the reply stays short. Anything else gets a one-line usage reply. `/dice` works the same way.
+`!dice` rolls **1d6** and replies like `🎲 @handle rolled a 4`. The name is `@username` when a handle is known, otherwise the display name. Encrypted Chat events often include only the sender's numeric id, so the bot looks that id up before choosing the name. With neither a handle nor a display name, the reply says `someone` and never prints the raw user id. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice and 100 sides so the reply stays short. Anything else gets a one-line usage reply. `/dice` works the same way.
 
 ## Adult image command
 
