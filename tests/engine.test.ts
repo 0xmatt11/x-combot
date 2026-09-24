@@ -192,6 +192,72 @@ describe("ModerationEngine", () => {
     expect(client.sent.map((row) => row.text)).toEqual(["@alice has left"]);
   });
 
+  it("runs a command once when the same Chat sequence arrives under two ids", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent(
+      message({ id: "activity-uuid", senderId: alice.id, text: "!dice", sequenceId: "88" }),
+    );
+    const rolled = client.sent[0]?.text;
+    await engine.processEvent(
+      message({ id: "poll-message-id", senderId: alice.id, text: "!dice", sequenceId: "88" }),
+    );
+    expect(client.sent.map((row) => row.text)).toEqual([rolled]);
+    expect(rolled).toMatch(/rolled/);
+
+    await engine.processEvent(
+      message({ id: "help-2", senderId: alice.id, text: "!help", sequenceId: "89" }),
+    );
+    expect(client.sent.map((row) => row.text)).toEqual([rolled, "Type !rules"]);
+  });
+
+  it("posts the unresolved +/− error once when that reply is delivered twice", async () => {
+    const { engine, client } = setup();
+    const vote = {
+      senderId: alice.id,
+      text: "+",
+      sequenceId: "91",
+      replyTo: { sequenceId: "missing-target", verified: false },
+    };
+    await engine.processEvent(message({ id: "activity-plus", ...vote }));
+    await engine.processEvent(message({ id: "poll-plus", ...vote }));
+    expect(client.sent).toHaveLength(1);
+    expect(client.sent[0]?.text).toContain("Couldn't tell who that reply is for");
+  });
+
+  it("does not rerun a command already handled under another id for the same sequence", async () => {
+    const { engine, client, store } = setup();
+    store.markProcessed("activity-uuid");
+    store.rememberChatMessage("activity-uuid", groupId, "88");
+    await engine.processEvent(
+      message({ id: "poll-message-id", senderId: alice.id, text: "!dice", sequenceId: "88" }),
+    );
+    expect(client.sent).toHaveLength(0);
+  });
+
+  it("replies once when two raw ids share a ciphertext or decrypted message id", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent(
+      message({
+        id: "activity-uuid",
+        senderId: alice.id,
+        text: "!rules",
+        aliasIds: ["cipher:same-blob", "msg-rules"],
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "reconnect-uuid",
+        senderId: alice.id,
+        text: "!rules",
+        aliasIds: ["cipher:same-blob"],
+      }),
+    );
+    await engine.processEvent(
+      message({ id: "msg-rules", senderId: alice.id, text: "!rules" }),
+    );
+    expect(client.sent.map((row) => row.text)).toEqual(["Be nice."]);
+  });
+
   it("falls back to the user id when a leaver lookup fails", async () => {
     const { engine, client } = setup();
     client.getUserById = async () => {

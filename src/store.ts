@@ -165,6 +165,32 @@ export class Store {
     return Boolean(row);
   }
 
+  /**
+   * True when this Chat sequence was already handled under a different raw id.
+   * Covers rows written before sequence keys were stored in `processed_events`:
+   * Activity indexed `activity-uuid` / sequence N, and the catch-up poll later
+   * presents the events-list id for that same sequence.
+   */
+  hasProcessedChatSequence(
+    conversationId: string,
+    sequenceId: string,
+    exceptEventId: string,
+  ): boolean {
+    if (!conversationId || !sequenceId) return false;
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM chat_message_index AS seen
+         INNER JOIN processed_events AS done ON done.event_id = seen.event_id
+         WHERE seen.conversation_id = ?
+           AND seen.sequence_id = ?
+           AND seen.event_id != ?
+         LIMIT 1`,
+      )
+      .get(conversationId, sequenceId, exceptEventId);
+    return Boolean(row);
+  }
+
   markProcessed(eventId: string, createdAt?: string): void {
     this.db
       .prepare(

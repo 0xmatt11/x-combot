@@ -268,6 +268,12 @@ export interface DmEvent {
   replyTo?: ReplyTarget;
   /** On `ReactionAdd`, the sequence id of the message that was reacted to. */
   reactionTargetSequenceId?: string;
+  /**
+   * Other ids for this same Chat message. Activity's raw id and the Chat
+   * events-list id differ; the decrypted message id and ciphertext hash do not.
+   * `processed_events` records these so a later catch-up does not run the command again.
+   */
+  aliasIds?: string[];
 }
 
 /** Extra context for delete. Classic DM ignores it; Chat uses the sequence id. */
