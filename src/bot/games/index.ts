@@ -109,3 +109,19 @@ export function clearWordGameSessions(): void {
   clearWouldYouRatherSessions();
   clearTruthOrDareSessions();
 }
+export { gameLabel, gameLabelFromText, namedPlayer, splitLeadingMention } from "./players.js";
+export type { GamePlayer } from "./players.js";
+export { CONNECT4_COLS, CONNECT4_HELP, CONNECT4_ROWS, connect4Winner, parseConnect4Column } from "./connect4.js";
+export { DUEL_HELP, DUEL_HP, parseDuelAction, rollD6 } from "./duel.js";
+export {
+  HANGMAN_HELP,
+  HANGMAN_LIVES,
+  HANGMAN_WORDS,
+  hangmanMask,
+  parseHangmanGuess,
+  pickHangmanWord,
+} from "./hangman.js";
+export { STORY_HELP, STORY_MAX_CHARS, oneSentence, parseStoryArgs } from "./story.js";
+export { TICTACTOE_HELP, parseTictactoeSquare, renderTictactoe, tictactoeWinner } from "./tictactoe.js";
+export { CHALLENGE_TTL_MS, GameRoom, PLAY_TTL_MS, STORY_TTL_MS } from "./room.js";
+export type { MultiplayerKind, PlayInput } from "./room.js";

@@ -24,7 +24,7 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
     ],
   },
   {
-    title: "Multiplayer (coming)",
+    title: "Multiplayer",
     games: [
       { command: "!tictactoe", blurb: "tic-tac-toe" },
       { command: "!connect4", blurb: "connect four" },

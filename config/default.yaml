@@ -42,6 +42,11 @@ help: |
     !coinflip [heads|tails] — flip a coin (!flip)
     !8ball <question> — magic 8-ball (!eightball)
     !minesweeper [easy|medium] — text minesweeper (5×5 or 7×7). Full catalog: !games
+    !tictactoe [@user] — tic-tac-toe; reply or @ to challenge, 1-9 to move
+    !connect4 [@user] — connect four; columns 1-7
+    !duel [@user] — turn-based HP duel (attack or defend)
+    !hangman [start|@user] — solo or challenge; guess a letter
+    !story start|stop|status — one sentence each
     !games — full list; more games are listed there
     !wordle [word] — daily 5-letter puzzle, then a practice round; marks are correct, present, or absent
     !anagram [word] — unscramble a longer word; score drops on each miss
