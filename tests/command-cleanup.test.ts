@@ -86,22 +86,21 @@ describe("command cleanup", () => {
     await vi.advanceTimersByTimeAsync(ms);
   }
 
-  it("deletes the bot reply after 15 minutes and leaves a classic command message", async () => {
+  it("leaves the help reply up and cannot delete a classic command", async () => {
     vi.useFakeTimers();
     const { engine, client } = setup();
     await engine.processEvent(message({ id: "cmd-help", text: "!help" }));
     expect(client.sent).toHaveLength(1);
-    expect(client.deleted).toEqual([]);
+    expect(client.sent[0]?.text).toContain("Type !rules");
 
     await age(COMMAND_CLEANUP_MS - 1);
     expect(client.deleted).toEqual([]);
-
     await age(1);
-    expect(client.deleted).toEqual(["sent-1"]);
-    expect(client.sent[0]?.text).toContain("Type !rules");
+    expect(client.deleted).toEqual([]);
+    expect(client.sent).toHaveLength(1);
   });
 
-  it("deletes a Chat command and the indexed reply, and keeps !auth in SQLite", async () => {
+  it("deletes the Chat command only, and keeps !auth plus the confirmation", async () => {
     vi.useFakeTimers();
     const { engine, client, store } = setup();
     store.authorizeChat(chatId);
@@ -116,8 +115,10 @@ describe("command cleanup", () => {
       }),
     );
     store.rememberChatMessage("sent-1", chatId, "88");
+    const rulesReply = client.sent[0]?.text ?? "";
     await age(COMMAND_CLEANUP_MS);
-    expect(client.deleted).toEqual(["cmd-rules", "sent-1"]);
+    expect(client.deleted).toEqual(["cmd-rules"]);
+    expect(client.sent[0]?.text).toBe(rulesReply);
 
     await engine.processEvent(
       message({
@@ -130,13 +131,15 @@ describe("command cleanup", () => {
       }),
     );
     expect(store.isChatAuthorized(chatId)).toBe(true);
+    expect(client.sent.at(-1)?.text).toMatch(/already authorized/i);
     store.rememberChatMessage("sent-2", chatId, "89");
     await age(COMMAND_CLEANUP_MS);
-    expect(client.deleted).toEqual(["cmd-rules", "sent-1", "cmd-auth", "sent-2"]);
+    expect(client.deleted).toEqual(["cmd-rules", "cmd-auth"]);
+    expect(client.sent.at(-1)?.text).toMatch(/already authorized/i);
     expect(store.isChatAuthorized(chatId)).toBe(true);
   });
 
-  it("skips a Chat reply that still has no sequence id", async () => {
+  it("skips a Chat command that has no sequence id and still keeps the reply", async () => {
     vi.useFakeTimers();
     const { engine, client, store } = setup();
     store.authorizeChat(chatId);
@@ -145,57 +148,76 @@ describe("command cleanup", () => {
         id: "cmd-help",
         conversationId: chatId,
         text: "!help",
-        sequenceId: "7",
       }),
     );
+    expect(client.sent).toHaveLength(1);
     await age(COMMAND_CLEANUP_MS);
-    expect(client.deleted).toEqual(["cmd-help"]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sent).toHaveLength(1);
   });
 
-  it("deletes a warn confirmation and keeps the warning", async () => {
+  it("keeps a warn confirmation and the warning", async () => {
     vi.useFakeTimers();
     const { engine, client, store } = setup();
     await engine.processEvent(
       message({ id: "cmd-warn", senderId: owner.id, text: "!warn @bob" }),
     );
     expect(store.getWarnCount(groupId, bob.id)).toBe(1);
+    expect(client.sent.length).toBeGreaterThan(0);
     await age(COMMAND_CLEANUP_MS);
-    expect(client.deleted).toEqual(["sent-1"]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sent.length).toBeGreaterThan(0);
     expect(store.getWarnCount(groupId, bob.id)).toBe(1);
-    expect(client.direct).toEqual([]);
   });
 
-  it("deletes an image reply and a late video reply, not ordinary chat", async () => {
+  it("keeps pictures, video, welcomes, and ordinary chat", async () => {
     vi.useFakeTimers();
-    const { engine, client } = setup();
-    await engine.processEvent(message({ id: "chat", text: "hello" }));
+    const { engine, client, store } = setup();
+    store.authorizeChat(chatId);
+    await engine.processEvent(
+      message({ id: "chat", conversationId: chatId, text: "hello", sequenceId: "1" }),
+    );
     await engine.processEvent({
       id: "join",
       eventType: "ParticipantsJoin",
-      conversationId: groupId,
+      conversationId: chatId,
       participantIds: [bob.id],
       participants: [bob],
       mentions: [],
     });
-    await engine.processEvent(message({ id: "cmd-img", text: "!imagine a red boat" }));
+    await engine.processEvent(
+      message({
+        id: "cmd-img",
+        conversationId: chatId,
+        text: "!imagine a red boat",
+        sequenceId: "2",
+      }),
+    );
     expect(client.images).toHaveLength(1);
 
-    await engine.processEvent(message({ id: "cmd-vid", text: "!video a paper boat" }));
-    await engine.waitForBackgroundWork();
-    expect(client.sent.map((row) => row.text).some((text) => text.includes("paper boat") || text.includes("clip"))).toBe(
-      true,
+    await engine.processEvent(
+      message({
+        id: "cmd-vid",
+        conversationId: chatId,
+        text: "!video a paper boat",
+        sequenceId: "3",
+      }),
     );
+    await engine.waitForBackgroundWork();
+    const sentBefore = client.sent.length;
+    expect(sentBefore).toBeGreaterThan(0);
 
     await age(COMMAND_CLEANUP_MS);
-    expect(client.deleted).toContain("img-1");
-    expect(client.deleted).not.toContain("chat");
-    expect(client.deleted).not.toContain("join");
-    expect(client.deleted.filter((id) => id.startsWith("sent-")).length).toBeGreaterThanOrEqual(2);
+    expect(client.deleted).toEqual(["cmd-img", "cmd-vid"]);
+    expect(client.images).toHaveLength(1);
+    expect(client.sent).toHaveLength(sentBefore);
+    expect(client.sent.some((row) => /Welcome/.test(row.text))).toBe(true);
   });
 
-  it("deletes the reply for every public !help command, including !help", async () => {
+  it("deletes only the bang for every public !help command, including !help", async () => {
     vi.useFakeTimers();
-    const { engine, client } = setup();
+    const { engine, client, store } = setup();
+    store.authorizeChat(chatId);
     const commands = [
       "!help",
       "/help",
@@ -210,29 +232,35 @@ describe("command cleanup", () => {
       "!imagine a red boat",
     ];
     for (const [index, text] of commands.entries()) {
-      const deletedBefore = client.deleted.length;
       const sentBefore = client.sent.length;
       const imagesBefore = client.images.length;
-      await engine.processEvent(message({ id: `pub-${index}`, text }));
+      const id = `pub-${index}`;
+      await engine.processEvent(
+        message({ id, conversationId: chatId, text, sequenceId: String(100 + index) }),
+      );
       const replied = client.sent.length > sentBefore || client.images.length > imagesBefore;
       expect(replied, text).toBe(true);
       await age(COMMAND_CLEANUP_MS);
-      const fresh = client.deleted.slice(deletedBefore);
-      expect(fresh.some((id) => id.startsWith("sent-") || id.startsWith("img-")), text).toBe(true);
-      expect(fresh, text).not.toContain(`pub-${index}`);
+      expect(client.deleted, text).toContain(id);
+      expect(client.deleted.filter((row) => row.startsWith("sent-") || row.startsWith("img-")), text).toEqual(
+        [],
+      );
     }
+    expect(client.sent.length).toBeGreaterThan(0);
+    expect(client.images.length).toBeGreaterThan(0);
   });
 
   it("is described in !help and the README", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(
-      /Command messages and the bot's replies to them are deleted after 15 minutes when the API allows/,
+      /User command messages auto-delete after 15 minutes when the API allows/,
     );
     expect(loaded.help).toMatch(/every public command on this list, including !help/);
-    expect(loaded.help).toMatch(/not only admin commands/);
+    expect(loaded.help).toMatch(/Bot replies do not/);
     const readme = fs.readFileSync("README.md", "utf8");
-    expect(readme).toMatch(/every public command on the `!help` list, not only admin or mod commands/);
-    expect(readme).toMatch(/!help` itself/);
+    expect(readme).toMatch(/User command messages auto-delete after 15 minutes when the API allows/);
+    expect(readme).toMatch(/Bot replies do not/);
+    expect(readme).toMatch(/including `!help` itself/);
     expect(COMMAND_CLEANUP_MS).toBe(15 * 60 * 1000);
   });
 });
