@@ -29,8 +29,10 @@ import type { ChatMessage, LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
+  buildRoastMessages,
   buildTrollMessages,
   momJoke,
+  noteThinChatHistory,
   sanitizeTrollReply,
   stripApiIds,
   TROLL_COOLDOWN_MS,
@@ -1766,6 +1768,55 @@ export class ModerationEngine {
     }
   }
 
+  private async handleRoast(
+    event: DmEvent,
+    command: { name: "roast"; target?: UserRef },
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const user = await this.resolveTrollUser(command.target, event, actions, "roast");
+    if (!user?.id) return;
+    if (user.id === this.config.botUserId) {
+      await this.reply(conversationId, "Pick someone else.", actions);
+      return;
+    }
+    const storedHandle =
+      user.username && !isNumericUserId(user.username)
+        ? user.username.replace(/^@/, "")
+        : undefined;
+    const label = await this.trollLabel(
+      { userId: user.id, username: storedHandle },
+      conversationId,
+      user,
+    );
+    const text = await this.composeRoast(event, user.id, label);
+    await this.reply(conversationId, text, actions);
+  }
+
+  /**
+   * One dunk. Same chat-history fetch and timeline call as troll mode.
+   * Does not write `troll_targets`.
+   */
+  private async composeRoast(event: DmEvent, userId: string, label: string): Promise<string> {
+    const rng = () => this.nextRandom();
+    const recent = await this.trollRecentLines(event, userId);
+    const posts = await this.trollPosts(event.conversationId, userId);
+    const settings = this.conversationConfig(event.conversationId);
+    if (!this.llmClient || !settings.llmEnabled) {
+      log.info(
+        `Roast fell back to a mom joke conversation=${event.conversationId} (llm unavailable)`,
+      );
+      return noteThinChatHistory(recent.length, momJoke(label, rng));
+    }
+    try {
+      const answer = await this.llmClient.complete(buildRoastMessages({ label, recent, posts }));
+      return noteThinChatHistory(recent.length, sanitizeTrollReply(answer, label, [userId], rng));
+    } catch (error) {
+      log.warn(`Roast failed conversation=${event.conversationId}`, error);
+      return noteThinChatHistory(recent.length, momJoke(label, rng));
+    }
+  }
+
   private async handleTrollCommand(
     event: DmEvent,
     command: { name: "troll"; off?: boolean; target?: UserRef },
@@ -1934,7 +1985,7 @@ export class ModerationEngine {
     target: UserRef | undefined,
     event: DmEvent,
     actions: EngineActions,
-    purpose: "troll" | "untroll" = "troll",
+    purpose: "troll" | "untroll" | "roast" = "troll",
   ): Promise<XUser | undefined> {
     if (target?.id || target?.username) {
       try {
@@ -1950,7 +2001,7 @@ export class ModerationEngine {
       if (named) return named;
     }
     if (!target) {
-      if (purpose === "troll") {
+      if (purpose === "troll" || purpose === "roast") {
         const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
         if (replyId) {
           try {
@@ -1965,7 +2016,9 @@ export class ModerationEngine {
         event.conversationId,
         purpose === "untroll"
           ? "Who? `!untroll @user` stops trolling that person."
-          : "Who? `!troll @user` starts it. `!untroll @user` stops it.",
+          : purpose === "roast"
+            ? "Who? `!roast @user` dunks that person once. Reply to their message or name them."
+            : "Who? `!troll @user` starts it. `!untroll @user` stops it.",
         actions,
       );
       return undefined;
@@ -2048,6 +2101,9 @@ export class ModerationEngine {
         return;
       case "untroll":
         await this.handleUntroll(event, command, actions);
+        return;
+      case "roast":
+        await this.handleRoast(event, command, actions);
         return;
       case "linkroast":
         await this.handleLinkroast(event, command, actions);

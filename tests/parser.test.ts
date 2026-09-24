@@ -418,6 +418,26 @@ describe("parseCommand !troll", () => {
   });
 });
 
+describe("parseCommand !roast", () => {
+  it("parses !roast and /roast the same way as a one-shot target", () => {
+    expect(parseCommand("!roast @bob")).toEqual({
+      name: "roast",
+      target: { raw: "@bob", username: "bob" },
+    });
+    expect(parseCommand("/roast @alice")).toEqual({
+      name: "roast",
+      target: { raw: "@alice", username: "alice" },
+    });
+    expect(parseCommand("!ROAST")).toEqual({ name: "roast" });
+    expect(parseCommand("!roast Bobby Tables")).toEqual({
+      name: "roast",
+      target: { raw: "Bobby Tables" },
+    });
+    expect(parseUnknownBang("!roast @bob")).toBeUndefined();
+    expect(parseUnknownBang("/roast")).toBeUndefined();
+  });
+});
+
 describe("parseCommand !linkroast", () => {
   it("parses on and off without caring about case", () => {
     expect(parseCommand("!linkroast on")).toEqual({ name: "linkroast", action: "on" });

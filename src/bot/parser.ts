@@ -59,6 +59,7 @@ export type ParsedCommand =
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
   | { name: "untroll"; target?: UserRef }
+  | { name: "roast"; target?: UserRef }
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "noor"; mode?: "on" | "off" }
   | { name: "noorabs"; mode?: "on" | "off" }
@@ -139,6 +140,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "stand",
   "troll",
   "untroll",
+  "roast",
   "linkroast",
   "noor",
   "noorabs",
@@ -362,6 +364,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseTroll(rest);
     case "untroll":
       return parseUntroll(rest);
+    case "roast":
+      return parseRoast(rest);
     case "linkroast":
       return parseLinkroast(rest);
     case "noor":
@@ -407,6 +411,15 @@ function parseTroll(rest: string): ParsedCommand {
   if (!rest) return { name: "troll" };
   if (/^off$/i.test(rest)) return { name: "troll", off: true };
   return { name: "troll", target: trollTarget(rest) };
+}
+
+/**
+ * `!roast @user` is one dunk. No on/off state. A bare command can target
+ * the replied-to sender, the same way `!troll` does.
+ */
+function parseRoast(rest: string): ParsedCommand {
+  if (!rest) return { name: "roast" };
+  return { name: "roast", target: trollTarget(rest) };
 }
 
 /** `!untroll @user` stops troll mode only when that user is the current target. */
