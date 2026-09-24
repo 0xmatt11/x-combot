@@ -263,8 +263,8 @@ Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2
 | `!video <prompt>` | One short video from that prompt via Grok Imagine. Needs an xAI key. Takes a few minutes. See [Video](#video) |
 | `!voice` | Menu of four personas. `!voice sexy <text>` (or `1`, `dude` / `2`, `scared` / `3`, `horny` / `4`) speaks that line. See [Voice](#voice) |
 | `!troll @user` | Roast that person in this chat until `!untroll @user` names the same person. A second `!troll @user` does not turn it off. See [Troll mode](#troll-mode) |
-| `!noor on` / `!noor off` | Relay new public posts from @noorrietje into this chat. See [Noor alert](#noor-alert) |
-| `!noorabs on` / `!noorabs off` | After each Noor relay, add `but look at muh pretty abs` and a new Imagine still. Requires `!noor on`. See [Noor alert](#noor-alert) |
+| `!noor on` / `!noor off` | Noor alert for @noorrietje. Relays each new post with her status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. A photo post also attaches an Imagine troll remix. `!Noor ON` matches. See [Noor alert](#noor-alert) |
+| `!noorabs on` / `!noorabs off` | When a Noor alert fires, append `but look at muh pretty abs` and an Imagine close-up of a skinny adult woman's tanned abs. Needs `!noor on`. See [Noor alert](#noor-alert) |
 | `!<made-up>` | One- or two-sentence witty LLM line when the LLM is allowed. Silent when it is off, unconfigured, admin-only, rate-limited, or the completion fails. `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!noor`, `!noorabs`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!games`, `!slots`, `!blackjack`, `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, and `!trivia` are real commands and do not take this path |
 
 Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself.

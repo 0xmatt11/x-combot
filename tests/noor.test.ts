@@ -744,12 +744,29 @@ describe("Noor alert relay", () => {
     expect(client.sent.at(-1)?.text).toBe("Noor abs is already off.");
   });
 
-  it("is listed in the default help text", () => {
+  it("lists both commands in the live !help reply", async () => {
     const loaded = loadDefaults("config/default.yaml");
-    expect(loaded.help).toMatch(/!noor on/);
-    expect(loaded.help).toMatch(/!noor off/);
-    expect(loaded.help).toMatch(/!noorabs on/);
-    expect(loaded.help).toMatch(/!noorabs off/);
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(owner);
+    const engine = new ModerationEngine(store, client, { ...runtime(), defaults: loaded });
+    await engine.processEvent(message({ id: "help", text: "!HELP" }), 1_700_000_000_000);
+    const help = client.sent.at(-1)?.text ?? "";
+    expect(help).toMatch(/!noor on/);
+    expect(help).toMatch(/!noor off/);
+    expect(help).toMatch(/@noorrietje/);
+    expect(help).toMatch(/status link/);
+    expect(help).toMatch(/sarcastic translation/);
+    expect(help).toMatch(/her photos/);
+    expect(help).toMatch(/labeled as the original/);
+    expect(help).toMatch(/Imagine troll remix/);
+    expect(help).toMatch(/case-insensitive/);
+    expect(help).toMatch(/!noorabs on/);
+    expect(help).toMatch(/!noorabs off/);
+    expect(help).toContain("but look at muh pretty abs");
+    expect(help).toMatch(/skinny tanned abs/);
   });
 });
 
