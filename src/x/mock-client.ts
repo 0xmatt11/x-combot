@@ -213,11 +213,20 @@ export class MockXClient implements XClient {
     return { dmEventId, dmConversationId: `${this.bot.id}-${participantId}` };
   }
 
-  async deleteEvent(eventId: string, _hint?: DeleteHint): Promise<DeleteResult> {
+  async deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult> {
     if (this.failDeleteIds.has(eventId)) {
       return { deleted: false, error: "not owned by authenticated user" };
     }
-    if (!this.allowDeleteOthers && !eventId.startsWith("sent-") && !eventId.startsWith("bot-")) {
+    const own =
+      eventId.startsWith("sent-") ||
+      eventId.startsWith("bot-") ||
+      eventId.startsWith("img-") ||
+      eventId.startsWith("vid-") ||
+      eventId.startsWith("aud-");
+    // Encrypted Chat delete is by sequence id, including another member's command
+    // when this account can delete_for_all. Classic deletes do not pass one.
+    const chatSequence = Boolean(hint?.sequenceId);
+    if (!this.allowDeleteOthers && !own && !chatSequence) {
       return {
         deleted: false,
         error: "X API deletes only events owned by the authenticated user",

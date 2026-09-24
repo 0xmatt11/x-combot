@@ -22,7 +22,7 @@ rules: |
   3. Follow X's rules: https://help.x.com/rules-and-policies
 
 help: |
-  Public commands. Every reply tags you and, in encrypted Chat, replies to your message:
+  Public commands. Every reply tags you and, in encrypted Chat, replies to your message. Command messages and the bot's replies to them are deleted after 15 minutes when the API allows.
     !help — this message
     !rules — group rules
     !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty. Tags you and replies to your command (off unless enabled; does not open grok.com/imagine)

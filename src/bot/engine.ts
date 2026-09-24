@@ -263,6 +263,11 @@ export interface EngineDeps {
   imagineBackend?: ImagineBackend;
   /** Package version and short git sha. Defaults to a one-time local read. */
   buildVersion?: { version?: string; sha?: string };
+  /**
+   * How long a bang/slash command and the bot's replies stay in chat.
+   * Default is 15 minutes. A restart drops timers that have not fired.
+   */
+  commandCleanupMs?: number;
 }
 
 /**
@@ -272,6 +277,30 @@ export interface EngineDeps {
  * work re-enters this store. Scheduled Noor relays do not.
  */
 const commandContext = new AsyncLocalStorage<DmEvent>();
+
+/** Command messages and the bot's replies to them are removed after this delay. */
+export const COMMAND_CLEANUP_MS = 15 * 60 * 1000;
+
+interface CommandCleanupTarget {
+  eventId: string;
+  conversationId: string;
+  sequenceId?: string;
+  /** The member's command. Classic DMs cannot delete that event. */
+  role: "command" | "reply";
+}
+
+/**
+ * Active only while a bang or slash command is handled. Background `!video`
+ * opens a fresh scope for the late clip so that post gets its own 15 minutes.
+ * Noor relays and admin DMs never enter it.
+ */
+interface CommandCleanupScope {
+  conversationId: string;
+  command?: CommandCleanupTarget;
+  replies: CommandCleanupTarget[];
+}
+
+const commandCleanup = new AsyncLocalStorage<CommandCleanupScope>();
 
 export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
@@ -291,6 +320,11 @@ export class ModerationEngine {
   private noorPollInFlight = false;
   /** Used when no shared RuntimeHealth was passed in. */
   private readonly startedAtMs = Date.now();
+  /**
+   * In-process command-cleanup timers. `unref` so a quiet process can exit.
+   * A restart before they fire leaves the messages in the chat.
+   */
+  private readonly commandCleanupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly store: Store,
@@ -335,7 +369,9 @@ export class ModerationEngine {
         isChatAuthMessage(event.text)
       ) {
         this.store.authorizeChat(event.conversationId);
-        await this.reply(event.conversationId, CHAT_AUTH_OK, actions);
+        await this.runCommandCleanup(event, () =>
+          this.reply(event.conversationId, CHAT_AUTH_OK, actions),
+        );
       }
       return actions;
     }
@@ -406,7 +442,9 @@ export class ModerationEngine {
       });
 
     if (command && !llmFromCmd) {
-      await this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs);
+      await this.runCommandCleanup(event, () =>
+        this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs),
+      );
       if (command.name !== "troll" && command.name !== "untroll") {
         await this.trollIfTarget(event, senderId, actions, nowMs);
       }
@@ -424,7 +462,13 @@ export class ModerationEngine {
         }
         return actions;
       }
-      await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
+      if (llmFromCmd) {
+        await this.runCommandCleanup(event, () =>
+          this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs),
+        );
+      } else {
+        await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
+      }
       await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
@@ -439,13 +483,15 @@ export class ModerationEngine {
         }
         return actions;
       }
-      await this.handleUnknownCommand(
-        event,
-        unknownBang,
-        senderIsAdmin,
-        settings,
-        actions,
-        nowMs,
+      await this.runCommandCleanup(event, () =>
+        this.handleUnknownCommand(
+          event,
+          unknownBang,
+          senderIsAdmin,
+          settings,
+          actions,
+          nowMs,
+        ),
       );
       await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
@@ -1356,7 +1402,7 @@ export class ModerationEngine {
       loaded.map((photo) => photo.image),
     );
     const inner = await this.composeNoorRoast(conversationId, tweet.text, notes);
-    await this.client.sendMessage(
+    await this.sendGroupMessage(
       conversationId,
       formatNoorPost(tweet, username, extraLinks),
     );
@@ -1368,7 +1414,7 @@ export class ModerationEngine {
       });
     }
     try {
-      await this.client.sendMessage(conversationId, noorMeansLine(inner));
+      await this.sendGroupMessage(conversationId, noorMeansLine(inner));
     } catch (error) {
       log.warn(`Noor roast post failed conversation=${conversationId} tweet=${tweet.id}`, error);
     }
@@ -1390,7 +1436,7 @@ export class ModerationEngine {
   ): Promise<void> {
     if (image.bytes.byteLength > 0) {
       try {
-        await this.client.sendImage(conversationId, {
+        await this.sendGroupImage(conversationId, {
           url: image.url,
           bytes: image.bytes,
           mimeType: image.mimeType,
@@ -1402,7 +1448,7 @@ export class ModerationEngine {
     }
     if (!image.url.startsWith("https://")) return;
     try {
-      await this.client.sendMessage(conversationId, image.url);
+      await this.sendGroupMessage(conversationId, image.url);
     } catch (error) {
       log.warn(`Noor image link failed conversation=${conversationId}`, error);
     }
@@ -1465,7 +1511,7 @@ export class ModerationEngine {
       log.warn(`Noor remix had no image bytes conversation=${conversationId}`);
       if (generated.url?.startsWith("https://") && !isImagineGenerationApiUrl(generated.url)) {
         try {
-          await this.client.sendMessage(conversationId, generated.url);
+          await this.sendGroupMessage(conversationId, generated.url);
         } catch (error) {
           log.warn(`Noor remix link failed conversation=${conversationId}`, error);
         }
@@ -1482,7 +1528,7 @@ export class ModerationEngine {
    */
   private async postNoorAbs(conversationId: string): Promise<void> {
     try {
-      await this.client.sendMessage(conversationId, NOOR_ABS_CODA);
+      await this.sendGroupMessage(conversationId, NOOR_ABS_CODA);
     } catch (error) {
       log.warn(`Noor abs coda failed conversation=${conversationId}`, error);
     }
@@ -2715,8 +2761,29 @@ export class ModerationEngine {
 
   private enqueueBackground(work: () => Promise<void>): void {
     const event = commandContext.getStore();
+    const parent = commandCleanup.getStore();
     const job = Promise.resolve()
-      .then(() => (event ? commandContext.run(event, work) : work()))
+      .then(async () => {
+        if (!event) {
+          await work();
+          return;
+        }
+        await commandContext.run(event, async () => {
+          if (!parent) {
+            await work();
+            return;
+          }
+          const late: CommandCleanupScope = {
+            conversationId: parent.conversationId,
+            replies: [],
+          };
+          try {
+            await commandCleanup.run(late, work);
+          } finally {
+            this.scheduleCommandCleanup(late);
+          }
+        });
+      })
       .catch((error: unknown) => {
         const detail = redactSecrets(error instanceof Error ? error.message : "video failed");
         log.warn(`!video background failed: ${detail}`);
@@ -2763,7 +2830,7 @@ export class ModerationEngine {
       }
       if (fetched && fetched.bytes.byteLength > 0) {
         try {
-          await this.client.sendVideo(
+          await this.sendGroupVideo(
             conversationId,
             await this.withCommandCaption({
               url: shareable ? video.url : GROK_IMAGINE_PAGE,
@@ -2830,7 +2897,7 @@ export class ModerationEngine {
       return;
     }
     try {
-      await this.client.sendAudio(
+      await this.sendGroupAudio(
         conversationId,
         await this.withCommandCaption({
           bytes: spoken.bytes,
@@ -2889,7 +2956,7 @@ export class ModerationEngine {
 
     if (!url && materialized.fetched) {
       try {
-        await this.client.sendImage(
+        await this.sendGroupImage(
           conversationId,
           await this.withCommandCaption({
             url: GROK_IMAGINE_PAGE,
@@ -3006,7 +3073,7 @@ export class ModerationEngine {
       return false;
     }
     try {
-      await this.client.sendImage(conversationId, {
+      await this.sendGroupImage(conversationId, {
         url,
         bytes: fetched.bytes,
         mimeType: fetched.mimeType,
@@ -3062,7 +3129,7 @@ export class ModerationEngine {
       return false;
     }
     try {
-      await this.client.sendVideo(conversationId, {
+      await this.sendGroupVideo(conversationId, {
         url,
         bytes: fetched.bytes,
         mimeType: "video/mp4",
@@ -3131,7 +3198,7 @@ export class ModerationEngine {
 
     if (fetched && fetched.bytes.byteLength > 0) {
       try {
-        await this.client.sendImage(conversationId, {
+        await this.sendGroupImage(conversationId, {
           url: image.url,
           bytes: fetched.bytes,
           mimeType: fetched.mimeType,
@@ -3354,13 +3421,129 @@ export class ModerationEngine {
     return (messages) => this.llmClient!.complete(messages);
   }
 
+  /**
+   * Bang and slash commands (including `!auth` and unknown bangs) record the
+   * member's message and every group reply sent while this runs. The timer
+   * is in-process: a restart before it fires leaves those messages up.
+   * `@mention` wakes, welcomes, leaves, Noor relays, and troll/linkroast
+   * follow-ups are not commands and are not scheduled here.
+   */
+  private async runCommandCleanup(event: DmEvent, work: () => Promise<void>): Promise<void> {
+    const scope: CommandCleanupScope = {
+      conversationId: event.conversationId,
+      command: {
+        eventId: event.id,
+        conversationId: event.conversationId,
+        sequenceId: event.sequenceId,
+        role: "command",
+      },
+      replies: [],
+    };
+    try {
+      await commandCleanup.run(scope, work);
+    } finally {
+      this.scheduleCommandCleanup(scope);
+    }
+  }
+
+  private scheduleCommandCleanup(scope: CommandCleanupScope): void {
+    const targets = cleanupTargets(scope);
+    if (targets.length === 0) return;
+    const delay = this.deps.commandCleanupMs ?? COMMAND_CLEANUP_MS;
+    const timer = setTimeout(() => {
+      this.commandCleanupTimers.delete(timer);
+      void this.deleteCommandClutter(targets).catch((error: unknown) => {
+        log.warn("Command cleanup failed", error);
+      });
+    }, delay);
+    timer.unref?.();
+    this.commandCleanupTimers.add(timer);
+  }
+
+  private async deleteCommandClutter(targets: readonly CommandCleanupTarget[]): Promise<void> {
+    const actions: EngineActions = {
+      replies: [],
+      deletes: [],
+      notifies: [],
+      muted: false,
+      warned: false,
+      llm: false,
+    };
+    for (const target of targets) {
+      const indexed = this.store.lookupChatMessage(target.eventId);
+      const sequenceId = target.sequenceId || indexed?.sequenceId;
+      const conversationId = target.conversationId || indexed?.conversationId;
+      if (isChatGroupId(conversationId)) {
+        if (!sequenceId) {
+          log.info(
+            `Skipping auto-delete of ${target.role} ${target.eventId} in ${conversationId}: no Chat sequence id yet.`,
+          );
+          continue;
+        }
+        await this.tryDelete(target.eventId, actions, { conversationId, sequenceId });
+        continue;
+      }
+      if (target.role === "command") {
+        log.info(
+          `Skipping auto-delete of command ${target.eventId}: classic DMs only delete messages this account sent.`,
+        );
+        continue;
+      }
+      await this.tryDelete(target.eventId, actions, { conversationId });
+    }
+  }
+
+  private noteCommandReply(result: { dmEventId?: string; dmConversationId?: string }): void {
+    const scope = commandCleanup.getStore();
+    const eventId = result.dmEventId?.trim();
+    if (!scope || !eventId) return;
+    if (scope.replies.some((row) => row.eventId === eventId)) return;
+    scope.replies.push({
+      eventId,
+      conversationId: result.dmConversationId || scope.conversationId,
+      role: "reply",
+    });
+  }
+
+  private async sendGroupMessage(
+    ...args: Parameters<XClient["sendMessage"]>
+  ): ReturnType<XClient["sendMessage"]> {
+    const result = await this.client.sendMessage(...args);
+    this.noteCommandReply(result);
+    return result;
+  }
+
+  private async sendGroupImage(
+    ...args: Parameters<XClient["sendImage"]>
+  ): ReturnType<XClient["sendImage"]> {
+    const result = await this.client.sendImage(...args);
+    this.noteCommandReply(result);
+    return result;
+  }
+
+  private async sendGroupVideo(
+    ...args: Parameters<XClient["sendVideo"]>
+  ): ReturnType<XClient["sendVideo"]> {
+    const result = await this.client.sendVideo(...args);
+    this.noteCommandReply(result);
+    return result;
+  }
+
+  private async sendGroupAudio(
+    ...args: Parameters<XClient["sendAudio"]>
+  ): ReturnType<XClient["sendAudio"]> {
+    const result = await this.client.sendAudio(...args);
+    this.noteCommandReply(result);
+    return result;
+  }
+
   private async reply(
     conversationId: string,
     text: string,
     actions: EngineActions,
   ): Promise<void> {
     const addressed = await this.addressText(text);
-    await this.client.sendMessage(conversationId, addressed.text, addressed.caption);
+    await this.sendGroupMessage(conversationId, addressed.text, addressed.caption);
     actions.replies.push(addressed.text);
   }
 
@@ -3388,6 +3571,19 @@ export class ModerationEngine {
 
 /** A cap applies only when some count is positive and the window is positive. `0` is unlimited. */
 /** The body already leads with this sender label, including `@bob, …`. */
+function cleanupTargets(scope: CommandCleanupScope): CommandCleanupTarget[] {
+  const targets: CommandCleanupTarget[] = [];
+  const seen = new Set<string>();
+  const add = (target: CommandCleanupTarget | undefined) => {
+    if (!target?.eventId || seen.has(target.eventId)) return;
+    seen.add(target.eventId);
+    targets.push(target);
+  };
+  add(scope.command);
+  for (const reply of scope.replies) add(reply);
+  return targets;
+}
+
 function alreadyAddresses(body: string, label: string): boolean {
   if (body === label || body.startsWith(`${label} `) || body.startsWith(`${label}\n`)) return true;
   if (!body.startsWith(label)) return false;

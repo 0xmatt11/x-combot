@@ -617,6 +617,10 @@ export class ChatService {
       const dm = chatEventToDm(conversationId, raw, decrypted);
       if (!dm) continue;
       this.store.rememberChatMessage(dm.id, dm.conversationId, dm.sequenceId, dm.createdAt);
+      const sentId = decrypted?.id?.trim();
+      if (sentId && sentId !== dm.id) {
+        this.store.rememberChatMessage(sentId, dm.conversationId, dm.sequenceId, dm.createdAt);
+      }
       events.push(dm);
     }
     return events;
