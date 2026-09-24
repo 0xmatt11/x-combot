@@ -305,6 +305,18 @@ export interface OutboundVideo {
   height?: number;
 }
 
+/**
+ * MP3 bytes to attach. Classic DMs cannot take audio.
+ * Encrypted Chat uses media_type 4 (audio) on the same upload path as video.
+ */
+export interface OutboundAudio {
+  bytes: Uint8Array;
+  mimeType?: string;
+  durationMillis?: number;
+  /** Voice id for logs. Not sent to X. */
+  voiceId?: string;
+}
+
 export interface DeleteResult {
   deleted: boolean;
   error?: string;

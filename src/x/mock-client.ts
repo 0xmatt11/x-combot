@@ -2,6 +2,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  OutboundAudio,
   OutboundImage,
   OutboundVideo,
   SendMessageResult,
@@ -20,6 +21,13 @@ export class MockXClient implements XClient {
     width?: number;
     height?: number;
   }[] = [];
+  readonly audios: {
+    conversationId: string;
+    mimeType?: string;
+    bytes: number;
+    durationMillis?: number;
+    voiceId?: string;
+  }[] = [];
   readonly direct: { participantId: string; text: string }[] = [];
   readonly deleted: string[] = [];
   readonly events: DmEvent[] = [];
@@ -32,6 +40,8 @@ export class MockXClient implements XClient {
   failSendImage = false;
   /** When set, `sendVideo` throws so callers fall back to the temporary URL. */
   failSendVideo = false;
+  /** When set, `sendAudio` throws so callers post a short failure line. */
+  failSendAudio = false;
   failDeleteIds = new Set<string>();
 
   constructor(bot: XUser = { id: "bot-1", username: "modbot", name: "Mod Bot" }) {
@@ -115,6 +125,23 @@ export class MockXClient implements XClient {
       height: video.height,
     });
     return { dmEventId: `vid-${this.videos.length}`, dmConversationId: conversationId };
+  }
+
+  async sendAudio(conversationId: string, audio: OutboundAudio): Promise<SendMessageResult> {
+    if (this.failSendAudio) {
+      throw new Error("native audio attach failed");
+    }
+    if (!audio.bytes || audio.bytes.byteLength === 0) {
+      throw new Error("missing audio bytes");
+    }
+    this.audios.push({
+      conversationId,
+      mimeType: audio.mimeType,
+      bytes: audio.bytes.byteLength,
+      durationMillis: audio.durationMillis,
+      voiceId: audio.voiceId,
+    });
+    return { dmEventId: `aud-${this.audios.length}`, dmConversationId: conversationId };
   }
 
   async sendDirectMessage(

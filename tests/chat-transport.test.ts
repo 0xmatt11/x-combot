@@ -1146,6 +1146,54 @@ describe("ChatService.sendImage", () => {
     expect(attachment.mediaType).toBe(3);
     expect(result).toEqual({ dmEventId: "mid-vid", dmConversationId: "g1" });
   });
+
+  it("uploads an mp3 with media_type 4 and duration_millis on the same Chat media path", async () => {
+    const cipher = new FakeCipher();
+    const key = new Uint8Array(32).fill(7);
+    cipher.events.set("blob-99", { type: "message", id: "e1", content: { text: "hi" } });
+    cipher.conversationKeys = { keys: { "99": key }, latestVersion: "99" };
+    const http = new FakeHttp();
+    http.pages.push(page("blob-99"));
+    const uploads: Uint8Array[] = [];
+    http.uploadChatMedia = async (_id, ciphertext) => {
+      uploads.push(Uint8Array.from(ciphertext));
+      return "hash-audio";
+    };
+    const encrypted: { conversationId: string; text: string; options?: EncryptMessageOptions }[] = [];
+    cipher.encryptStream = (plaintext) => plaintext;
+    cipher.encryptMessage = (conversationId, text, options) => {
+      encrypted.push({ conversationId, text, options });
+      return {
+        messageId: "mid-aud",
+        encryptedContent: "enc:",
+        encodedEventSignature: "sig",
+      };
+    };
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    await service.listHistory({ conversationId: "g1" });
+    const bytes = Uint8Array.from([0x49, 0x44, 0x33, 4]);
+    const result = await service.sendAudio("g1", {
+      bytes,
+      mimeType: "audio/mpeg",
+      durationMillis: 1250,
+      voiceId: "eve",
+    });
+    store.close();
+
+    expect(uploads).toHaveLength(1);
+    expect(Array.from(uploads[0]!)).toEqual(Array.from(bytes));
+    expect(encrypted[0]).toMatchObject({ conversationId: "g1", text: "" });
+    const attachment = encrypted[0]?.options?.attachments?.[0] as ChatMediaAttachment;
+    expect(attachment.mediaHashKey).toBe("hash-audio");
+    expect(attachment.filename).toBe("voice.mp3");
+    expect(attachment.filesizeBytes).toBe(bytes.byteLength);
+    expect(attachment.mediaType).toBe(4);
+    expect(attachment.durationMillis).toBe(1250);
+    expect(attachment.width).toBe(1);
+    expect(attachment.height).toBe(1);
+    expect(result).toEqual({ dmEventId: "mid-aud", dmConversationId: "g1" });
+  });
 });
 
 describe("Chat group discovery", () => {

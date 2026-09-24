@@ -2,6 +2,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  OutboundAudio,
   OutboundImage,
   OutboundVideo,
   SendMessageResult,
@@ -37,6 +38,12 @@ export interface XClient {
    * throw so the caller can post the temporary URL.
    */
   sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult>;
+  /**
+   * Attach an mp3. Encrypted Chat (`g…`) reuses `encryptStream` and
+   * `POST /2/chat/media/upload`, then sets `media_type` 4 (audio).
+   * Classic group DMs throw; TTS has no temporary URL to post instead.
+   */
+  sendAudio(conversationId: string, audio: OutboundAudio): Promise<SendMessageResult>;
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult>;
   deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult>;
 }

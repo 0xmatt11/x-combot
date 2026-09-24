@@ -129,6 +129,24 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!video a boat")).toBeUndefined();
   });
 
+  it("parses !voice and keeps the text, including a leading voice id", () => {
+    expect(parseCommand("!voice hello from the group")).toEqual({
+      name: "voice",
+      prompt: "hello from the group",
+    });
+    expect(parseCommand("  /VOICE   eve hello there  ")).toEqual({
+      name: "voice",
+      prompt: "eve hello there",
+    });
+    expect(parseCommand("!voice --voice=ara hello")).toEqual({
+      name: "voice",
+      prompt: "--voice=ara hello",
+    });
+    expect(parseCommand("!voice")).toEqual({ name: "voice", prompt: "" });
+    expect(parseCommand("!voice   ")).toEqual({ name: "voice", prompt: "" });
+    expect(parseUnknownBang("!voice hello")).toBeUndefined();
+  });
+
   it("parses !ass and !booty as the same command shape with no custom query", () => {
     expect(parseCommand("!ass")).toEqual({ name: "ass" });
     expect(parseCommand("!ASS")).toEqual({ name: "ass" });

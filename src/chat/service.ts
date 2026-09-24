@@ -4,6 +4,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  OutboundAudio,
   OutboundImage,
   OutboundVideo,
   SendMessageResult,
@@ -12,6 +13,7 @@ import { logDecryptErrors } from "./decrypt-log.js";
 import { isChatGroupId, watermarkKey } from "./ids.js";
 import { groupIdsFromInboxPage } from "./listen.js";
 import {
+  CHAT_MEDIA_TYPE_AUDIO,
   CHAT_MEDIA_TYPE_VIDEO,
   type ChatCipher,
   type ChatMediaAttachment,
@@ -205,13 +207,39 @@ export class ChatService {
   }
 
   /**
+   * Inline Chat audio. Same encrypt-and-upload path as `sendVideo`, with
+   * `media_type` 4 so clients treat the mp3 as audio (chat-xdk `MediaType::Audio`).
+   * Width and height are required by the attachment descriptor; audio has no frame,
+   * so they are 1. `duration_millis` is an estimate from the default 128 kbps MP3.
+   * Throws on failure. There is no temporary URL to post instead.
+   */
+  async sendAudio(conversationId: string, audio: OutboundAudio): Promise<SendMessageResult> {
+    const bytes = audio.bytes;
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error("No audio bytes to attach to Chat.");
+    }
+    const duration = positiveDuration(audio.durationMillis) ?? 1;
+    return this.sendChatMedia(conversationId, bytes, {
+      width: 1,
+      height: 1,
+      filename: "voice.mp3",
+      mediaType: CHAT_MEDIA_TYPE_AUDIO,
+      durationMillis: duration,
+    });
+  }
+
+  /**
    * encryptStream, upload the ciphertext, then send an inline media attachment.
    * `mediaType` omitted means an image. Video passes `CHAT_MEDIA_TYPE_VIDEO`.
+   * Audio passes `CHAT_MEDIA_TYPE_AUDIO`.
    */
   private async sendChatMedia(
     conversationId: string,
     bytes: Uint8Array,
-    attachment: Pick<ChatMediaAttachment, "width" | "height" | "filename" | "mediaType">,
+    attachment: Pick<
+      ChatMediaAttachment,
+      "width" | "height" | "filename" | "mediaType" | "durationMillis"
+    >,
   ): Promise<SendMessageResult> {
     const latest = this.conversationKeys.get(conversationId);
     if (!latest) {
@@ -224,7 +252,7 @@ export class ChatService {
       throw new Error("Chat media encryption produced empty ciphertext.");
     }
     const mediaHashKey = await this.http.uploadChatMedia(conversationId, ciphertext);
-    const label = attachment.mediaType === CHAT_MEDIA_TYPE_VIDEO ? "video" : "image";
+    const label = mediaLabel(attachment.mediaType);
     let payload;
     try {
       payload = this.cipher.encryptMessage(conversationId, "", {
@@ -238,6 +266,7 @@ export class ChatService {
             filesizeBytes: bytes.byteLength,
             filename: attachment.filename,
             ...(attachment.mediaType !== undefined ? { mediaType: attachment.mediaType } : {}),
+            ...(attachment.durationMillis !== undefined ? { durationMillis: attachment.durationMillis } : {}),
           },
         ],
       });
@@ -587,6 +616,17 @@ async function inspectChatImage(
     // Dimensions are optional. Upload still proceeds with the caller mime.
   }
   return { width, height, filename: `image.${extensionForMime(mime)}` };
+}
+
+function mediaLabel(mediaType: number | undefined): string {
+  if (mediaType === CHAT_MEDIA_TYPE_VIDEO) return "video";
+  if (mediaType === CHAT_MEDIA_TYPE_AUDIO) return "audio";
+  return "image";
+}
+
+function positiveDuration(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) return undefined;
+  return Math.round(value);
 }
 
 function positiveEven(value: number | undefined): number | undefined {

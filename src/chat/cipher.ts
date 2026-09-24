@@ -60,7 +60,8 @@ export interface DecryptEventsResult {
 
 /**
  * Inline Chat media. `mediaType` omitted (or `1`) renders as a photo.
- * Do not set a file/document type.
+ * chat-xdk `MediaType`: 1 image, 2 gif, 3 video, 4 audio, 5 file, 6 svg.
+ * Voice notes use 4. Do not set 5 (file); clients treat that as a download.
  */
 export interface ChatMediaAttachment {
   mediaHashKey: string;
@@ -69,12 +70,16 @@ export interface ChatMediaAttachment {
   /** Plaintext media size in bytes. */
   filesizeBytes: number;
   filename: string;
-  /** Omit for an inline image. `1` image, `2` gif, `3` video. */
+  /** Omit for an inline image. `1` image, `2` gif, `3` video, `4` audio. */
   mediaType?: number;
+  /** Playback length. chat-xdk forwards this as `duration_millis`. */
+  durationMillis?: number;
 }
 
 /** `media_type` for an inline Chat video. Images omit this field. */
 export const CHAT_MEDIA_TYPE_VIDEO = 3;
+/** `media_type` for an inline Chat audio clip (chat-xdk `MediaType::Audio`). */
+export const CHAT_MEDIA_TYPE_AUDIO = 4;
 
 export interface EncryptMessageOptions {
   conversationKey?: Uint8Array;
