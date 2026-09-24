@@ -675,7 +675,7 @@ describe("Chat transport into the moderation engine", () => {
     await poller.pollOnce();
 
     const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
-    const intake = new ChatActivityIntake(service, engine, [GROUP]);
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
     await intake.handle({
       data: {
         event_type: "chat.received",

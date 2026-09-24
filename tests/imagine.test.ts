@@ -12,8 +12,8 @@ import {
   IMAGINE_EMPTY_MESSAGE,
   IMAGINE_FAILED_MESSAGE,
   IMAGINE_MODERATED_INTRO,
-  IMAGINE_PROMPT_MAX_CHARS,
   IMAGINE_SUGGESTION_COUNT,
+  IMAGINE_TOO_LONG_MESSAGE,
   IMAGINE_SUGGESTION_TIMEOUT_MS,
   ImagineError,
   isImagineModerationError,
@@ -189,20 +189,14 @@ describe("Imagine prompts", () => {
     expect(adultImaginePrompt("boobs", () => 0)).not.toBe(adultImaginePrompt("boobs", () => 0.5));
   });
 
-  it("trims a user prompt, caps the length, and refuses minor wording", () => {
+  it("trims a user prompt, keeps long text, and refuses minor wording", () => {
+    const longPrompt = "a".repeat(2000);
     expect(normalizeImaginePrompt("  a neon cat in a cyberpunk alley  ")).toEqual({
       ok: true,
       prompt: "a neon cat in a cyberpunk alley",
     });
     expect(normalizeImaginePrompt("   ")).toEqual({ ok: false, reason: "empty" });
-    expect(normalizeImaginePrompt("a".repeat(IMAGINE_PROMPT_MAX_CHARS))).toEqual({
-      ok: true,
-      prompt: "a".repeat(IMAGINE_PROMPT_MAX_CHARS),
-    });
-    expect(normalizeImaginePrompt("a".repeat(IMAGINE_PROMPT_MAX_CHARS + 1))).toEqual({
-      ok: false,
-      reason: "too_long",
-    });
+    expect(normalizeImaginePrompt(longPrompt)).toEqual({ ok: true, prompt: longPrompt });
     expect(normalizeImaginePrompt("teen portrait")).toEqual({ ok: false, reason: "refused" });
     expect(IMAGINE_EMPTY_MESSAGE).toMatch(/!imagine a neon cat in a cyberpunk alley/);
   });
@@ -329,6 +323,33 @@ describe("Imagine HTTP client", () => {
     expect(imagineError.userMessage).toBe(IMAGINE_FAILED_MESSAGE);
     expect(imagineError.userMessage).not.toMatch(/cost_ticks|overloaded/);
     expect(isImagineModerationError(new Error("socket hang up"))).toBe(false);
+  });
+
+  it("reports an API length rejection without imposing a local character cap", async () => {
+    const client = createImagineClient({
+      apiKey: "test-key",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            code: "imagine:prompt-too-long",
+            error: "Prompt exceeds the maximum length.",
+            cost_ticks: 1,
+          }),
+          { status: 400 },
+        ),
+    });
+    const error = await client.generate("a".repeat(2000)).then(
+      () => {
+        throw new Error("expected Imagine to fail");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ImagineError);
+    const imagineError = error as ImagineError;
+    expect(imagineError.kind).toBe("failed");
+    expect(imagineError.userMessage).toBe(IMAGINE_TOO_LONG_MESSAGE);
+    expect(imagineError.userMessage).not.toMatch(/800|cost_ticks/);
+    expect(isImagineModerationError(imagineError)).toBe(false);
   });
 });
 
@@ -641,22 +662,36 @@ describe("!imagine command", () => {
     expect(actions.replies).toEqual(["https://imgen.x.ai/user.jpg"]);
   });
 
-  it("rejects an empty prompt, a too-long prompt, minor wording, and a missing key", async () => {
+  it("rejects an empty prompt, minor wording, and a missing key, and sends a long prompt", async () => {
+    const longPrompt = "a".repeat(2000);
     const { engine, client, imagine } = setup();
     await engine.processEvent(message({ id: "empty", text: "!imagine" }));
     await engine.processEvent(message({ id: "blank", text: "!imagine   " }));
-    await engine.processEvent(message({ id: "long", text: `!imagine ${"a".repeat(IMAGINE_PROMPT_MAX_CHARS + 1)}` }));
+    await engine.processEvent(message({ id: "long", text: `!imagine ${longPrompt}` }));
     await engine.processEvent(message({ id: "teen", text: "!imagine teen portrait" }));
-    expect(imagine.prompts).toHaveLength(0);
+    expect(imagine.prompts).toEqual([longPrompt]);
     const text = client.sent.map((row) => row.text).join("\n");
     expect(text).toMatch(/!imagine a neon cat in a cyberpunk alley/);
-    expect(text).toMatch(/too long/i);
+    expect(text).not.toMatch(/too long/i);
     expect(text).toMatch(/not allowed/);
     expect(text).not.toMatch(/teen/);
 
     const missing = setup({ imagine: false });
     await missing.engine.processEvent(message({ id: "nokey", text: "!imagine a neon cat" }));
     expect(missing.client.sent[0]?.text).toMatch(/XAI_API_KEY/);
+  });
+
+  it("tells the chat when the API rejects a prompt for length", async () => {
+    const { engine, client, imagine } = setup({
+      generateError: new ImagineError(
+        'Imagine HTTP 400: {"code":"imagine:prompt-too-long","error":"Prompt exceeds the maximum length.","cost_ticks":1}',
+        IMAGINE_TOO_LONG_MESSAGE,
+      ),
+    });
+    await engine.processEvent(message({ id: "api-long", text: `!imagine ${"b".repeat(2000)}` }));
+    expect(imagine.prompts[0]).toHaveLength(2000);
+    expect(client.images).toHaveLength(0);
+    expect(client.sent.map((row) => row.text)).toEqual([IMAGINE_TOO_LONG_MESSAGE]);
   });
 
   it("is listed in the default help text", () => {

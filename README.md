@@ -360,7 +360,7 @@ A missing key on `serpapi` or `bing` makes the command say so and does not call 
 
 It needs the same xAI key as above. With no key the bot says image generation needs `XAI_API_KEY`. The image has no caption. The temporary URL is downloaded and uploaded as an inline photo (classic DM `dm_image`, encrypted Chat photo). If that upload fails and a URL exists, the bot posts the URL. If Imagine blocks the image for content moderation, the bot says so in the same chat and suggests five softer prompts (from the chat model when LLM replies are enabled, otherwise a local rewrite). Other generation failures say to try again. `!imagine` does not fall back to web search. `!boobs`, `!ass`, and `!booty` use that same moderation reply and skip search.
 
-A blank `!imagine` replies with a one-line example. Prompts longer than 800 characters are refused. Prompts that mention minors are refused and are not sent to the API. A result whose URL or byte hash matches one of the last 8 images in that conversation is generated once more; a second repeat fails the command.
+A blank `!imagine` replies with a one-line example. Prompts are trimmed and sent as written; this bot does not cap their length. If the Imagine API rejects a prompt for length, the bot says it is too long. Prompts that mention minors are refused and are not sent to the API. A result whose URL or byte hash matches one of the last 8 images in that conversation is generated once more; a second repeat fails the command.
 
 ## LLM replies
 

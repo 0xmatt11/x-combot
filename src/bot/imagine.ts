@@ -10,11 +10,11 @@ import { containsBannedAgeTerm, containsGenitalTerm, redactSecrets } from "./adu
 
 export const IMAGINE_API_BASE = "https://api.x.ai/v1";
 export const DEFAULT_IMAGINE_MODEL = "grok-imagine-image-quality";
-export const IMAGINE_PROMPT_MAX_CHARS = 800;
 
 export const IMAGINE_EMPTY_MESSAGE =
   "Give !imagine a prompt. Example: !imagine a neon cat in a cyberpunk alley";
-export const IMAGINE_TOO_LONG_MESSAGE = `That prompt is too long. Keep it under ${IMAGINE_PROMPT_MAX_CHARS} characters.`;
+/** Shown only when the Imagine API itself rejects a prompt for length. */
+export const IMAGINE_TOO_LONG_MESSAGE = "That prompt is too long for image generation. Try a shorter one.";
 export const IMAGINE_UNAVAILABLE_MESSAGE = "Image generation needs XAI_API_KEY.";
 export const IMAGINE_FAILED_MESSAGE = "Image generation failed. Try again later.";
 export const IMAGINE_REFUSED_MESSAGE = "Refused. That prompt is not allowed.";
@@ -190,22 +190,21 @@ export function adultImaginePrompt(
   return `${base} ${variant} Unique framing ${framing}.`;
 }
 
-export function imaginePromptRejection(reason: "empty" | "too_long" | "refused"): string {
+export function imaginePromptRejection(reason: "empty" | "refused"): string {
   if (reason === "empty") return IMAGINE_EMPTY_MESSAGE;
-  if (reason === "too_long") return IMAGINE_TOO_LONG_MESSAGE;
   return IMAGINE_REFUSED_MESSAGE;
 }
 
 /**
  * Trim a `!imagine` prompt. The text is otherwise sent as written.
  * Minor-related wording is refused and is not sent to the API.
+ * Length is not capped here; the Imagine API applies its own limit.
  */
 export function normalizeImaginePrompt(
   raw: string,
-): { ok: true; prompt: string } | { ok: false; reason: "empty" | "too_long" | "refused" } {
+): { ok: true; prompt: string } | { ok: false; reason: "empty" | "refused" } {
   const prompt = raw.trim();
   if (!prompt) return { ok: false, reason: "empty" };
-  if (prompt.length > IMAGINE_PROMPT_MAX_CHARS) return { ok: false, reason: "too_long" };
   if (containsBannedAgeTerm(prompt)) return { ok: false, reason: "refused" };
   return { ok: true, prompt };
 }
@@ -242,7 +241,7 @@ export async function suggestSofterImaginePrompts(
       complete,
       [
         { role: "system", content: SUGGESTION_SYSTEM },
-        { role: "user", content: prompt.slice(0, IMAGINE_PROMPT_MAX_CHARS) },
+        { role: "user", content: prompt },
       ],
       IMAGINE_SUGGESTION_TIMEOUT_MS,
     );
@@ -426,6 +425,9 @@ function imagineHttpError(status: number, text: string): ImagineError {
   if (bodyIsModerated(text)) {
     return new ImagineError(message, IMAGINE_MODERATED_INTRO, "moderated");
   }
+  if (bodyIsTooLong(text)) {
+    return new ImagineError(message, IMAGINE_TOO_LONG_MESSAGE);
+  }
   return new ImagineError(message);
 }
 
@@ -454,6 +456,26 @@ function readImagineErrorBody(text: string): { code?: string; error?: string } {
   } catch {
     return {};
   }
+}
+
+function bodyIsTooLong(text: string): boolean {
+  const body = readImagineErrorBody(text);
+  const structured = `${body.code ?? ""} ${body.error ?? ""}`;
+  if (body.code || body.error) return lengthSignal(structured);
+  return lengthSignal(text);
+}
+
+function lengthSignal(text: string): boolean {
+  const haystack = text.toLowerCase();
+  return (
+    haystack.includes("prompt-too-long") ||
+    haystack.includes("prompt_too_long") ||
+    haystack.includes("too long") ||
+    haystack.includes("maximum length") ||
+    haystack.includes("max length") ||
+    haystack.includes("character limit") ||
+    haystack.includes("too many characters")
+  );
 }
 
 function moderationSignal(text: string): boolean {
