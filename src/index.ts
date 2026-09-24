@@ -22,6 +22,7 @@ import {
   DEFAULT_VIDEO_RESOLUTION,
   fetchGeneratedVideo,
 } from "./bot/video.js";
+import { createVoiceClient, DEFAULT_VOICE_ID, DEFAULT_VOICE_LANGUAGE } from "./bot/voice.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
 import { startActivityStream } from "./chat/activity-stream.js";
 import {
@@ -101,7 +102,7 @@ async function main(): Promise<void> {
     : undefined;
   if (imageChoice.imagineKeyMissing) {
     log.warn(
-      "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine and !video stay off until XAI_API_KEY is set (or the grok LLM key stack).",
+      "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine, !video, and !voice stay off until XAI_API_KEY is set (or the grok LLM key stack).",
     );
   }
   if (defaults.boobs?.enabled) {
@@ -141,6 +142,18 @@ async function main(): Promise<void> {
     log.info(
       `!video enabled (model=${videoModel}, duration=${videoDuration}s, aspect=${videoAspect}, resolution=${videoResolution}).`,
     );
+  }
+  const voiceId = env.voiceTtsVoice ?? DEFAULT_VOICE_ID;
+  const voiceLanguage = env.voiceTtsLanguage ?? DEFAULT_VOICE_LANGUAGE;
+  const voice = imagineKey
+    ? createVoiceClient({
+        apiKey: imagineKey,
+        voiceId,
+        language: voiceLanguage,
+      })
+    : undefined;
+  if (voice) {
+    log.info(`!voice enabled (voice=${voiceId}, language=${voiceLanguage}).`);
   }
 
   const llmClient = buildLlmClient(env, defaults);
@@ -182,6 +195,7 @@ async function main(): Promise<void> {
       imagine,
       video,
       fetchVideo: fetchGeneratedVideo,
+      voice,
       adultImageProvider: imageChoice.provider,
       adultVision: llmClient?.completeVision
         ? createAdultVisionJudge({

@@ -59,6 +59,17 @@ import {
   type VideoGenerator,
 } from "./video.js";
 import {
+  parseVoiceRequest,
+  VOICE_ATTACH_FAILED_MESSAGE,
+  VOICE_CHAT_REQUIRED_MESSAGE,
+  VOICE_FAILED_MESSAGE,
+  VOICE_UNAVAILABLE_MESSAGE,
+  voicePromptRejection,
+  VoiceError,
+  type SpokenAudio,
+  type VoiceGenerator,
+} from "./voice.js";
+import {
   createRecentImageMemory,
   imageContentHash,
   type RecentImageMemory,
@@ -159,6 +170,8 @@ export interface EngineDeps {
   video?: VideoGenerator;
   /** Download a temporary mp4 for Chat upload. Absent means post the URL. */
   fetchVideo?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
+  /** xAI text-to-speech for `!voice`. Same key as `imagine`. */
+  voice?: VoiceGenerator;
   /**
    * Adult commands only. Unset means Imagine when `imagine` is set, otherwise search.
    * `!imagine` always uses the Imagine client.
@@ -1051,6 +1064,9 @@ export class ModerationEngine {
       case "video":
         await this.handleVideo(event, command.prompt, actions);
         return;
+      case "voice":
+        await this.handleVoice(event, command.prompt, actions);
+        return;
       case "dice":
         await this.reply(
           conversationId,
@@ -1717,6 +1733,56 @@ export class ModerationEngine {
     }
     await this.reply(conversationId, formatVideoReadyMessage(video.url), actions);
     log.info(`!video posted video link conversation=${conversationId} host=${imageHost(video.url)}`);
+  }
+
+  /**
+   * Synthesize, then post one audio attachment. TTS is usually a few seconds,
+   * so there is no separate "Speaking…" ack. Classic group DMs cannot attach
+   * audio and the API returns bytes, not a URL, so they get one short line
+   * and the API is not called.
+   */
+  private async handleVoice(event: DmEvent, prompt: string, actions: EngineActions): Promise<void> {
+    const conversationId = event.conversationId;
+    const voice = this.deps.voice;
+    const normalized = parseVoiceRequest(prompt, voice?.defaultVoice);
+    if (!normalized.ok) {
+      await this.reply(conversationId, voicePromptRejection(normalized.reason), actions);
+      return;
+    }
+    if (!voice) {
+      await this.reply(conversationId, VOICE_UNAVAILABLE_MESSAGE, actions);
+      return;
+    }
+    if (!isChatGroupId(conversationId)) {
+      await this.reply(conversationId, VOICE_CHAT_REQUIRED_MESSAGE, actions);
+      log.info(`!voice needs encrypted Chat conversation=${conversationId}`);
+      return;
+    }
+    let spoken: SpokenAudio;
+    try {
+      spoken = await voice.synthesize(normalized.text, normalized.voiceId);
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : "voice failed");
+      log.warn(`!voice failed conversation=${conversationId} voice=${normalized.voiceId}: ${detail}`);
+      const userMessage = error instanceof VoiceError ? error.userMessage : VOICE_FAILED_MESSAGE;
+      await this.reply(conversationId, userMessage, actions);
+      return;
+    }
+    try {
+      await this.client.sendAudio(conversationId, {
+        bytes: spoken.bytes,
+        mimeType: spoken.mimeType,
+        durationMillis: spoken.durationMillis,
+        voiceId: spoken.voiceId,
+      });
+      log.info(
+        `!voice posted audio conversation=${conversationId} voice=${spoken.voiceId} bytes=${spoken.bytes.byteLength}`,
+      );
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : "audio attach failed");
+      log.warn(`!voice attach failed conversation=${conversationId} voice=${spoken.voiceId}: ${detail}`);
+      await this.reply(conversationId, VOICE_ATTACH_FAILED_MESSAGE, actions);
+    }
   }
 
   private async replyVideoFailure(

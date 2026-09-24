@@ -144,6 +144,83 @@ describe("chat-xdk WASM boundary", () => {
     expect(JSON.stringify(seen[0])).not.toContain("media_type");
   });
 
+  it("passes media_type 4 and duration_millis for an audio attachment", () => {
+    const seen: unknown[] = [];
+    const inner = {
+      encryptMessage(params: unknown) {
+        seen.push(params);
+        return { messageId: "m", encryptedContent: "e", encodedEventSignature: "s" };
+      },
+      encryptStream(plaintext: Uint8Array) {
+        return plaintext;
+      },
+      getPublicKeys() {
+        return { identity: "", signing: "" };
+      },
+    } as unknown as XdkLike;
+    const cipher = wrapCipher(inner);
+    cipher.encryptMessage("g1", "", {
+      conversationKey: new Uint8Array(32).fill(3),
+      conversationKeyVersion: "4",
+      attachments: [
+        {
+          mediaHashKey: "hash-audio",
+          width: 1,
+          height: 1,
+          filesizeBytes: 8,
+          filename: "voice.mp3",
+          mediaType: 4,
+          durationMillis: 1000,
+        },
+      ],
+    });
+    expect(seen[0]).toEqual({
+      conversationId: "g1",
+      text: "",
+      conversationKey: new Uint8Array(32).fill(3),
+      conversationKeyVersion: "4",
+      attachments: [
+        {
+          attachment_type: "media",
+          media_hash_key: "hash-audio",
+          width: 1,
+          height: 1,
+          filesize_bytes: 8,
+          filename: "voice.mp3",
+          media_type: 4,
+          duration_millis: 1000,
+        },
+      ],
+    });
+  });
+
+  it("accepts media_type 4 on the real chat-xdk cipher", async () => {
+    const cipher = await openFixtureChat();
+    const result = cipher.decryptEvents([vectors.event_key_change_b64, vectors.event_message_b64]);
+    const version = result.conversationKeys?.latestVersion;
+    const key = version ? result.conversationKeys?.keys[version] : undefined;
+    expect(key?.byteLength).toBe(32);
+    const payload = cipher.encryptMessage(vectors.event_conversation_id, "", {
+      conversationKey: key,
+      conversationKeyVersion: version!,
+      attachments: [
+        {
+          mediaHashKey: "hash-audio",
+          width: 1,
+          height: 1,
+          filesizeBytes: 4,
+          filename: "voice.mp3",
+          mediaType: 4,
+          durationMillis: 1000,
+        },
+      ],
+    });
+    expect(payload.encryptedContent).toBeTruthy();
+    expect(payload.encodedEventSignature).toBeTruthy();
+    expect(payload.encryptedContent).not.toContain("voice.mp3");
+    expect(payload.encryptedContent).not.toContain("hash-audio");
+  });
+
   it("keeps a validated reply sender and drops a forged preview", async () => {
     const cipher = await openFixtureChat();
     const valid = cipher.decryptEvents([

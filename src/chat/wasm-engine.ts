@@ -47,6 +47,7 @@ export interface XdkLike {
       filesize_bytes: number;
       filename: string;
       media_type?: number;
+      duration_millis?: number;
     }>;
   }): SendPayload & {
     encodedEventSignature?: string;
@@ -161,6 +162,7 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
           filesize_bytes: number;
           filename: string;
           media_type?: number;
+          duration_millis?: number;
         } = {
           attachment_type: "media",
           media_hash_key: item.mediaHashKey,
@@ -171,6 +173,7 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
         };
         // Omitted media_type defaults to image (inline photo, not a file).
         if (item.mediaType !== undefined) descriptor.media_type = item.mediaType;
+        if (item.durationMillis !== undefined) descriptor.duration_millis = item.durationMillis;
         return descriptor;
       });
       const payload = inner.encryptMessage({

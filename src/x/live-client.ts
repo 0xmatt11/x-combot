@@ -8,6 +8,7 @@ import type {
   DeleteResult,
   DmEvent,
   Mention,
+  OutboundAudio,
   OutboundImage,
   OutboundVideo,
   SendMessageResult,
@@ -211,6 +212,14 @@ export class LiveXClient implements XClient {
    */
   async sendVideo(_conversationId: string, _video: OutboundVideo): Promise<SendMessageResult> {
     throw new Error("Classic group DMs cannot attach an mp4.");
+  }
+
+  /**
+   * Classic group DMs upload `dm_image` / `dm_gif` only. An mp3 is not attached
+   * here. `!voice` tells the group that encrypted Chat is required.
+   */
+  async sendAudio(_conversationId: string, _audio: OutboundAudio): Promise<SendMessageResult> {
+    throw new Error("Classic group DMs cannot attach audio.");
   }
 
   private async uploadDmImage(

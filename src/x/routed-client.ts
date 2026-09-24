@@ -4,6 +4,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  OutboundAudio,
   OutboundImage,
   OutboundVideo,
   SendMessageResult,
@@ -80,6 +81,18 @@ export class RoutedXClient implements XClient {
       );
     }
     return this.dm.sendVideo(conversationId, video);
+  }
+
+  async sendAudio(conversationId: string, audio: OutboundAudio): Promise<SendMessageResult> {
+    if (this.chat && isChatGroupId(conversationId)) {
+      return this.chat.sendAudio(conversationId, audio);
+    }
+    if (isChatGroupId(conversationId)) {
+      throw new Error(
+        "Encrypted X Chat audio send needs Chat configured (encryptStream + POST /2/chat/media/upload + inline audio attachment).",
+      );
+    }
+    return this.dm.sendAudio(conversationId, audio);
   }
 
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult> {

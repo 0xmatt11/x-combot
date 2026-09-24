@@ -15,6 +15,7 @@ import {
   type VideoAspectRatio,
   type VideoResolution,
 } from "./bot/video.js";
+import { normalizeVoiceId, normalizeVoiceLanguage, type VoiceId } from "./bot/voice.js";
 import { parseChatConversationIds } from "./chat/ids.js";
 
 function required(name: string): string {
@@ -106,6 +107,22 @@ function optionalVideoAspectRatio(name: string): VideoAspectRatio | undefined {
     throw new Error(`${name} must be a video aspect ratio such as 16:9, 9:16, 1:1, or 4:3`);
   }
   return ratio;
+}
+
+function optionalVoiceId(name: string): VoiceId | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const voice = normalizeVoiceId(value);
+  if (!voice) throw new Error(`${name} must be one of eve, ara, rex, sal, leo`);
+  return voice;
+}
+
+function optionalVoiceLanguage(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const language = normalizeVoiceLanguage(value);
+  if (!language) throw new Error(`${name} must be a language code such as en, or auto`);
+  return language;
 }
 
 function optionalVideoResolution(name: string): VideoResolution | undefined {
@@ -221,6 +238,10 @@ export interface Env {
   videoImagineAspectRatio?: VideoAspectRatio;
   /** Video resolution. Unset uses `720p`. */
   videoImagineResolution?: VideoResolution;
+  /** TTS voice id. Unset uses `eve`. */
+  voiceTtsVoice?: VoiceId;
+  /** TTS language. Unset uses `en`. */
+  voiceTtsLanguage?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -280,5 +301,7 @@ export function loadEnv(requireOwner = true): Env {
     videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
     videoImagineResolution: optionalVideoResolution("VIDEO_IMAGINE_RESOLUTION"),
+    voiceTtsVoice: optionalVoiceId("VOICE_TTS_VOICE"),
+    voiceTtsLanguage: optionalVoiceLanguage("VOICE_TTS_LANGUAGE"),
   };
 }
