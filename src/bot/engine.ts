@@ -3422,11 +3422,12 @@ export class ModerationEngine {
   }
 
   /**
-   * Bang and slash commands (including `!auth` and unknown bangs) record the
-   * member's message and every group reply sent while this runs. The timer
-   * is in-process: a restart before it fires leaves those messages up.
-   * `@mention` wakes, welcomes, leaves, Noor relays, and troll/linkroast
-   * follow-ups are not commands and are not scheduled here.
+   * Every bang and slash command on the public !help list, plus admin
+   * commands, `!auth`, and unknown bangs. Records the member's message and
+   * every group reply sent while this runs, including !help itself.
+   * The timer is in-process: a restart before it fires leaves those messages up.
+   * `@mention` wakes, welcomes, leaves, Noor relays, and later troll or
+   * linkroast follow-ups are not the command reply and are not scheduled here.
    */
   private async runCommandCleanup(event: DmEvent, work: () => Promise<void>): Promise<void> {
     const scope: CommandCleanupScope = {

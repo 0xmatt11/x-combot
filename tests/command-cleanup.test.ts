@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMMAND_CLEANUP_MS, ModerationEngine } from "../src/bot/engine.js";
 import { loadDefaults } from "../src/config.js";
@@ -192,11 +193,46 @@ describe("command cleanup", () => {
     expect(client.deleted.filter((id) => id.startsWith("sent-")).length).toBeGreaterThanOrEqual(2);
   });
 
+  it("deletes the reply for every public !help command, including !help", async () => {
+    vi.useFakeTimers();
+    const { engine, client } = setup();
+    const commands = [
+      "!help",
+      "/help",
+      "!rules",
+      "!dice",
+      "!games",
+      "!troll @bob",
+      "!roast @bob",
+      "!xp",
+      "!ask what is up",
+      "!boobs",
+      "!imagine a red boat",
+    ];
+    for (const [index, text] of commands.entries()) {
+      const deletedBefore = client.deleted.length;
+      const sentBefore = client.sent.length;
+      const imagesBefore = client.images.length;
+      await engine.processEvent(message({ id: `pub-${index}`, text }));
+      const replied = client.sent.length > sentBefore || client.images.length > imagesBefore;
+      expect(replied, text).toBe(true);
+      await age(COMMAND_CLEANUP_MS);
+      const fresh = client.deleted.slice(deletedBefore);
+      expect(fresh.some((id) => id.startsWith("sent-") || id.startsWith("img-")), text).toBe(true);
+      expect(fresh, text).not.toContain(`pub-${index}`);
+    }
+  });
+
   it("is described in !help and the README", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(
       /Command messages and the bot's replies to them are deleted after 15 minutes when the API allows/,
     );
+    expect(loaded.help).toMatch(/every public command on this list, including !help/);
+    expect(loaded.help).toMatch(/not only admin commands/);
+    const readme = fs.readFileSync("README.md", "utf8");
+    expect(readme).toMatch(/every public command on the `!help` list, not only admin or mod commands/);
+    expect(readme).toMatch(/!help` itself/);
     expect(COMMAND_CLEANUP_MS).toBe(15 * 60 * 1000);
   });
 });
