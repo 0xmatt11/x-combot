@@ -3420,7 +3420,13 @@ export class ModerationEngine {
     this.commandCleanupTimers.add(timer);
   }
 
-  /** Deletes the member's command only. Never the bot's reply. */
+  /**
+   * Deletes the member's command only. Never the bot's reply.
+   * Chat delete lists that one sequence id. The reply is a separate message
+   * (`encryptReply` snapshots the parent into `replying_to_preview`), so
+   * removing the command leaves the reply text, media, and @mention in place.
+   * The quote strip can show the command as deleted.
+   */
   private async deleteCommandClutter(target: CommandCleanupTarget): Promise<void> {
     const actions: EngineActions = {
       replies: [],

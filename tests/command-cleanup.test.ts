@@ -256,11 +256,16 @@ describe("command cleanup", () => {
       /User command messages auto-delete after 15 minutes when the API allows/,
     );
     expect(loaded.help).toMatch(/every public command on this list, including !help/);
-    expect(loaded.help).toMatch(/Bot replies do not/);
+    expect(loaded.help).toMatch(/Bot replies stay/);
+    expect(loaded.help).toMatch(/Deleting your command leaves that reply up/);
+    expect(loaded.help).toMatch(/quote of your command can show that message as deleted/);
     const readme = fs.readFileSync("README.md", "utf8");
     expect(readme).toMatch(/User command messages auto-delete after 15 minutes when the API allows/);
-    expect(readme).toMatch(/Bot replies do not/);
+    expect(readme).toMatch(/Bot replies stay/);
     expect(readme).toMatch(/including `!help` itself/);
+    expect(readme).toMatch(/only that command's `sequence_id`/);
+    expect(readme).toMatch(/does not delete or hide that reply/);
+    expect(readme).toMatch(/quote strip on the reply can show the command as deleted/);
     expect(COMMAND_CLEANUP_MS).toBe(15 * 60 * 1000);
   });
 });

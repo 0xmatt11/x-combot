@@ -358,6 +358,7 @@ describe("chat-xdk WASM boundary", () => {
     const body = deleteMessagesBody(signature, cipher.signingPublicKey(), ["99"], true);
     expect(body.sequence_ids).toEqual(["99"]);
     expect(body.delete_message_action).toBe("delete_for_all");
+    expect(body).not.toHaveProperty("media_hash_keys");
     const signatures = body.action_signatures as { message_event_signature: { signature: string } }[];
     expect(signatures[0]?.message_event_signature.signature).toBeTruthy();
 

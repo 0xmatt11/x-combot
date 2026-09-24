@@ -178,6 +178,11 @@ export function sendMessageBody(
   return body;
 }
 
+/**
+ * Deletes only the given sequence ids.
+ * Omits `media_hash_keys`, so attached blobs are not wiped with the message.
+ * A reply that quotes one of these ids is a different message and is not removed.
+ */
 export function deleteMessagesBody(
   signature: ActionSignature,
   signingPublicKey: string,
