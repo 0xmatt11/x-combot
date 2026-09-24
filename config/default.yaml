@@ -24,6 +24,7 @@ rules: |
 help: |
   Public commands:
     !help — this message
+    !status — health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     !rules — group rules
     !boobs — chest / cleavage photo or clip (off unless enabled)
     !ass / !booty / !booties — butt photo or clip (same switch as !boobs)

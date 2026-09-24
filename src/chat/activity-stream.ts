@@ -6,6 +6,8 @@ export interface ActivityStreamDeps {
   nextToken: () => Promise<string>;
   open: (token: string, signal: AbortSignal) => Promise<Response>;
   onEvent: (body: unknown) => Promise<void>;
+  /** Connected vs retrying. Optional so a missing listener does not change the stream. */
+  onState?: (state: "ok" | "degraded", detail: string) => void;
 }
 
 /**
@@ -25,16 +27,19 @@ export function startActivityStream(deps: ActivityStreamDeps): { stop(): void } 
         const response = await deps.open(token, ac.signal);
         backoffMs = 1_000;
         log.info("Connected to GET /2/activity/stream");
+        deps.onState?.("ok", "stream");
         if (!response.body) {
           throw new Error("Activity stream returned no body");
         }
         await readActivityBody(response.body, deps.onEvent);
         if (stopped) return;
         log.warn("Activity stream ended; reconnecting");
+        deps.onState?.("degraded", "reconnecting");
       } catch (error) {
         if (stopped || ac.signal.aborted) return;
         const waitMs = nextPollDelayMs(backoffMs, error);
         log.warn(`Activity stream disconnected; retry in ${waitMs}ms`);
+        deps.onState?.("degraded", `retry ${Math.max(1, Math.ceil(waitMs / 1000))}s`);
         log.debug("Activity stream error", error);
         await sleep(waitMs, ac.signal);
         backoffMs = Math.min(Math.max(waitMs, backoffMs) * 2, 5 * 60_000);
