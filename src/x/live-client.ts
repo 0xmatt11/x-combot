@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { log } from "../log.js";
 import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
-import type { RawChatEventsPage } from "../chat/http.js";
+import type { RawChatConversationsPage, RawChatEventsPage } from "../chat/http.js";
 import type {
   DeleteHint,
   DeleteResult,
@@ -330,6 +330,23 @@ export class LiveXClient implements XClient {
       `/2/chat/conversations/${encodeURIComponent(conversationId)}/events`,
       { search },
     );
+  }
+
+  /**
+   * Inbox for the authenticated user (`GET /2/chat/conversations`).
+   * One page per call. Discovery paces pagination so a large inbox is not
+   * fetched in a tight loop. Group filtering happens in the caller.
+   */
+  async listChatConversations(params: {
+    maxResults?: number;
+    paginationToken?: string;
+  }): Promise<RawChatConversationsPage> {
+    const maxResults = params.maxResults ?? 50;
+    const search: Record<string, string> = {
+      max_results: String(Math.min(100, Math.max(1, maxResults))),
+    };
+    if (params.paginationToken) search.pagination_token = params.paginationToken;
+    return this.request<RawChatConversationsPage>("/2/chat/conversations", { search });
   }
 
   async getChatMemberIds(conversationId: string): Promise<string[]> {

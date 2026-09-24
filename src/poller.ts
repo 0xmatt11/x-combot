@@ -96,16 +96,18 @@ function readRetryAfterMs(error: unknown): number | undefined {
 }
 
 /**
- * Classic `GET /2/dm_events` is a separate quota from Chat. When the process
- * is configured only with encrypted Chat ids, skip it unless `DM_POLL=true`.
- * An explicit `DM_POLL=false` always skips, including when no Chat ids are set.
+ * Classic `GET /2/dm_events` is a separate quota from Chat. When encrypted Chat
+ * is active, skip classic DMs unless `DM_POLL=true`. An explicit `DM_POLL=false`
+ * always skips, including when Chat is off. Chat is active for an allowlist, for
+ * `CHAT_LISTEN=all`, or when a Chat identity exists and `CHAT_CONVERSATION_IDS`
+ * is empty (every encrypted group).
  */
 export function shouldPollClassicDms(options: {
-  chatConversationCount: number;
+  chatEnabled: boolean;
   dmPoll: boolean | undefined;
 }): boolean {
   if (options.dmPoll !== undefined) return options.dmPoll;
-  return options.chatConversationCount === 0;
+  return !options.chatEnabled;
 }
 
 export function collectNewEvents(eventsNewestFirst: DmEvent[], watermarkId: string): DmEvent[] {

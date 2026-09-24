@@ -14,6 +14,7 @@ export function logDecryptErrors(
   conversationId: string,
   errors: Record<string, string>,
   now = Date.now(),
+  options?: { firstSight?: boolean },
 ): void {
   const entries = Object.entries(errors);
   if (entries.length === 0) return;
@@ -29,8 +30,11 @@ export function logDecryptErrors(
     .map(([, message]) => message)
     .join(" | ");
   const extra = suppressed > 0 ? ` (${suppressed} similar error(s) suppressed)` : "";
+  const rotate = options?.firstSight
+    ? ` If this account joined ${conversationId} before its public key was registered, decrypt will keep failing until \`npm run chat:rotate -- ${conversationId} --confirm\` wraps the conversation key to this process.`
+    : "";
   log.warn(
-    `Chat decrypt reported ${entries.length} error(s) in ${conversationId}${extra}: ${sample}`,
+    `Chat decrypt reported ${entries.length} error(s) in ${conversationId}${extra}: ${sample}.${rotate}`,
   );
 }
 

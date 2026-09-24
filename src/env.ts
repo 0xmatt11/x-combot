@@ -49,6 +49,13 @@ function optionalActivityTransport(name: string): "stream" | "webhook" | "both" 
   throw new Error(`${name} must be stream, webhook, or both`);
 }
 
+function optionalChatListen(name: string): "all" | "allowlist" | "off" | undefined {
+  const value = optional(name)?.toLowerCase();
+  if (!value) return undefined;
+  if (value === "all" || value === "allowlist" || value === "off") return value;
+  throw new Error(`${name} must be all, allowlist, or off`);
+}
+
 function csv(name: string): string[] {
   const value = optional(name);
   if (!value) return [];
@@ -78,13 +85,20 @@ export interface Env {
   xaiApiKey?: string;
   llmBaseUrl?: string;
   llmModel?: string;
-  /** Encrypted X Chat group ids (`g` + digits). Empty keeps classic DM polling only. */
+  /**
+   * Encrypted X Chat group ids (`g` + digits). Empty listens to every encrypted
+   * group once a Chat identity exists. Non-empty is an allowlist override.
+   */
   chatConversationIds: string[];
+  /** Groups skipped even when listen mode is all. */
+  chatConversationDenyIds: string[];
+  /** Forces all / allowlist / off. Unset follows the allowlist and identity. */
+  chatListen?: "all" | "allowlist" | "off";
   chatKeysPath: string;
   /** Juicebox PIN. Used only when no local key file exists. Never commit this. */
   chatPin?: string;
   chatPollIntervalMs?: number;
-  /** When unset, classic DM polling is skipped if Chat conversation ids are set. */
+  /** When unset, classic DM polling is skipped while encrypted Chat is active. */
   dmPoll?: boolean;
   chatPollIdleMaxMs?: number;
   activityEnabled?: boolean;
@@ -136,6 +150,11 @@ export function loadEnv(requireOwner = true): Env {
     llmBaseUrl: optional("LLM_BASE_URL"),
     llmModel: optional("LLM_MODEL"),
     chatConversationIds: parseChatConversationIds(optional("CHAT_CONVERSATION_IDS")),
+    chatConversationDenyIds: parseChatConversationIds(
+      optional("CHAT_CONVERSATION_DENY_IDS"),
+      "CHAT_CONVERSATION_DENY_IDS",
+    ),
+    chatListen: optionalChatListen("CHAT_LISTEN"),
     chatKeysPath: path.resolve(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
     chatPin: optional("CHAT_PIN"),
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,

@@ -211,13 +211,13 @@ describe("Poller with LiveXClient backoff", () => {
 });
 
 describe("shouldPollClassicDms", () => {
-  it("skips classic DM polling when only Chat ids are configured", () => {
-    expect(shouldPollClassicDms({ chatConversationCount: 1, dmPoll: undefined })).toBe(false);
-    expect(shouldPollClassicDms({ chatConversationCount: 0, dmPoll: undefined })).toBe(true);
+  it("skips classic DM polling when encrypted Chat is active", () => {
+    expect(shouldPollClassicDms({ chatEnabled: true, dmPoll: undefined })).toBe(false);
+    expect(shouldPollClassicDms({ chatEnabled: false, dmPoll: undefined })).toBe(true);
   });
 
   it("lets DM_POLL override the Chat-only default", () => {
-    expect(shouldPollClassicDms({ chatConversationCount: 1, dmPoll: true })).toBe(true);
-    expect(shouldPollClassicDms({ chatConversationCount: 0, dmPoll: false })).toBe(false);
+    expect(shouldPollClassicDms({ chatEnabled: true, dmPoll: true })).toBe(true);
+    expect(shouldPollClassicDms({ chatEnabled: false, dmPoll: false })).toBe(false);
   });
 });
