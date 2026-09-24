@@ -318,6 +318,86 @@ describe("XP engine", () => {
     expect(client.sent.at(-1)?.text).toMatch(/XP is off/);
   });
 
+  it("names a Chat giver by @handle when the event only has a numeric sender id", async () => {
+    const giverId = "1712950172873809920";
+    const { engine, client, store } = setup();
+    client.addUser({ id: giverId, username: "matt", name: "Matt" });
+    await engine.processEvent(
+      message({
+        id: "plus-snow",
+        senderId: giverId,
+        sender: undefined,
+        text: "+",
+        replyTo: { senderId: bob.id, verified: true },
+      }),
+    );
+    const text = client.sent.at(-1)?.text ?? "";
+    expect(text).toBe("@matt gave @bob a level! (now level 1)");
+    expect(text).not.toContain(giverId);
+    expect(store.getUserXp(groupId, bob.id)).toMatchObject({ xp: 100, username: "bob" });
+  });
+
+  it("uses a display name, then someone, when a level giver has no @handle", async () => {
+    const namedId = "1712950172873809920";
+    const unknownId = "1712950172873809921";
+    const { engine, client } = setup({ level_grant_cooldown_ms: 0 });
+    client.addUser({ id: namedId, name: "Ada" });
+    await engine.processEvent(
+      message({
+        id: "plus-name",
+        senderId: namedId,
+        sender: undefined,
+        text: "+",
+        replyTo: { senderId: bob.id, verified: true },
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "plus-unknown",
+        senderId: unknownId,
+        sender: undefined,
+        text: "+",
+        replyTo: { senderId: alice.id, verified: true },
+      }),
+    );
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "Ada gave @bob a level! (now level 1)",
+      "someone gave @alice a level! (now level 1)",
+    ]);
+    expect(client.sent.some((row) => row.text.includes(namedId) || row.text.includes(unknownId))).toBe(
+      false,
+    );
+  });
+
+  it("announces a level up without printing the numeric sender id", async () => {
+    const senderId = "1712950172873809920";
+    const { engine, client, store } = setup({ xp_per_message: 100, cooldown_ms: 0 });
+    client.addUser({ id: senderId, username: "ape7458", name: "Jack Nefty" });
+    await engine.processEvent(
+      message({ id: "lvl", senderId, sender: undefined, text: "hello" }),
+    );
+    expect(client.sent.at(-1)?.text).toBe("@ape7458 leveled up to level 1!");
+    expect(client.sent.some((row) => row.text.includes(senderId))).toBe(false);
+    expect(store.getUserXp(groupId, senderId)).toMatchObject({ xp: 100, username: "ape7458" });
+  });
+
+  it("keeps a stored @handle on the leaderboard when the profile lookup fails", async () => {
+    const senderId = "1712950172873809920";
+    const { engine, client } = setup({ xp_per_message: 100, cooldown_ms: 0, leaderboard_size: 10 });
+    client.addUser({ id: senderId, username: "ape7458" });
+    await engine.processEvent(
+      message({ id: "lvl", senderId, sender: undefined, text: "hello" }),
+    );
+    client.getUserById = async () => {
+      throw new Error("rate limited");
+    };
+    await engine.processEvent(
+      message({ id: "top", senderId: alice.id, text: "!top" }),
+    );
+    expect(client.sent.at(-1)?.text).toBe("Top levels:\n1. @ape7458 — level 1 (100 XP)");
+    expect(client.sent.at(-1)?.text).not.toContain(senderId);
+  });
+
   it("mentions !xp in the default help text and loads the xp block", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!xp/);

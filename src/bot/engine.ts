@@ -16,7 +16,7 @@ import type {
   XUser,
 } from "../types.js";
 import { isChatGroupId } from "../chat/ids.js";
-import { displayName, isGroupConversation, type XClient } from "../x/client.js";
+import { displayName, isGroupConversation, isNumericUserId, type XClient } from "../x/client.js";
 import type { LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
@@ -126,6 +126,8 @@ export interface EngineDeps {
 
 export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
+  /** Users we have already resolved to a handle or display name. */
+  private readonly namedUsers = new Map<string, XUser>();
 
   constructor(
     private readonly store: Store,
@@ -274,7 +276,7 @@ export class ModerationEngine {
         }
         await this.reply(
           event.conversationId,
-          `Filtered a message from ${displayName(event.sender, senderId)} (matched: ${filterHit.matched}).`,
+          `Filtered a message from ${await this.chatLabel(event.sender, senderId, event.conversationId)} (matched: ${filterHit.matched}).`,
           actions,
         );
         if (filterHit.rule.warn) {
@@ -289,7 +291,7 @@ export class ModerationEngine {
         }
         await this.notifyAdmins(
           event.conversationId,
-          `Filter hit in ${event.conversationId}: ${displayName(event.sender, senderId)} / ${filterHit.matched}`,
+          `Filter hit in ${event.conversationId}: ${await this.chatLabel(event.sender, senderId, event.conversationId)} / ${filterHit.matched}`,
           actions,
         );
         return actions;
@@ -315,7 +317,7 @@ export class ModerationEngine {
         actions.muted = true;
         await this.reply(
           event.conversationId,
-          `${displayName(event.sender, senderId)} is flooding and has been soft-muted for ${Math.round(settings.floodMuteMs / 60000)} min. (X cannot kick users from group DMs.)`,
+          `${await this.chatLabel(event.sender, senderId, event.conversationId)} is flooding and has been soft-muted for ${Math.round(settings.floodMuteMs / 60000)} min. (X cannot kick users from group DMs.)`,
           actions,
         );
         if (settings.warnOnFlood) {
@@ -388,6 +390,7 @@ export class ModerationEngine {
     ) {
       return;
     }
+    const named = await this.resolveNamedUser(event.sender, senderId, event.conversationId);
     const current = this.store.getUserXp(event.conversationId, senderId);
     const next = applyXp(current.xp, gain);
     this.store.setXpActionAt(event.conversationId, senderId, kind, nowMs);
@@ -395,12 +398,12 @@ export class ModerationEngine {
       event.conversationId,
       senderId,
       next.xp,
-      event.sender?.username,
+      named.username,
     );
     if (!next.leveledUp) return;
     await this.reply(
       event.conversationId,
-      levelUpAnnouncement(displayName(event.sender, senderId), next.level),
+      levelUpAnnouncement(displayName(named), next.level),
       actions,
     );
   }
@@ -423,9 +426,10 @@ export class ModerationEngine {
       await this.reply(event.conversationId, selfLevelMessage(), actions);
       return;
     }
-    const targetUser = (await this.client.getUserById(targetId)) ?? { id: targetId };
-    const targetLabel = displayName(targetUser, targetId);
-    const giverLabel = displayName(event.sender, senderId);
+    const targetUser = await this.resolveNamedUser(undefined, targetId, event.conversationId);
+    const giverUser = await this.resolveNamedUser(event.sender, senderId, event.conversationId);
+    const targetLabel = displayName(targetUser);
+    const giverLabel = displayName(giverUser);
     const last = this.store.getLevelGrantAt(event.conversationId, senderId, targetId);
     if (
       last !== undefined &&
@@ -587,7 +591,7 @@ export class ModerationEngine {
         systemPrompt: settings.llmSystemPrompt,
         context: assembled,
         question,
-        askerLabel: displayName(event.sender, senderId),
+        askerLabel: await this.chatLabel(event.sender, senderId, conversationId),
         kind: request.kind,
       });
       const answer = await this.llmClient.complete(messages);
@@ -771,13 +775,60 @@ export class ModerationEngine {
   }
 
   private async resolveLeaver(user: XUser): Promise<XUser> {
-    if (user.username) return user;
-    try {
-      return (await this.client.getUserById(user.id)) ?? user;
-    } catch (error) {
-      log.warn(`Could not look up user ${user.id} for a leave announcement`, error);
-      return user;
+    return this.resolveNamedUser(user, user.id);
+  }
+
+  /**
+   * @handle or display name for a chat line. Looks the account up when the
+   * event only carried a numeric id (encrypted Chat does not expand users).
+   */
+  private async chatLabel(
+    user: XUser | undefined,
+    userId: string,
+    conversationId?: string,
+  ): Promise<string> {
+    const resolved = await this.resolveNamedUser(user, userId, conversationId);
+    return displayName(resolved);
+  }
+
+  private async resolveNamedUser(
+    user: XUser | undefined,
+    userId: string,
+    conversationId?: string,
+  ): Promise<XUser> {
+    const direct = namedUser(user, userId);
+    if (direct) {
+      this.namedUsers.set(userId, direct);
+      return direct;
     }
+    const cached = userId ? this.namedUsers.get(userId) : undefined;
+    if (cached) return cached;
+
+    if (userId) {
+      try {
+        const fetched = namedUser(await this.client.getUserById(userId), userId);
+        if (fetched) {
+          this.namedUsers.set(userId, fetched);
+          return fetched;
+        }
+      } catch (error) {
+        log.warn(`Could not look up user ${userId} for a chat label`, error);
+      }
+    }
+
+    if (conversationId && userId) {
+      const stored = this.store.getUserXp(conversationId, userId).username;
+      const fromStore = namedUser(
+        stored ? { id: userId, username: stored.replace(/^@/, "") } : undefined,
+        userId,
+      );
+      if (fromStore) {
+        this.namedUsers.set(userId, fromStore);
+        return fromStore;
+      }
+    }
+
+    return user?.id ? user : { id: userId };
   }
 
   private async handleJoin(
@@ -792,11 +843,8 @@ export class ModerationEngine {
         : event.participantIds.map((id) => ({ id }));
     for (const user of joiners) {
       if (user.id === this.config.botUserId) continue;
-      const text = renderTemplate(settings.welcomeText, {
-        username: user.username ?? user.id,
-        user_id: user.id,
-        name: user.name ?? user.username ?? user.id,
-      }).trim();
+      const resolved = await this.resolveNamedUser(user, user.id, event.conversationId);
+      const text = membershipText(settings.welcomeText, resolved);
       if (text) {
         await this.reply(event.conversationId, text, actions);
       }
@@ -872,7 +920,7 @@ export class ModerationEngine {
         const count = this.store.getWarnCount(conversationId, target.id);
         await this.reply(
           conversationId,
-          `${displayName(target, target.id)} has ${count}/${settings.warnLimit} warnings.`,
+          `${await this.chatLabel(target, target.id, conversationId)} has ${count}/${settings.warnLimit} warnings.`,
           actions,
         );
         return;
@@ -883,7 +931,7 @@ export class ModerationEngine {
         const count = this.store.removeWarn(conversationId, target.id);
         await this.reply(
           conversationId,
-          `Removed one warning from ${displayName(target, target.id)}. Now ${count}/${settings.warnLimit}.`,
+          `Removed one warning from ${await this.chatLabel(target, target.id, conversationId)}. Now ${count}/${settings.warnLimit}.`,
           actions,
         );
         return;
@@ -909,12 +957,12 @@ export class ModerationEngine {
         actions.muted = true;
         await this.reply(
           conversationId,
-          `X has no documented remove-participant API, so ${displayName(target, target.id)} was warned (${count}/${settings.warnLimit}) and soft-muted instead. Admins: remove them in the X app if needed.`,
+          `X has no documented remove-participant API, so ${await this.chatLabel(target, target.id, conversationId)} was warned (${count}/${settings.warnLimit}) and soft-muted instead. Admins: remove them in the X app if needed.`,
           actions,
         );
         await this.notifyAdmins(
           conversationId,
-          `Kick requested for ${displayName(target, target.id)} in ${conversationId} by ${senderId}. Soft-muted; no API kick.`,
+          `Kick requested for ${await this.chatLabel(target, target.id, conversationId)} in ${conversationId} by ${await this.chatLabel(event.sender, senderId, conversationId)}. Soft-muted; no API kick.`,
           actions,
         );
         return;
@@ -927,7 +975,7 @@ export class ModerationEngine {
         actions.muted = true;
         await this.reply(
           conversationId,
-          `${displayName(target, target.id)} is soft-muted for ${minutes} min (local ignore + delete attempts).`,
+          `${await this.chatLabel(target, target.id, conversationId)} is soft-muted for ${minutes} min (local ignore + delete attempts).`,
           actions,
         );
         return;
@@ -938,7 +986,7 @@ export class ModerationEngine {
         this.store.unmute(conversationId, target.id);
         await this.reply(
           conversationId,
-          `${displayName(target, target.id)} is no longer soft-muted.`,
+          `${await this.chatLabel(target, target.id, conversationId)} is no longer soft-muted.`,
           actions,
         );
         return;
@@ -1029,14 +1077,14 @@ export class ModerationEngine {
           this.store.addConversationAdmin(conversationId, target.id);
           await this.reply(
             conversationId,
-            `${displayName(target, target.id)} can now run mod commands in this group.`,
+            `${await this.chatLabel(target, target.id, conversationId)} can now run mod commands in this group.`,
             actions,
           );
         } else {
           this.store.removeConversationAdmin(conversationId, target.id);
           await this.reply(
             conversationId,
-            `${displayName(target, target.id)} was removed from this group's admin allowlist.`,
+            `${await this.chatLabel(target, target.id, conversationId)} was removed from this group's admin allowlist.`,
             actions,
           );
         }
@@ -1085,7 +1133,11 @@ export class ModerationEngine {
     const rank = this.store.xpRank(conversationId, userId);
     await this.reply(
       conversationId,
-      formatXpStatus({ label: displayName(user, userId), xp: row.xp, rank }),
+      formatXpStatus({
+        label: await this.chatLabel(user, userId, conversationId),
+        xp: row.xp,
+        rank,
+      }),
       actions,
     );
   }
@@ -1100,19 +1152,18 @@ export class ModerationEngine {
       return;
     }
     const rows = this.store.listXpLeaders(event.conversationId, settings.xpLeaderboardSize);
-    await this.reply(
-      event.conversationId,
-      formatLeaderboard(
-        rows.map((row) => ({
-          label: displayName(
-            row.username ? { id: row.userId, username: row.username } : { id: row.userId },
-            row.userId,
-          ),
-          xp: row.xp,
-        })),
-      ),
-      actions,
-    );
+    const labeled: { label: string; xp: number }[] = [];
+    for (const row of rows) {
+      labeled.push({
+        label: await this.chatLabel(
+          row.username ? { id: row.userId, username: row.username } : undefined,
+          row.userId,
+          event.conversationId,
+        ),
+        xp: row.xp,
+      });
+    }
+    await this.reply(event.conversationId, formatLeaderboard(labeled), actions);
   }
 
   private async handleAdultImage(
@@ -1439,7 +1490,7 @@ export class ModerationEngine {
   ): Promise<number> {
     const count = this.store.addWarn(event.conversationId, userId, adminId, reason);
     actions.warned = true;
-    const label = displayName(user ?? event.sender, userId);
+    const label = await this.chatLabel(user ?? event.sender, userId, event.conversationId);
     const reasonText = reason ? ` (${reason})` : "";
     await this.reply(
       event.conversationId,
@@ -1624,12 +1675,34 @@ export function eventReplayKeys(
   return keys;
 }
 
-/** `{username}` is the @handle when known, otherwise the numeric id. */
+/** `{username}` is the @handle when known, otherwise the display name or "someone". */
 export function leaveAnnouncementText(user: XUser, template = DEFAULT_LEAVE_TEXT): string {
-  return renderTemplate(template, {
-    username: user.username ?? user.id,
+  return membershipText(template, user);
+}
+
+/** A user we can name in chat. Numeric ids stored in username/name are ignored. */
+function namedUser(user: XUser | undefined, userId: string): XUser | undefined {
+  if (!user) return undefined;
+  const username = user.username && !isNumericUserId(user.username) ? user.username : undefined;
+  const name = user.name && !isNumericUserId(user.name) ? user.name : undefined;
+  if (!username && !name) return undefined;
+  return { id: user.id || userId, username, name };
+}
+
+/**
+ * Welcome and leave templates. `@{username}` becomes `@handle` when we know
+ * one, and the display name or "someone" when we do not — never `@<numeric id>`.
+ */
+function membershipText(template: string, user: XUser): string {
+  const label = displayName(user);
+  const handle = user.username && !isNumericUserId(user.username) ? user.username : undefined;
+  const name = user.name && !isNumericUserId(user.name) ? user.name : undefined;
+  const atHandle = handle ? `@${handle}` : label;
+  const rewritten = template.replace(/@\{username\}/g, atHandle);
+  return renderTemplate(rewritten, {
+    username: handle ?? (label.startsWith("@") ? label.slice(1) : label),
     user_id: user.id,
-    name: user.name ?? user.username ?? user.id,
+    name: name ?? handle ?? "someone",
   }).trim();
 }
 

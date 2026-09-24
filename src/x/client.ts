@@ -55,9 +55,24 @@ export function isGroupConversation(conversationId: string): boolean {
   return !conversationId.includes("-");
 }
 
+/** Decimal X user ids (snowflakes). These identify an account; they are not a chat label. */
+export function isNumericUserId(value: string | undefined): boolean {
+  return typeof value === "string" && /^\d+$/.test(value);
+}
+
+/**
+ * Label for a person in chat: `@handle`, then display name, then "someone".
+ * A numeric API user id is never returned, including when it is the only fallback.
+ */
 export function displayName(user: XUser | undefined, fallbackId?: string): string {
-  if (user?.username) return `@${user.username}`;
-  if (user?.name) return user.name;
-  if (fallbackId) return fallbackId;
+  if (user?.username && !isNumericUserId(user.username)) return `@${user.username}`;
+  if (user?.name && !isNumericUserId(user.name)) return user.name;
+  if (
+    fallbackId &&
+    !isNumericUserId(fallbackId) &&
+    fallbackId !== user?.id
+  ) {
+    return fallbackId;
+  }
   return "someone";
 }
