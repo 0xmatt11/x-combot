@@ -17,7 +17,7 @@ import type {
 } from "../types.js";
 import { isChatGroupId } from "../chat/ids.js";
 import { displayName, isGroupConversation, isNumericUserId, type XClient } from "../x/client.js";
-import type { LlmClient } from "../llm/client.js";
+import type { ChatMessage, LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
@@ -32,10 +32,14 @@ import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import {
   adultImaginePrompt,
+  formatImagineModerationReply,
   imaginePromptRejection,
+  ImagineError,
   IMAGINE_FAILED_MESSAGE,
   IMAGINE_UNAVAILABLE_MESSAGE,
+  isImagineModerationError,
   normalizeImaginePrompt,
+  suggestSofterImaginePrompts,
   type AdultImageCommand,
   type AdultImageProviderName,
   type ImagineGenerator,
@@ -1305,7 +1309,7 @@ export class ModerationEngine {
       } catch (error) {
         const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
         log.warn(`!imagine failed conversation=${conversationId}: ${detail}`);
-        await this.reply(conversationId, IMAGINE_FAILED_MESSAGE, actions);
+        await this.replyImagineFailure(conversationId, normalized.prompt, error, actions);
         return;
       }
       const outcome = await this.postGeneratedImage(conversationId, generated, actions, "!imagine");
@@ -1325,7 +1329,9 @@ export class ModerationEngine {
 
   /**
    * One fresh Imagine image for an adult command. A repeated URL or byte hash
-   * is tried once more. Any other failure returns false so search can run.
+   * is tried once more. Content moderation is explained in the conversation
+   * and does not fall back to search. Any other failure returns false so
+   * search can run.
    */
   private async tryAdultImagine(
     conversationId: string,
@@ -1338,11 +1344,16 @@ export class ModerationEngine {
     let sawRecent = false;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let generated: ImagineImage;
+      const prompt = adultImaginePrompt(command, () => this.nextRandom());
       try {
-        generated = await imagine.generate(adultImaginePrompt(command, () => this.nextRandom()));
+        generated = await imagine.generate(prompt);
       } catch (error) {
         const detail = redactSecrets(error instanceof Error ? error.message : "imagine failed");
         log.warn(`${label} Imagine failed conversation=${conversationId}: ${detail}`);
+        if (isImagineModerationError(error)) {
+          await this.replyImagineFailure(conversationId, prompt, error, actions);
+          return true;
+        }
         return false;
       }
       const outcome = await this.postGeneratedImage(conversationId, generated, actions, label);
@@ -1591,6 +1602,34 @@ export class ModerationEngine {
       `Could not delete ${where} ${eventId}. ${result.error ?? "X refused the delete."}`,
     );
     return false;
+  }
+
+  /**
+   * Moderation gets a short explanation plus five softer prompts.
+   * Other Imagine failures that will not produce an image get the generic line.
+   */
+  private async replyImagineFailure(
+    conversationId: string,
+    prompt: string,
+    error: unknown,
+    actions: EngineActions,
+  ): Promise<void> {
+    if (isImagineModerationError(error)) {
+      const suggestions = await suggestSofterImaginePrompts(prompt, this.suggestionComplete(conversationId));
+      await this.reply(conversationId, formatImagineModerationReply(suggestions), actions);
+      return;
+    }
+    const userMessage = error instanceof ImagineError ? error.userMessage : IMAGINE_FAILED_MESSAGE;
+    await this.reply(conversationId, userMessage, actions);
+  }
+
+  /** Chat model for softer prompts. Skipped when this conversation has the LLM turned off. */
+  private suggestionComplete(
+    conversationId: string,
+  ): ((messages: ChatMessage[]) => Promise<string>) | undefined {
+    if (!this.llmClient) return undefined;
+    if (!this.conversationConfig(conversationId).llmEnabled) return undefined;
+    return (messages) => this.llmClient!.complete(messages);
   }
 
   private async reply(

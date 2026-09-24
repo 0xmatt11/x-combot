@@ -7,14 +7,23 @@ import {
   adultImaginePrompt,
   createImagineClient,
   DEFAULT_IMAGINE_MODEL,
+  formatImagineModerationReply,
+  heuristicSofterImaginePrompts,
   IMAGINE_EMPTY_MESSAGE,
+  IMAGINE_FAILED_MESSAGE,
+  IMAGINE_MODERATED_INTRO,
   IMAGINE_PROMPT_MAX_CHARS,
+  IMAGINE_SUGGESTION_COUNT,
+  IMAGINE_SUGGESTION_TIMEOUT_MS,
   ImagineError,
+  isImagineModerationError,
   normalizeAdultImageProvider,
   normalizeImaginePrompt,
   resolveAdultImageProvider,
   resolveImagineApiKey,
+  suggestSofterImaginePrompts,
 } from "../src/bot/imagine.js";
+import { MockLlmClient } from "../src/llm/mock.js";
 import { createRecentImageMemory, imageContentHash } from "../src/bot/recent-images.js";
 import { loadDefaults } from "../src/config.js";
 import { loadEnv } from "../src/env.js";
@@ -263,6 +272,64 @@ describe("Imagine HTTP client", () => {
     const client = createImagineClient({ apiKey: "test-key", fetchImpl });
     await expect(client.generate("cat")).rejects.toBeInstanceOf(ImagineError);
   });
+
+  it("classifies content moderation and keeps the raw body out of the user line", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: "imagine:content-moderated",
+            error: "Generated image rejected by content moderation.",
+            cost_ticks: 9,
+          }),
+          { status: 400 },
+        ),
+    );
+    const client = createImagineClient({ apiKey: "test-key", fetchImpl });
+    const error = await client.generate("a nude portrait").then(
+      () => {
+        throw new Error("expected Imagine to fail");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ImagineError);
+    const imagineError = error as ImagineError;
+    expect(imagineError.kind).toBe("moderated");
+    expect(isImagineModerationError(imagineError)).toBe(true);
+    expect(imagineError.userMessage).toBe(IMAGINE_MODERATED_INTRO);
+    expect(imagineError.userMessage).not.toMatch(/cost_ticks|imagine:content-moderated|\{/);
+    expect(imagineError.message).toMatch(/HTTP 400/);
+    expect(imagineError.message).toMatch(/content-moderated/);
+  });
+
+  it("treats an equivalent safety rejection as moderation and leaves other HTTP errors generic", async () => {
+    const safety = createImagineClient({
+      apiKey: "test-key",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: "Rejected by the safety filter." }), { status: 400 }),
+    });
+    await expect(safety.generate("cat")).rejects.toMatchObject({ kind: "moderated" });
+
+    const overloaded = createImagineClient({
+      apiKey: "test-key",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ code: "imagine:unavailable", error: "overloaded", cost_ticks: 1 }), {
+          status: 503,
+        }),
+    });
+    const error = await overloaded.generate("cat").then(
+      () => {
+        throw new Error("expected Imagine to fail");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ImagineError);
+    const imagineError = error as ImagineError;
+    expect(imagineError.kind).toBe("failed");
+    expect(imagineError.userMessage).toBe(IMAGINE_FAILED_MESSAGE);
+    expect(imagineError.userMessage).not.toMatch(/cost_ticks|overloaded/);
+    expect(isImagineModerationError(new Error("socket hang up"))).toBe(false);
+  });
 });
 
 describe("recent posted images", () => {
@@ -323,7 +390,7 @@ describe("engine Imagine and search dedupe", () => {
     enabled?: boolean;
     provider?: "imagine" | "search";
     imagine?: boolean;
-    failGenerate?: boolean;
+    failGenerate?: boolean | "moderated";
     failSendImage?: boolean;
     recentLimit?: number;
     sameBytes?: boolean;
@@ -352,6 +419,7 @@ describe("engine Imagine and search dedupe", () => {
       prompts: [] as string[],
       async generate(prompt: string) {
         imagine.prompts.push(prompt);
+        if (options?.failGenerate === "moderated") throw moderatedImagineError();
         if (options?.failGenerate) throw new ImagineError("upstream down");
         return { url: `https://imgen.x.ai/fresh-${imagine.prompts.length}.jpg` };
       },
@@ -471,6 +539,22 @@ describe("engine Imagine and search dedupe", () => {
     expect(disabled.client.sent[0]?.text).toMatch(/disabled/);
   });
 
+  it("replies in the chat when Imagine blocks an adult image, and does not search", async () => {
+    for (const command of ["boobs", "ass", "booty"] as const) {
+      const { engine, client, search, imagine } = setup({ provider: "imagine", failGenerate: "moderated" });
+      await engine.processEvent(message({ id: `mod-${command}`, text: `!${command}` }));
+      expect(search.calls).toBe(0);
+      expect(imagine.prompts).toHaveLength(1);
+      expect(client.images).toHaveLength(0);
+      const text = client.sent.map((row) => row.text).join("\n");
+      expect(text).toMatch(/blocked by content moderation/i);
+      expect(numberedPrompts(text)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+      expect(text).not.toMatch(/cost_ticks|imagine:content-moderated|\{/);
+      expect(text).not.toMatch(/\b(nude|naked|cleavage|lingerie|boobs|tits|butts?|booty|porn)\b/i);
+      expect(text).toMatch(/woman|portrait|fashion|illustration/i);
+    }
+  });
+
   it("rate-limits before calling Imagine", async () => {
     const { engine, imagine } = setup({ provider: "imagine", perUser: 1, windowMs: 60_000 });
     const now = 5_000_000;
@@ -488,7 +572,13 @@ describe("!imagine command", () => {
     stores.length = 0;
   });
 
-  function setup(options?: { imagine?: boolean; failSendImage?: boolean; enabled?: boolean }) {
+  function setup(options?: {
+    imagine?: boolean;
+    failSendImage?: boolean;
+    enabled?: boolean;
+    generateError?: Error;
+    llm?: MockLlmClient;
+  }) {
     const store = new Store(":memory:");
     stores.push(store);
     const client = new MockXClient();
@@ -497,6 +587,7 @@ describe("!imagine command", () => {
       prompts: [] as string[],
       async generate(prompt: string) {
         imagine.prompts.push(prompt);
+        if (options?.generateError) throw options.generateError;
         return { url: "https://imgen.x.ai/user.jpg" };
       },
     };
@@ -512,14 +603,14 @@ describe("!imagine command", () => {
           rate_limit_window_ms: 0,
         },
       }),
-      undefined,
+      options?.llm,
       {
         imagine: options?.imagine === false ? undefined : imagine,
         fetchImage: async () => ({ bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/jpeg" }),
         adultImageProvider: "search",
       },
     );
-    return { engine, client, imagine };
+    return { engine, client, imagine, store };
   }
 
   it("sends the user prompt as written and posts an inline photo", async () => {
@@ -572,7 +663,147 @@ describe("!imagine command", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!imagine/);
   });
+
+  it("posts a moderation reply with five prompts and no raw API payload", async () => {
+    const { engine, client, imagine } = setup({
+      generateError: moderatedImagineError(),
+    });
+    const actions = await engine.processEvent(
+      message({ id: "mod-1", text: "!imagine a nude woman on a beach at sunset" }),
+    );
+    expect(imagine.prompts).toEqual(["a nude woman on a beach at sunset"]);
+    expect(client.images).toHaveLength(0);
+    expect(client.sent).toHaveLength(1);
+    const text = client.sent[0]?.text ?? "";
+    expect(text.startsWith(IMAGINE_MODERATED_INTRO)).toBe(true);
+    expect(numberedPrompts(text)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+    expect(text).not.toMatch(/cost_ticks|imagine:content-moderated|\{/);
+    expect(text).not.toMatch(/\b(nude|naked|cleavage|porn)\b/i);
+    expect(text).toMatch(/beach|sunset|woman/i);
+    expect(actions.replies).toEqual([text]);
+  });
+
+  it("uses the chat model for the five prompts when one is configured", async () => {
+    const llm = new MockLlmClient(
+      [
+        "1. a woman in a linen dress on a beach at sunset",
+        "2. a watercolor of waves at sunset",
+        "3. a fashion photograph of a summer coat by the shore",
+        "4. a wide landscape of a quiet beach",
+        "5. an illustration of seashells at dusk",
+      ].join("\n"),
+    );
+    const { engine, client } = setup({
+      generateError: moderatedImagineError(),
+      llm,
+    });
+    await engine.processEvent(message({ id: "mod-llm", text: "!imagine a nude woman on a beach at sunset" }));
+    const text = client.sent[0]?.text ?? "";
+    expect(numberedPrompts(text)).toEqual([
+      "a woman in a linen dress on a beach at sunset",
+      "a watercolor of waves at sunset",
+      "a fashion photograph of a summer coat by the shore",
+      "a wide landscape of a quiet beach",
+      "an illustration of seashells at dusk",
+    ]);
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0]?.[1]?.content).toBe("a nude woman on a beach at sunset");
+  });
+
+  it("rewrites locally when the chat model is off", async () => {
+    const llm = new MockLlmClient("1. this should not be used");
+    const { engine, client, store } = setup({
+      generateError: moderatedImagineError(),
+      llm,
+    });
+    store.patchSettings(groupId, { llm_enabled: false });
+    await engine.processEvent(message({ id: "mod-off", text: "!imagine a neon cat in an alley" }));
+    expect(llm.calls).toHaveLength(0);
+    const text = client.sent[0]?.text ?? "";
+    expect(numberedPrompts(text)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+    expect(text).toMatch(/neon cat|alley/i);
+  });
+
+  it("posts a short friendly line for other Imagine failures", async () => {
+    const { engine, client } = setup({
+      generateError: new ImagineError(
+        'Imagine HTTP 503: {"code":"imagine:unavailable","error":"overloaded","cost_ticks":2}',
+      ),
+    });
+    await engine.processEvent(message({ id: "down", text: "!imagine a neon cat" }));
+    expect(client.images).toHaveLength(0);
+    expect(client.sent.map((row) => row.text)).toEqual([IMAGINE_FAILED_MESSAGE]);
+  });
 });
+
+describe("softer Imagine prompts", () => {
+  it("rewrites an explicit prompt into five related lines", () => {
+    const prompts = heuristicSofterImaginePrompts(
+      "a nude woman on a beach at sunset, cleavage, lingerie",
+    );
+    expect(prompts).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+    expect(new Set(prompts.map((prompt) => prompt.toLowerCase())).size).toBe(IMAGINE_SUGGESTION_COUNT);
+    const joined = prompts.join("\n");
+    expect(joined).toMatch(/beach|sunset|woman/i);
+    expect(joined).not.toMatch(/\b(nude|naked|cleavage|lingerie|porn|boobs|ass|butt)\b/i);
+    expect(containsBannedAgeTerm(joined)).toBeUndefined();
+    expect(formatImagineModerationReply(prompts)).toMatch(/^That image was blocked by content moderation/);
+    expect(formatImagineModerationReply(prompts).match(/^\d+\. /gm)).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+  });
+
+  it("softens the adult preset prompts without escalating them", () => {
+    for (const command of ["boobs", "ass", "booty"] as const) {
+      const prompts = heuristicSofterImaginePrompts(adultImaginePrompt(command, () => 0));
+      expect(prompts).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+      const joined = prompts.join("\n");
+      expect(joined).toMatch(/woman|portrait|fashion|illustration/i);
+      expect(joined).not.toMatch(/\b(cleavage|lingerie|boobs|tits|butts?|booty|ass|nude|porn)\b/i);
+      expect(joined).not.toMatch(/unique framing/i);
+    }
+  });
+
+  it("keeps a non-explicit prompt related and fills in when the model reply is short", async () => {
+    const llm = new MockLlmClient("1. a paper cat in a quiet alley\n2. teen cyberpunk portrait");
+    const prompts = await suggestSofterImaginePrompts("a neon cat in an alley", (messages) =>
+      llm.complete(messages),
+    );
+    expect(prompts).toHaveLength(IMAGINE_SUGGESTION_COUNT);
+    expect(prompts[0]).toBe("a paper cat in a quiet alley");
+    expect(prompts.join("\n")).not.toMatch(/\bteen\b/i);
+    expect(prompts.join("\n")).toMatch(/neon cat|alley/i);
+  });
+
+  it("uses the rewrite when the model throws or is too slow", async () => {
+    const thrown = await suggestSofterImaginePrompts("a neon cat in an alley", async () => {
+      throw new Error("llm down");
+    });
+    expect(thrown).toEqual(heuristicSofterImaginePrompts("a neon cat in an alley"));
+
+    vi.useFakeTimers();
+    try {
+      const pending = suggestSofterImaginePrompts("a neon cat in an alley", () => new Promise(() => {}));
+      await vi.advanceTimersByTimeAsync(IMAGINE_SUGGESTION_TIMEOUT_MS);
+      await expect(pending).resolves.toEqual(heuristicSofterImaginePrompts("a neon cat in an alley"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+function moderatedImagineError(): ImagineError {
+  return new ImagineError(
+    'Imagine HTTP 400: {"code":"imagine:content-moderated","error":"Generated image rejected by content moderation.","cost_ticks":4}',
+    IMAGINE_MODERATED_INTRO,
+    "moderated",
+  );
+}
+
+function numberedPrompts(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((line) => /^\d+\. /.test(line))
+    .map((line) => line.replace(/^\d+\. /, ""));
+}
 
 function bytesForUrl(url: string): Uint8Array {
   let sum = 0;

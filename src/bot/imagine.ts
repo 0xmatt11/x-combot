@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { containsBannedAgeTerm, redactSecrets } from "./adult-filter.js";
+import type { ChatMessage } from "../llm/client.js";
+import { containsBannedAgeTerm, containsGenitalTerm, redactSecrets } from "./adult-filter.js";
 
 /**
  * xAI Grok Imagine. One client serves `!imagine` and the adult-image commands.
@@ -17,6 +18,13 @@ export const IMAGINE_TOO_LONG_MESSAGE = `That prompt is too long. Keep it under 
 export const IMAGINE_UNAVAILABLE_MESSAGE = "Image generation needs XAI_API_KEY.";
 export const IMAGINE_FAILED_MESSAGE = "Image generation failed. Try again later.";
 export const IMAGINE_REFUSED_MESSAGE = "Refused. That prompt is not allowed.";
+/** First line of the chat reply when Imagine rejects an image for moderation. */
+export const IMAGINE_MODERATED_INTRO =
+  "That image was blocked by content moderation. Try one of these prompts with !imagine:";
+
+export const IMAGINE_SUGGESTION_COUNT = 5;
+
+export type ImagineErrorKind = "moderated" | "failed";
 
 export const IMAGINE_ASPECT_RATIOS = [
   "1:1",
@@ -53,13 +61,24 @@ export interface ImagineGenerator {
 }
 
 export class ImagineError extends Error {
+  readonly kind: ImagineErrorKind;
+
   constructor(
     message: string,
     readonly userMessage = IMAGINE_FAILED_MESSAGE,
+    kind: ImagineErrorKind = "failed",
   ) {
     super(message);
     this.name = "ImagineError";
+    this.kind = kind;
   }
+}
+
+/** True when Imagine rejected the image for content moderation or an equivalent policy. */
+export function isImagineModerationError(error: unknown): boolean {
+  if (error instanceof ImagineError && error.kind === "moderated") return true;
+  const message = error instanceof Error ? error.message : "";
+  return moderationSignal(message);
 }
 
 const ASPECT_RATIO_SET = new Set<string>(IMAGINE_ASPECT_RATIOS);
@@ -195,6 +214,77 @@ export function imagineGenerationsUrl(baseUrl = IMAGINE_API_BASE): string {
   return `${baseUrl.replace(/\/$/, "")}/images/generations`;
 }
 
+const SUGGESTION_MAX_CHARS = 180;
+export const IMAGINE_SUGGESTION_TIMEOUT_MS = 8_000;
+
+const SUGGESTION_SYSTEM = [
+  "An image prompt was rejected by content moderation.",
+  "Reply with exactly 5 alternative prompts, one per line, numbered 1. through 5.",
+  "Each line is only the prompt text, under 160 characters.",
+  "Stay on the same subject, but softer and more likely to pass moderation:",
+  "less explicit, less extreme, fully clothed, no nudity, no gore, no minors, no sexual content.",
+  "Do not escalate. Do not add explanations, JSON, or a !imagine prefix.",
+].join(" ");
+
+/**
+ * Five related prompts that are softer than `prompt`.
+ * Uses `complete` when the bot already has a chat model, and a rewrite when it does not
+ * or the model reply is unusable.
+ */
+export async function suggestSofterImaginePrompts(
+  prompt: string,
+  complete?: (messages: ChatMessage[]) => Promise<string>,
+): Promise<string[]> {
+  const heuristic = heuristicSofterImaginePrompts(prompt);
+  if (!complete) return heuristic;
+  try {
+    const text = await completeWithTimeout(
+      complete,
+      [
+        { role: "system", content: SUGGESTION_SYSTEM },
+        { role: "user", content: prompt.slice(0, IMAGINE_PROMPT_MAX_CHARS) },
+      ],
+      IMAGINE_SUGGESTION_TIMEOUT_MS,
+    );
+    if (!text) return heuristic;
+    return fillSuggestions(parseSuggestedPrompts(text), heuristic);
+  } catch {
+    return heuristic;
+  }
+}
+
+/** Chat text: moderation line, then five copyable prompts. */
+export function formatImagineModerationReply(prompts: readonly string[]): string {
+  const lines = prompts.slice(0, IMAGINE_SUGGESTION_COUNT).map((prompt, index) => `${index + 1}. ${prompt}`);
+  return [IMAGINE_MODERATED_INTRO, ...lines].join("\n");
+}
+
+export function heuristicSofterImaginePrompts(prompt: string): string[] {
+  const softened = softenImaginePrompt(prompt);
+  const core = clipPrompt(firstSentence(softened), 140);
+  const person = looksLikePerson(`${prompt}\n${core}`) || hadExplicitWording(prompt);
+  const subject = decapitalize(core);
+  const frames = person
+    ? [
+        `${core}, fully clothed, soft natural light`,
+        `Studio portrait in elegant clothing: ${subject}`,
+        `Painted illustration of ${subject}`,
+        `Wide modest portrait: ${subject}`,
+        `Gentle non-explicit artwork of ${subject}`,
+      ]
+    : [
+        `${core}, soft natural light`,
+        `Painted illustration of ${subject}`,
+        `Wide scenic view of ${subject}`,
+        `Gentle colors, calm mood: ${subject}`,
+        `A tasteful still of ${subject}`,
+      ];
+  return fillSuggestions(
+    frames.map((line) => clipPrompt(line, SUGGESTION_MAX_CHARS)),
+    SAFE_SUGGESTION_FALLBACKS,
+  );
+}
+
 export function createImagineClient(options: {
   apiKey: string;
   model?: string;
@@ -240,7 +330,7 @@ export function createImagineClient(options: {
 
       const text = await response.text();
       if (!response.ok) {
-        throw new ImagineError(`Imagine HTTP ${response.status}: ${redactSecrets(text).slice(0, 300)}`);
+        throw imagineHttpError(response.status, text);
       }
       let payload: unknown;
       try {
@@ -290,6 +380,245 @@ function parseImagineResponse(payload: unknown): ImagineImage {
     throw new ImagineError("Imagine response had no image");
   }
   return image;
+}
+
+const SOFTEN_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/\bunique framing\s+[a-z0-9]+\b\.?/gi, ""],
+  [/\bno text,?\s*no watermark,?\s*no logo\.?/gi, ""],
+  [/\bkeep the frame on the upper body\.?/gi, ""],
+  [/\bhigh detail,?\s*photorealistic\b\.?/gi, ""],
+  [/\bchest and cleavage\b/gi, "portrait"],
+  [/\bhips and (?:butt|booty|ass|buttocks)\b/gi, "full-length pose"],
+  [/\badult pin-up\b/gi, "fashion"],
+  [/\bpin-ups?\b/gi, "fashion"],
+  [/\bcleavage\b/gi, "neckline"],
+  [/\b(?:boobs|tits|breasts|nipples?)\b/gi, "shoulders"],
+  [/\b(?:butts?|boot(?:y|ies)|buttocks|asses|ass)\b/gi, "silhouette"],
+  [/\b(?:lingerie|underwear|panties|thongs?|bras?|bodysuits?)\b/gi, "evening wear"],
+  [/\b(?:topless|bottomless|nudes?|naked|nsfw|xxx)\b/gi, "clothed"],
+  [/\b(?:pornographic|porn|erotic|explicit)\b/gi, "tasteful"],
+  [/\b(?:sexy|seductive|sensual)\b/gi, "elegant"],
+  [/\b(?:fetish|bdsm|bondage)\b/gi, ""],
+  [/\b(?:girls?|boys?)\b/gi, "person"],
+  [/\b(?:gore|gory|bloody|blood|violent|violence|murder)\b/gi, "drama"],
+  [/\b(?:killing|kills|kill|corpses?)\b/gi, ""],
+  [/\b(?:guns?|rifles?|pistols?|knives|knife|weapons?)\b/gi, ""],
+  [/\b(?:cocaine|heroin|meth)\b/gi, ""],
+  [/\bsexual\b/gi, ""],
+  [/\bsex\b/gi, ""],
+  [/\badult\b/gi, ""],
+];
+
+const EXPLICIT_WORDING =
+  /\b(?:nude|naked|nsfw|xxx|cleavage|lingerie|underwear|boobs|tits|breasts|nipples?|topless|bottomless|butts?|booty|buttocks|ass|porn|erotic|(?<!non-)explicit|sexy|seductive|sensual|fetish|bdsm)\b/i;
+
+const SAFE_SUGGESTION_FALLBACKS = [
+  "A clothed figure in soft daylight, tasteful portrait",
+  "A fashion photograph with elegant fabric and natural light",
+  "An illustrated landscape with gentle colors",
+  "A wide modest scene with calm lighting",
+  "A non-explicit still life with a quiet mood",
+];
+
+function imagineHttpError(status: number, text: string): ImagineError {
+  const detail = redactSecrets(text).slice(0, 300);
+  const message = `Imagine HTTP ${status}: ${detail}`;
+  if (bodyIsModerated(text)) {
+    return new ImagineError(message, IMAGINE_MODERATED_INTRO, "moderated");
+  }
+  return new ImagineError(message);
+}
+
+function bodyIsModerated(text: string): boolean {
+  const body = readImagineErrorBody(text);
+  if (moderationSignal(`${body.code ?? ""} ${body.error ?? ""}`)) return true;
+  if (body.code || body.error) return false;
+  return moderationSignal(text);
+}
+
+function readImagineErrorBody(text: string): { code?: string; error?: string } {
+  try {
+    const payload = JSON.parse(text) as unknown;
+    if (!payload || typeof payload !== "object") return {};
+    const record = payload as Record<string, unknown>;
+    let code = typeof record.code === "string" ? record.code : undefined;
+    let error = typeof record.error === "string" ? record.error : undefined;
+    if (!error && typeof record.message === "string") error = record.message;
+    const nested = record.error;
+    if (nested && typeof nested === "object") {
+      const obj = nested as Record<string, unknown>;
+      if (!error && typeof obj.message === "string") error = obj.message;
+      if (!code && typeof obj.code === "string") code = obj.code;
+    }
+    return { code, error };
+  } catch {
+    return {};
+  }
+}
+
+function moderationSignal(text: string): boolean {
+  const haystack = text.toLowerCase();
+  return (
+    haystack.includes("content-moderated") ||
+    haystack.includes("content_moderated") ||
+    haystack.includes("content moderation") ||
+    haystack.includes("content policy") ||
+    haystack.includes("safety filter") ||
+    haystack.includes("safety system")
+  );
+}
+
+function softenImaginePrompt(prompt: string): string {
+  let text = prompt;
+  for (const [pattern, replacement] of SOFTEN_REPLACEMENTS) {
+    text = text.replace(pattern, replacement);
+  }
+  text = tidyPrompt(text);
+  if (!text || containsBannedAgeTerm(text) || containsGenitalTerm(text)) {
+    return "a tasteful scene";
+  }
+  return text;
+}
+
+function hadExplicitWording(prompt: string): boolean {
+  return EXPLICIT_WORDING.test(prompt);
+}
+
+function looksLikePerson(text: string): boolean {
+  return /\b(?:woman|women|man|men|person|people|model|portrait|figure|lady|guy)\b/i.test(text);
+}
+
+function firstSentence(text: string): string {
+  const sentence = text.split(/(?<=\.)\s+/)[0] ?? text;
+  return sentence.replace(/\.$/, "").trim();
+}
+
+function tidyPrompt(text: string): string {
+  return text
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n+/g, " ")
+    .replace(/\s+([,.;])/g, "$1")
+    .replace(/([,.;])(?:\s*[,.;])+/g, "$1")
+    .replace(/(?:^|\s)(?:and|with|of)\s*(?=[,.]|$)/gi, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[,.\s]+|[,.\s]+$/g, "")
+    .trim();
+}
+
+function decapitalize(text: string): string {
+  return text.replace(/^[A-Z]/, (letter) => letter.toLowerCase());
+}
+
+function clipPrompt(text: string, max: number): string {
+  const tidy = tidyPrompt(text);
+  if (tidy.length <= max) return tidy;
+  const slice = tidy.slice(0, max);
+  const comma = slice.lastIndexOf(",");
+  const space = slice.lastIndexOf(" ");
+  const cut = comma >= max * 0.5 ? comma : space > max * 0.6 ? space : max;
+  return slice.slice(0, cut).replace(/[,.\s:]+$/g, "").trim();
+}
+
+function parseSuggestedPrompts(text: string): string[] {
+  return suggestionLines(text)
+    .map((line) => cleanSuggestionLine(line))
+    .filter((line): line is string => Boolean(line));
+}
+
+function suggestionLines(text: string): string[] {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = (fenced?.[1] ?? trimmed).trim();
+  if (body.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === "string");
+      }
+    } catch {
+      // Numbered lines are the usual shape.
+    }
+  }
+  return body.split(/\r?\n/);
+}
+
+function cleanSuggestionLine(line: string): string | undefined {
+  let text = line.trim();
+  if (!text) return undefined;
+  text = text.replace(/^\d+\s*[\).:-]\s*/, "");
+  text = text.replace(/^[-*•]\s*/, "");
+  text = text.replace(/^["']|["']$/g, "");
+  text = text.replace(/^(?:!|\/)imagine\s+/i, "");
+  text = tidyPrompt(text);
+  if (!text) return undefined;
+  if (/^(?:here are|these are|alternatives?|suggestions?|prompts?)\b/i.test(text)) return undefined;
+  if (text.length > SUGGESTION_MAX_CHARS) text = clipPrompt(text, SUGGESTION_MAX_CHARS);
+  if (text.length < 8) return undefined;
+  if (containsBannedAgeTerm(text) || containsGenitalTerm(text)) return undefined;
+  if (hadExplicitWording(text) && !/\b(?:clothed|elegant|tasteful|modest|illustration|portrait)\b/i.test(text)) {
+    text = clipPrompt(`${softenImaginePrompt(text)}, fully clothed`, SUGGESTION_MAX_CHARS);
+  }
+  if (containsBannedAgeTerm(text) || containsGenitalTerm(text) || hadExplicitWording(text)) {
+    text = softenImaginePrompt(text);
+  }
+  if (
+    !text ||
+    text.length < 8 ||
+    containsBannedAgeTerm(text) ||
+    containsGenitalTerm(text) ||
+    hadExplicitWording(text)
+  ) {
+    return undefined;
+  }
+  return text;
+}
+
+function fillSuggestions(preferred: readonly string[], backup: readonly string[]): string[] {
+  const chosen: string[] = [];
+  const seen = new Set<string>();
+  const push = (prompt: string | undefined) => {
+    if (!prompt || chosen.length >= IMAGINE_SUGGESTION_COUNT) return;
+    const cleaned = tidyPrompt(prompt);
+    if (
+      !cleaned ||
+      containsBannedAgeTerm(cleaned) ||
+      containsGenitalTerm(cleaned) ||
+      hadExplicitWording(cleaned)
+    ) {
+      return;
+    }
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    chosen.push(cleaned);
+  };
+  for (const prompt of preferred) push(prompt);
+  for (const prompt of backup) push(prompt);
+  for (const prompt of SAFE_SUGGESTION_FALLBACKS) push(prompt);
+  return chosen.slice(0, IMAGINE_SUGGESTION_COUNT);
+}
+
+async function completeWithTimeout(
+  complete: (messages: ChatMessage[]) => Promise<string>,
+  messages: ChatMessage[],
+  timeoutMs: number,
+): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = complete(messages).then(
+    (text) => text,
+    () => undefined,
+  );
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function sniffImageMime(bytes: Uint8Array): string | undefined {
