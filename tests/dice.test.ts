@@ -156,14 +156,20 @@ describe("rollDice", () => {
     expect(diceReply("2d6+2", "@alice", () => 0)).toBe("🎲 @alice rolled 1, 1 +2 (total 4)");
     expect(diceReply("2d20", "Ada", () => 0)).toBe("🎲 Ada rolled 1, 1 (total 2)");
     expect(diceReply("", "  ", () => 0)).toBe("🎲 someone rolled a 1");
+    expect(diceReply("d6", "1712950172873809920", () => 0)).toBe("🎲 someone rolled a 1");
+    expect(diceReply("d6", "@1712950172873809920", () => 0)).toBe("🎲 someone rolled a 1");
     expect(diceReply("nope", "@alice")).toBe(DICE_HELP);
   });
 
   it("uses @handle or display name and never a raw user id", () => {
-    expect(diceRollerLabel({ username: "alice", name: "Alice" })).toBe("@alice");
+    const snowflake = "1712950172873809920";
+    expect(diceRollerLabel({ id: "u-alice", username: "alice", name: "Alice" })).toBe("@alice");
     expect(diceRollerLabel({ username: "@bob" })).toBe("@bob");
-    expect(diceRollerLabel({ name: "Ada" })).toBe("Ada");
+    expect(diceRollerLabel({ id: "u-ada", name: "Ada" })).toBe("Ada");
+    expect(diceRollerLabel({ username: snowflake, name: "Ada" })).toBe("Ada");
     expect(diceRollerLabel({ name: "  " })).toBe("someone");
+    expect(diceRollerLabel({ id: snowflake })).toBe("someone");
+    expect(diceRollerLabel({ id: "99", username: snowflake, name: snowflake })).toBe("someone");
     expect(diceRollerLabel({})).toBe("someone");
     expect(diceRollerLabel(undefined)).toBe("someone");
   });
@@ -230,6 +236,78 @@ describe("!dice command", () => {
       "🎲 someone rolled a 4",
     ]);
     expect(client.sent.some((row) => row.text.includes("99"))).toBe(false);
+  });
+
+  it("resolves a chat sender id to @username or a display name", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { engine, client } = setup();
+    const snowflake = "1712950172873809920";
+    const byHandle: XUser = { id: snowflake, username: "theirhandle", name: "Their Name" };
+    const byName: XUser = { id: "555001", name: "Ada Lovelace" };
+    const idOnly = "999001";
+    client.addUser(byHandle);
+    client.addUser(byName);
+    const lookup = vi.spyOn(client, "getUserById");
+
+    await engine.processEvent(
+      message({
+        id: "c-username",
+        senderId: snowflake,
+        sender: { id: snowflake },
+        text: "!dice",
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "c-name",
+        senderId: byName.id,
+        sender: undefined,
+        text: "!dice",
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "c-id",
+        senderId: idOnly,
+        sender: { id: idOnly },
+        text: "!dice",
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "c-missing",
+        senderId: "424242424242",
+        sender: undefined,
+        text: "/dice",
+      }),
+    );
+
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "🎲 @theirhandle rolled a 4",
+      "🎲 Ada Lovelace rolled a 4",
+      "🎲 someone rolled a 4",
+      "🎲 someone rolled a 4",
+    ]);
+    const replies = client.sent.map((row) => row.text).join("\n");
+    expect(replies).not.toContain(snowflake);
+    expect(replies).not.toContain(byName.id);
+    expect(replies).not.toContain(idOnly);
+    expect(replies).not.toContain("424242424242");
+    expect(lookup).toHaveBeenCalledWith(snowflake);
+    expect(lookup).toHaveBeenCalledWith(byName.id);
+    expect(lookup).toHaveBeenCalledWith(idOnly);
+  });
+
+  it("keeps an event display name when the sender lookup fails", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const { engine, client } = setup();
+    const named: XUser = { id: "u-ada", name: "Ada" };
+    vi.spyOn(client, "getUserById").mockRejectedValue(new Error("rate limited"));
+    await engine.processEvent(
+      message({ id: "d-lookup-fail", senderId: named.id, sender: named, text: "!dice" }),
+    );
+    expect(client.sent.map((row) => row.text)).toEqual(["🎲 Ada rolled a 4"]);
+    expect(client.sent.some((row) => row.text.includes(named.id))).toBe(false);
   });
 
   it("lists !dice under games in the default help text", () => {

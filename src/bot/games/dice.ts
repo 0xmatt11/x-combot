@@ -61,21 +61,27 @@ export function rollDice(spec: DiceSpec, rng: Rng = Math.random): DiceRoll {
 }
 
 /**
- * `@handle` when a username is known, otherwise the display name.
- * A missing name becomes "someone". The numeric API user id is never used.
+ * Public name for a dice roll.
+ *
+ * `@handle` when a username is known, otherwise a human display name.
+ * A numeric API user id is never a name, including when it is the only
+ * field on the sender or was copied into `username` / `name`. With no
+ * public name, the label is "someone".
  */
-export function diceRollerLabel(user: { username?: string; name?: string } | undefined): string {
-  const username = user?.username?.trim();
-  if (username) return username.startsWith("@") ? username : `@${username}`;
-  const name = user?.name?.trim();
+export function diceRollerLabel(
+  user: { id?: string; username?: string; name?: string } | undefined,
+): string {
+  const handle = publicHandle(user?.username);
+  if (handle) return handle;
+  const name = publicName(user?.name);
   if (name) return name;
   return "someone";
 }
 
-/** A blank label becomes "someone". */
+/** A blank label, or a raw numeric user id, becomes "someone". */
 export function formatDiceRoll(roll: DiceRoll, roller: string): string {
   const { spec, rolls, total } = roll;
-  const who = roller.trim() || "someone";
+  const who = visibleRoller(roller);
   const only = rolls[0];
   if (rolls.length === 1 && spec.modifier === 0 && only !== undefined) {
     return `🎲 ${who} rolled ${article(only)} ${only}`;
@@ -133,4 +139,31 @@ function rollFace(sides: number, rng: Rng): number {
 function article(n: number): "a" | "an" {
   if (n === 8 || (n >= 11 && n <= 18) || (n >= 80 && n <= 89)) return "an";
   return "a";
+}
+
+/** `@handle` when it is a real username. A numeric user id is not a handle. */
+function publicHandle(username: string | undefined): string | undefined {
+  const trimmed = username?.trim() ?? "";
+  if (!trimmed || isNumericUserId(trimmed)) return undefined;
+  const bare = trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
+  if (!bare || isNumericUserId(bare)) return undefined;
+  return `@${bare}`;
+}
+
+/** Display name, unless it is only a numeric user id. */
+function publicName(name: string | undefined): string | undefined {
+  const trimmed = name?.trim() ?? "";
+  if (!trimmed || isNumericUserId(trimmed)) return undefined;
+  return trimmed;
+}
+
+function visibleRoller(roller: string): string {
+  const trimmed = roller.trim();
+  if (!trimmed || isNumericUserId(trimmed)) return "someone";
+  return trimmed;
+}
+
+function isNumericUserId(value: string): boolean {
+  const bare = value.startsWith("@") ? value.slice(1) : value;
+  return /^\d+$/.test(bare);
 }

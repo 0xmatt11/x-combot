@@ -692,6 +692,32 @@ export class ModerationEngine {
     }
   }
 
+  /**
+   * Chat deliveries usually carry a sender id and no profile. Look the
+   * account up the same way leave announcements do, so `!dice` can say
+   * `@handle` or a display name. A handle already on the event is enough.
+   * The numeric id is not returned as a name; `diceRollerLabel` drops it.
+   */
+  private async resolveDiceRoller(event: DmEvent): Promise<XUser | undefined> {
+    const known = event.sender;
+    if (known && diceRollerLabel(known).startsWith("@")) return known;
+    const senderId = event.senderId || known?.id;
+    if (!senderId) return known;
+    try {
+      const lookedUp = await this.client.getUserById(senderId);
+      if (lookedUp) {
+        return {
+          id: lookedUp.id || senderId,
+          username: lookedUp.username?.trim() || known?.username?.trim(),
+          name: lookedUp.name?.trim() || known?.name?.trim(),
+        };
+      }
+    } catch (error) {
+      log.warn(`Could not look up user ${senderId} for a dice roll`, error);
+    }
+    return known;
+  }
+
   private async handleJoin(
     event: DmEvent,
     settings: ResolvedConversationConfig,
@@ -744,13 +770,15 @@ export class ModerationEngine {
       case "booty":
         await this.handleAdultImage(event, command.name, command.extra, settings, actions, nowMs);
         return;
-      case "dice":
+      case "dice": {
+        const roller = await this.resolveDiceRoller(event);
         await this.reply(
           conversationId,
-          diceReply(command.notation, diceRollerLabel(event.sender)),
+          diceReply(command.notation, diceRollerLabel(roller)),
           actions,
         );
         return;
+      }
       default:
         break;
     }
