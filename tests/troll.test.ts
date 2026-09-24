@@ -95,7 +95,7 @@ describe("troll mode", () => {
       roastNext: 0,
     });
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Troll mode on for @bob. I'll reply when they talk in this chat. !troll off to stop.",
+      "Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
     ]);
 
     await engine.processEvent(
@@ -108,7 +108,7 @@ describe("troll mode", () => {
       1_000,
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "Troll mode on for @bob. I'll reply when they talk in this chat. !troll off to stop.",
+      "Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
       FIRST_JOKE,
     ]);
     expect(client.sent.some((row) => row.text.includes(bob.id))).toBe(false);
@@ -136,32 +136,48 @@ describe("troll mode", () => {
     fs.rmSync(`${file}-shm`, { force: true });
   });
 
-  it("clears the target with !troll off and !untroll", async () => {
+  it("stays on through !troll off and a bare !untroll, and stops only for !untroll @handle", async () => {
     const { engine, client, store } = setup();
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!troll @bob" }));
     await engine.processEvent(message({ id: "off", senderId: alice.id, text: "!troll off" }));
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
+    await engine.processEvent(message({ id: "bare", senderId: alice.id, text: "!untroll" }));
+    await engine.processEvent(message({ id: "wrong", senderId: alice.id, text: "!untroll @alice" }));
+    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
     await engine.processEvent(
-      message({ id: "b1", senderId: bob.id, text: "no roast" }),
+      message({ id: "b1", senderId: bob.id, text: "still targeted" }),
       1_000_000,
     );
-    expect(client.sent.map((row) => row.text)).toEqual([
-      "Troll mode on for @bob. I'll reply when they talk in this chat. !troll off to stop.",
-      "Troll mode off for @bob.",
-    ]);
+    expect(client.sent.at(-1)?.text).toBe(FIRST_JOKE);
 
-    await engine.processEvent(message({ id: "on2", senderId: bob.id, text: "/troll @alice" }));
-    await engine.processEvent(message({ id: "untroll", senderId: alice.id, text: "!untroll" }));
+    await engine.processEvent(message({ id: "stop", senderId: alice.id, text: "!untroll @bob" }));
     expect(store.getTrollTarget(groupId)).toBeUndefined();
-    expect(client.sent.at(-1)?.text).toBe("Troll mode off for @alice.");
+    await engine.processEvent(
+      message({ id: "b2", senderId: bob.id, text: "no roast" }),
+      1_000_000 + TROLL_COOLDOWN_MS,
+    );
+    expect(client.sent.at(-1)?.text).toBe("Troll mode off for @bob.");
+    expect(client.sent.some((row) => row.text.includes("Troll mode stays on for @bob"))).toBe(true);
+    expect(client.sent.some((row) => row.text.includes("Still trolling @bob"))).toBe(true);
   });
 
-  it("toggles off when !troll names the current target again", async () => {
+  it("does not toggle off or reset the cooldown when !troll names the current target again", async () => {
     const { engine, client, store } = setup();
+    const start = 4_000_000;
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!troll @bob" }));
-    await engine.processEvent(message({ id: "toggle", senderId: alice.id, text: "!troll @bob" }));
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
-    expect(client.sent.at(-1)?.text).toBe("Troll mode off for @bob.");
+    await engine.processEvent(message({ id: "b1", senderId: bob.id, text: "one" }), start);
+    await engine.processEvent(message({ id: "again", senderId: alice.id, text: "!troll @bob" }));
+    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
+    expect(store.getTrollTarget(groupId)?.lastMs).toBe(start);
+    await engine.processEvent(
+      message({ id: "b2", senderId: bob.id, text: "two" }),
+      start + 1_000,
+    );
+    expect(client.sent.filter((row) => row.text === FIRST_JOKE)).toHaveLength(1);
+    expect(client.sent.at(-1)?.text).toBe(
+      "Already trolling @bob. That stays on until !untroll @bob.",
+    );
+    await engine.processEvent(message({ id: "switch", senderId: alice.id, text: "!troll @alice" }));
+    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
   });
 
   it("accepts a display name and a reply the bot can already resolve", async () => {
@@ -177,7 +193,15 @@ describe("troll mode", () => {
     expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
     expect(store.getTrollTarget(groupId)?.username).toBeUndefined();
 
-    await engine.processEvent(message({ id: "off", senderId: alice.id, text: "!troll off" }));
+    await engine.processEvent(
+      message({
+        id: "stop-name",
+        senderId: alice.id,
+        text: "!untroll Bobby Tables",
+        participants: [{ id: bob.id, name: "Bobby Tables" }],
+      }),
+    );
+    expect(store.getTrollTarget(groupId)).toBeUndefined();
     await engine.processEvent(
       message({
         id: "reply",
@@ -334,7 +358,8 @@ describe("troll mode", () => {
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!troll @user/);
-    expect(loaded.help).toMatch(/!troll off/);
+    expect(loaded.help).toMatch(/!untroll @user/);
+    expect(loaded.help).not.toMatch(/!troll off/);
   });
 });
 

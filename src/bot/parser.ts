@@ -58,7 +58,7 @@ export type ParsedCommand =
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
-  | { name: "untroll" };
+  | { name: "untroll"; target?: UserRef };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -351,7 +351,7 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
     case "troll":
       return parseTroll(rest);
     case "untroll":
-      return { name: "untroll" };
+      return parseUntroll(rest);
     default:
       return undefined;
   }
@@ -369,19 +369,27 @@ export function parseUserRef(raw: string): UserRef | undefined {
 }
 
 /**
- * `!troll @user` turns on (and toggles off that same user).
- * `!troll off` clears the conversation. A display name that is not a single
+ * `!troll @user` turns on. `off` is recognized so it is not a username,
+ * but it does not stop troll mode. A display name that is not a single
  * @handle is kept raw so the engine can match a known name.
  */
 function parseTroll(rest: string): ParsedCommand {
   if (!rest) return { name: "troll" };
   if (/^off$/i.test(rest)) return { name: "troll", off: true };
+  return { name: "troll", target: trollTarget(rest) };
+}
+
+/** `!untroll @user` stops troll mode only when that user is the current target. */
+function parseUntroll(rest: string): ParsedCommand {
+  if (!rest) return { name: "untroll" };
+  return { name: "untroll", target: trollTarget(rest) };
+}
+
+function trollTarget(rest: string): UserRef {
   const { head, tail } = splitHead(rest);
   const asUser = parseUserRef(head);
-  if (asUser && (asUser.id || head.startsWith("@") || !tail)) {
-    return { name: "troll", target: asUser };
-  }
-  return { name: "troll", target: { raw: rest } };
+  if (asUser && (asUser.id || head.startsWith("@") || !tail)) return asUser;
+  return { raw: rest };
 }
 
 function splitTarget(rest: string): { target?: UserRef; remainder: string } {

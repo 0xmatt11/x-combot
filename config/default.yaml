@@ -29,7 +29,7 @@ help: |
     !imagine <prompt> — generate an image with Grok Imagine (needs an xAI key)
     !video <prompt> — generate a short video with Grok Imagine (needs an xAI key; takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
-    !troll @user — roast that person in this chat until !troll off (or !untroll). !troll @user again turns it off
+    !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
     !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
     !top — level leaderboard (!toplvl)
     Reply + or - to a message — give or take one level (not your own)

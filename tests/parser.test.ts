@@ -379,7 +379,7 @@ describe("parseLlmWake", () => {
 });
 
 describe("parseCommand !troll", () => {
-  it("parses !troll @x, off, and !untroll", () => {
+  it("parses !troll @x and !untroll @x", () => {
     expect(parseCommand("!troll @x")).toEqual({
       name: "troll",
       target: { raw: "@x", username: "x" },
@@ -391,13 +391,20 @@ describe("parseCommand !troll", () => {
     expect(parseCommand("!TROLL off")).toEqual({ name: "troll", off: true });
     expect(parseCommand("!troll")).toEqual({ name: "troll" });
     expect(parseCommand("!untroll")).toEqual({ name: "untroll" });
-    expect(parseCommand("!untroll @alice")).toEqual({ name: "untroll" });
+    expect(parseCommand("!untroll @alice")).toEqual({
+      name: "untroll",
+      target: { raw: "@alice", username: "alice" },
+    });
+    expect(parseCommand("/untroll @x")).toEqual({
+      name: "untroll",
+      target: { raw: "@x", username: "x" },
+    });
     expect(parseCommand("!troll Bobby Tables")).toEqual({
       name: "troll",
       target: { raw: "Bobby Tables" },
     });
     expect(parseUnknownBang("!troll @x")).toBeUndefined();
-    expect(parseUnknownBang("!untroll")).toBeUndefined();
+    expect(parseUnknownBang("!untroll @x")).toBeUndefined();
     expect(parseUnknownBang("!troll off")).toBeUndefined();
   });
 });
