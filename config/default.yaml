@@ -43,6 +43,13 @@ help: |
     !8ball <question> — magic 8-ball (!eightball)
     !minesweeper [easy|medium] — text minesweeper (5×5 or 7×7). Full catalog: !games
     !games — full list; more games are listed there
+    !wordle [word] — daily 5-letter puzzle, then a practice round; marks are correct, present, or absent
+    !anagram [word] — unscramble a longer word; score drops on each miss
+    !scramble [word] — short-word streak; different list and score from !anagram
+    !guess [n] — the bot picks the range, then says higher or lower
+    !higherlower [higher|lower] — card streak
+    !wouldyourather [A|B] — vote; the tally stays in this chat until it expires
+    !truthordare [truth|dare] — PG-13 prompt; refuses minors
 
   Admin commands:
     Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.
