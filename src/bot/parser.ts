@@ -58,7 +58,8 @@ export type ParsedCommand =
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
-  | { name: "untroll"; target?: UserRef };
+  | { name: "untroll"; target?: UserRef }
+  | { name: "noor"; mode?: "on" | "off" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -134,6 +135,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "stand",
   "troll",
   "untroll",
+  "noor",
 ]);
 
 /**
@@ -352,6 +354,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseTroll(rest);
     case "untroll":
       return parseUntroll(rest);
+    case "noor":
+      return parseNoor(rest);
     default:
       return undefined;
   }
@@ -383,6 +387,13 @@ function parseTroll(rest: string): ParsedCommand {
 function parseUntroll(rest: string): ParsedCommand {
   if (!rest) return { name: "untroll" };
   return { name: "untroll", target: trollTarget(rest) };
+}
+
+/** `!noor on` / `!noor off`. Anything else is a usage reply, not an unknown bang. */
+function parseNoor(rest: string): ParsedCommand {
+  if (/^on$/i.test(rest)) return { name: "noor", mode: "on" };
+  if (/^off$/i.test(rest)) return { name: "noor", mode: "off" };
+  return { name: "noor" };
 }
 
 function trollTarget(rest: string): UserRef {

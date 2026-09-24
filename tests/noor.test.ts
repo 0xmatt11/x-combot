@@ -1,0 +1,393 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { ModerationEngine } from "../src/bot/engine.js";
+import {
+  fallbackNoorRoast,
+  formatNoorPost,
+  noorMeansLine,
+  NOOR_ALERT_POLL_MS,
+  planNoorRelay,
+  sanitizeNoorRoast,
+  snowflakeTimeMs,
+} from "../src/bot/noor.js";
+import { loadDefaults } from "../src/config.js";
+import { loadEnv } from "../src/env.js";
+import { MockLlmClient } from "../src/llm/mock.js";
+import { Store } from "../src/store.js";
+import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
+import type { UserTweet } from "../src/x/client.js";
+import { MockXClient } from "../src/x/mock-client.js";
+
+const alice: XUser = { id: "u-alice", username: "alice", name: "Alice" };
+const noor: XUser = { id: "u-noor", username: "noorrietje", name: "Noor" };
+const owner: XUser = { id: "u-owner", username: "owner", name: "Owner" };
+const groupId = "1578398451921985538";
+const otherGroupId = "1578398451921985539";
+const SNOWFLAKE_EPOCH_MS = 1288834974657n;
+
+const defaults: DefaultsConfig = {
+  welcome: { enabled: false, text: "Welcome @{username}!" },
+  rules: "Be nice.",
+  help: "Type !rules",
+  flood: { max_messages: 0, window_ms: 10_000, mute_ms: 60_000, warn_on_flood: false },
+  warns: { limit: 3, auto_mute_ms: 60_000, notify_admins: false },
+  filters: [],
+  poll: { interval_ms: 1000, max_results: 50 },
+  delete: { attempt_on_filter: false, attempt_on_flood: false, attempt_on_mute: false },
+};
+
+function idAt(ms: number): string {
+  return ((BigInt(ms) - SNOWFLAKE_EPOCH_MS) << 22n).toString();
+}
+
+function tweet(
+  id: string,
+  text: string,
+  createdAtMs?: number,
+  mediaUrls: string[] = [],
+): UserTweet {
+  return { id, text, createdAtMs, mediaUrls };
+}
+
+function runtime(): BotRuntimeConfig {
+  return {
+    botUserId: "bot-1",
+    botUsername: "modbot",
+    ownerId: owner.id,
+    globalAdminIds: [],
+    defaults,
+  };
+}
+
+function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "text">): DmEvent {
+  return {
+    eventType: "MessageCreate",
+    conversationId: groupId,
+    participantIds: [],
+    participants: [],
+    mentions: [],
+    senderId: alice.id,
+    sender: alice,
+    ...partial,
+  };
+}
+
+describe("Noor alert shaping", () => {
+  it("formats the post as text, status URL, and leftover media links", () => {
+    const post = tweet("55", "  hello   there  ", 10, [
+      "https://pbs.twimg.com/media/abc.jpg",
+    ]);
+    expect(formatNoorPost(post, "noorrietje")).toBe(
+      "hello there\nhttps://x.com/noorrietje/status/55",
+    );
+    expect(formatNoorPost(post, "@NoorRietje", post.mediaUrls)).toBe(
+      "hello there\nhttps://x.com/noorrietje/status/55\nhttps://pbs.twimg.com/media/abc.jpg",
+    );
+  });
+
+  it("wraps the roast in the fixed line", () => {
+    expect(noorMeansLine('  notice me "now"  ')).toBe(
+      `what she really means to say is "notice me 'now'"`,
+    );
+  });
+
+  it("keeps a model rewrite and falls back when it is empty or unsafe", () => {
+    expect(sanitizeNoorRoast('  "please look at my coffee"  ', "coffee")).toBe(
+      "please look at my coffee",
+    );
+    expect(sanitizeNoorRoast('what she really means to say is "clap for me"', "coffee")).toBe(
+      "clap for me",
+    );
+    expect(sanitizeNoorRoast("   ", "I invented a holiday")).toBe(
+      fallbackNoorRoast("I invented a holiday"),
+    );
+    expect(sanitizeNoorRoast("that teen bit", "hello")).toBe(fallbackNoorRoast("hello"));
+    expect(sanitizeNoorRoast("that teen bit", "also a teen post")).toBe(fallbackNoorRoast(""));
+    expect(fallbackNoorRoast("a teen post")).not.toMatch(/teen/i);
+  });
+
+  it("reads a snowflake timestamp", () => {
+    const ms = 1_700_000_000_000;
+    expect(snowflakeTimeMs(idAt(ms))).toBe(ms);
+  });
+
+  it("relays only posts after the watermark, oldest first, and advances past history", () => {
+    const planned = planNoorRelay(
+      [
+        tweet("100", "newer", 2_000),
+        tweet("50", "older history", 500),
+        tweet("100", "duplicate", 2_000),
+        tweet("80", "also new", 1_500),
+      ],
+      { sinceMs: 1_000 },
+    );
+    expect(planned.relay.map((row) => row.id)).toEqual(["80", "100"]);
+    expect(planned.next).toEqual({ sinceMs: 2_000, tweetId: "100" });
+  });
+
+  it("compares tweet ids as numbers so 100 is after 99", () => {
+    const planned = planNoorRelay([tweet("100", "next", 50)], { sinceMs: 0, tweetId: "99" });
+    expect(planned.relay.map((row) => row.id)).toEqual(["100"]);
+    expect(planned.next.tweetId).toBe("100");
+  });
+
+  it("does not treat a post at the enable time as new when no tweet id is stored yet", () => {
+    const ms = 1_700_000_000_000;
+    const planned = planNoorRelay([tweet(idAt(ms), "same moment")], { sinceMs: ms });
+    expect(planned.relay).toEqual([]);
+    expect(planned.next.tweetId).toBe(idAt(ms));
+  });
+});
+
+describe("Noor alert store", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  it("stores an enable watermark and does not move it on a second enable", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    expect(store.enableNoorAlert("c1", 1_000)).toBe("enabled");
+    expect(store.getNoorAlert("c1")).toEqual({
+      conversationId: "c1",
+      enabled: true,
+      sinceMs: 1_000,
+      tweetId: undefined,
+    });
+    store.setNoorWatermark("c1", 1_500, "55");
+    expect(store.enableNoorAlert("c1", 9_000)).toBe("already");
+    expect(store.getNoorAlert("c1")).toMatchObject({
+      enabled: true,
+      sinceMs: 1_500,
+      tweetId: "55",
+    });
+    expect(store.listEnabledNoorAlerts().map((row) => row.conversationId)).toEqual(["c1"]);
+  });
+
+  it("turns off without deleting the row, ignores a watermark write, and resets on re-enable", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.enableNoorAlert("b", 100);
+    store.enableNoorAlert("a", 100);
+    store.setNoorWatermark("a", 100, "7");
+    expect(store.disableNoorAlert("a")).toBe("disabled");
+    expect(store.disableNoorAlert("a")).toBe("already");
+    store.setNoorWatermark("a", 100, "99");
+    expect(store.getNoorAlert("a")).toMatchObject({ enabled: false, tweetId: "7" });
+    expect(store.listEnabledNoorAlerts().map((row) => row.conversationId)).toEqual(["b"]);
+    expect(store.enableNoorAlert("a", 5_000)).toBe("enabled");
+    expect(store.getNoorAlert("a")).toEqual({
+      conversationId: "a",
+      enabled: true,
+      sinceMs: 5_000,
+      tweetId: undefined,
+    });
+  });
+});
+
+describe("Noor alert relay", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  function setup(options?: {
+    llm?: MockLlmClient;
+    fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
+    username?: string;
+  }) {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(noor);
+    client.addUser(owner);
+    const engine = new ModerationEngine(
+      store,
+      client,
+      { ...runtime(), noorUsername: options?.username },
+      options?.llm,
+      { fetchImage: options?.fetchImage },
+    );
+    return { engine, client, store };
+  }
+
+  it("acks on and off, and a second on does not reset the watermark", async () => {
+    const { engine, client, store } = setup();
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!Noor on" }), now);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "Noor alert on for @noorrietje. New posts only. !noor off to stop.",
+    ]);
+    expect(store.getNoorAlert(groupId)).toMatchObject({ enabled: true, sinceMs: now });
+    store.setNoorWatermark(groupId, now, "42");
+    await engine.processEvent(message({ id: "again", text: "!noor on" }), now + 10);
+    expect(client.sent.at(-1)?.text).toBe(
+      "Noor alert is already on for @noorrietje. !noor off to stop.",
+    );
+    expect(store.getNoorAlert(groupId)?.tweetId).toBe("42");
+    await engine.processEvent(message({ id: "off", text: "!noor off" }), now + 20);
+    expect(client.sent.at(-1)?.text).toBe("Noor alert off.");
+    expect(store.getNoorAlert(groupId)?.enabled).toBe(false);
+    await engine.processEvent(message({ id: "off2", text: "!NOOR OFF" }), now + 30);
+    expect(client.sent.at(-1)?.text).toBe("Noor alert is already off.");
+    await engine.processEvent(message({ id: "huh", text: "!noor please" }), now + 40);
+    expect(client.sent.at(-1)?.text).toBe("Use !noor on or !noor off.");
+  });
+
+  it("does not dump history and relays each new post once", async () => {
+    const { engine, client, store } = setup();
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [
+      tweet("10", "old post", now - 60_000),
+      tweet("20", "brand new", now + 1_000),
+      tweet("30", "even newer", now + 2_000),
+    ]);
+    await engine.pollNoorAlerts(now + 5_000);
+    expect(client.sent.map((row) => row.text)).toEqual([
+      "brand new\nhttps://x.com/noorrietje/status/20",
+      `what she really means to say is "${fallbackNoorRoast("brand new")}"`,
+      "even newer\nhttps://x.com/noorrietje/status/30",
+      `what she really means to say is "${fallbackNoorRoast("even newer")}"`,
+    ]);
+    expect(store.getNoorAlert(groupId)?.tweetId).toBe("30");
+
+    client.tweets.set(noor.id, [
+      tweet("10", "old post", now - 60_000),
+      tweet("20", "brand new", now + 1_000),
+      tweet("30", "even newer", now + 2_000),
+    ]);
+    await engine.pollNoorAlerts(now + 5_000 + NOOR_ALERT_POLL_MS);
+    expect(client.sent).toHaveLength(4);
+
+    client.tweets.set(noor.id, [
+      ...client.tweets.get(noor.id)!,
+      tweet("40", "later", now + 90_000),
+    ]);
+    await engine.pollNoorAlerts(now + 5_000 + NOOR_ALERT_POLL_MS);
+    expect(client.sent).toHaveLength(4);
+    await engine.pollNoorAlerts(now + 5_000 + NOOR_ALERT_POLL_MS * 2);
+    expect(client.sent.at(-2)?.text).toContain("later");
+    expect(client.sent.at(-1)?.text.startsWith("what she really means to say is ")).toBe(true);
+    expect(store.getNoorAlert(groupId)?.tweetId).toBe("40");
+  });
+
+  it("uses the LLM rewrite and falls back when the completion fails", async () => {
+    const llm = new MockLlmClient('  "notice me, this latte is my whole personality"  ');
+    const { engine, client } = setup({ llm });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "coffee outside", now + 10)]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(client.sent[1]?.text).toBe(
+      `what she really means to say is "notice me, this latte is my whole personality"`,
+    );
+    expect(llm.calls).toHaveLength(1);
+
+    const failing = new MockLlmClient();
+    failing.complete = async () => {
+      throw new Error("nope");
+    };
+    const again = setup({ llm: failing });
+    await again.engine.processEvent(message({ id: "on2", text: "!noor on" }), now);
+    again.client.sent.length = 0;
+    again.client.tweets.set(noor.id, [tweet("21", "another coffee", now + 10)]);
+    await again.engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(again.client.sent[1]?.text).toBe(
+      `what she really means to say is "${fallbackNoorRoast("another coffee")}"`,
+    );
+  });
+
+  it("does not send a post that trips the age filter to the model", async () => {
+    const llm = new MockLlmClient("should not be used");
+    const { engine, client } = setup({ llm });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "that teen show", now + 10)]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(llm.calls).toHaveLength(0);
+    expect(client.sent[0]?.text).toContain("that teen show");
+    expect(client.sent[1]?.text.toLowerCase()).not.toContain("teen");
+  });
+
+  it("attaches a photo when fetch works, otherwise puts the link in the text", async () => {
+    const bytes = Uint8Array.from([1, 2, 3, 4]);
+    const media = "https://pbs.twimg.com/media/abc.jpg";
+    const { engine, client } = setup({
+      fetchImage: async () => ({ bytes, mimeType: "image/jpeg" }),
+    });
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "pic", now + 10, [media])]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(client.sent[0]?.text).toBe("pic\nhttps://x.com/noorrietje/status/20");
+    expect(client.sent[0]?.text).not.toContain(media);
+    expect(client.images).toEqual([
+      { conversationId: groupId, url: media, mimeType: "image/jpeg", bytes: bytes.byteLength },
+    ]);
+
+    const plain = setup();
+    await plain.engine.processEvent(message({ id: "on2", text: "!noor on" }), now);
+    plain.client.sent.length = 0;
+    plain.client.tweets.set(noor.id, [tweet("21", "pic", now + 10, [media])]);
+    await plain.engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(plain.client.sent[0]?.text).toBe(
+      `pic\nhttps://x.com/noorrietje/status/21\n${media}`,
+    );
+    expect(plain.client.images).toHaveLength(0);
+  });
+
+  it("relays into each enabled conversation and skips one that was turned off", async () => {
+    const { engine, client, store } = setup();
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    await engine.processEvent(
+      message({ id: "on2", text: "!noor on", conversationId: otherGroupId }),
+      now,
+    );
+    await engine.processEvent(
+      message({ id: "off2", text: "!noor off", conversationId: otherGroupId }),
+      now + 1,
+    );
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("20", "only once per chat", now + 10)]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+    expect(client.sent.every((row) => row.conversationId === groupId)).toBe(true);
+    expect(client.sent).toHaveLength(2);
+    expect(store.getNoorAlert(groupId)?.tweetId).toBe("20");
+    expect(store.getNoorAlert(otherGroupId)?.tweetId).toBeUndefined();
+  });
+
+  it("is listed in the default help text", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    expect(loaded.help).toMatch(/!noor on/);
+    expect(loaded.help).toMatch(/!noor off/);
+  });
+});
+
+describe("NOOR_ALERT_USERNAME", () => {
+  it("defaults to unset and rejects a bad handle", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    const previous = process.env.NOOR_ALERT_USERNAME;
+    try {
+      delete process.env.NOOR_ALERT_USERNAME;
+      expect(loadEnv(true).noorUsername).toBeUndefined();
+      process.env.NOOR_ALERT_USERNAME = "@OtherUser";
+      expect(loadEnv(true).noorUsername).toBe("OtherUser");
+      process.env.NOOR_ALERT_USERNAME = "has a space";
+      expect(() => loadEnv(true)).toThrow(/NOOR_ALERT_USERNAME/);
+    } finally {
+      if (previous === undefined) delete process.env.NOOR_ALERT_USERNAME;
+      else process.env.NOOR_ALERT_USERNAME = previous;
+    }
+  });
+});

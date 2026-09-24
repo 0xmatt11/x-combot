@@ -148,6 +148,13 @@ CREATE TABLE IF NOT EXISTS troll_targets (
   last_ms INTEGER NOT NULL DEFAULT 0,
   roast_next INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS noor_alerts (
+  conversation_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL,
+  since_ms INTEGER NOT NULL,
+  tweet_id TEXT
+);
 `;
 
 export class Store {
@@ -776,6 +783,85 @@ export class Store {
       )
       .run(nowMs, roastNext, conversationId);
   }
+
+  /**
+   * `!noor` for this conversation. `sinceMs` is the enable time (or the newest
+   * post time already considered). `tweetId` is the highest id already seen.
+   */
+  getNoorAlert(conversationId: string): NoorAlert | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT enabled, since_ms, tweet_id FROM noor_alerts WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as
+      | { enabled: number; since_ms: number; tweet_id: string | null }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      conversationId,
+      enabled: row.enabled === 1,
+      sinceMs: row.since_ms,
+      tweetId: row.tweet_id ?? undefined,
+    };
+  }
+
+  /** Conversations currently relaying new posts. */
+  listEnabledNoorAlerts(): NoorAlert[] {
+    const rows = this.db
+      .prepare(
+        `SELECT conversation_id, since_ms, tweet_id
+         FROM noor_alerts WHERE enabled = 1
+         ORDER BY conversation_id`,
+      )
+      .all() as { conversation_id: string; since_ms: number; tweet_id: string | null }[];
+    return rows.map((row) => ({
+      conversationId: row.conversation_id,
+      enabled: true,
+      sinceMs: row.since_ms,
+      tweetId: row.tweet_id ?? undefined,
+    }));
+  }
+
+  /**
+   * Turn the alert on. The first enable (and a re-enable) sets the watermark
+   * to `sinceMs` and clears the tweet id so history is not dumped.
+   * A second `!noor on` while it is already on leaves the watermark alone.
+   */
+  enableNoorAlert(conversationId: string, sinceMs: number): "enabled" | "already" {
+    const existing = this.getNoorAlert(conversationId);
+    if (existing?.enabled) return "already";
+    this.db
+      .prepare(
+        `INSERT INTO noor_alerts (conversation_id, enabled, since_ms, tweet_id)
+         VALUES (?, 1, ?, NULL)
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           enabled = 1,
+           since_ms = excluded.since_ms,
+           tweet_id = NULL`,
+      )
+      .run(conversationId, sinceMs);
+    return "enabled";
+  }
+
+  /** Turn the alert off. The row stays so a later enable can replace the watermark. */
+  disableNoorAlert(conversationId: string): "disabled" | "already" {
+    const existing = this.getNoorAlert(conversationId);
+    if (!existing?.enabled) return "already";
+    this.db
+      .prepare(`UPDATE noor_alerts SET enabled = 0 WHERE conversation_id = ?`)
+      .run(conversationId);
+    return "disabled";
+  }
+
+  /** Advance the watermark. No-op when the alert is off. */
+  setNoorWatermark(conversationId: string, sinceMs: number, tweetId?: string): void {
+    this.db
+      .prepare(
+        `UPDATE noor_alerts SET since_ms = ?, tweet_id = ?
+         WHERE conversation_id = ? AND enabled = 1`,
+      )
+      .run(sinceMs, tweetId ?? null, conversationId);
+  }
 }
 
 export interface TrollTarget {
@@ -784,4 +870,11 @@ export interface TrollTarget {
   lastMs: number;
   /** 1 when the next reply should use the chat and timeline roast. */
   roastNext: 0 | 1;
+}
+
+export interface NoorAlert {
+  conversationId: string;
+  enabled: boolean;
+  sinceMs: number;
+  tweetId?: string;
 }

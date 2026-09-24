@@ -409,6 +409,22 @@ describe("parseCommand !troll", () => {
   });
 });
 
+describe("parseCommand !noor", () => {
+  it("parses !noor on and !noor off case-insensitively", () => {
+    expect(parseCommand("!noor on")).toEqual({ name: "noor", mode: "on" });
+    expect(parseCommand("!noor off")).toEqual({ name: "noor", mode: "off" });
+    expect(parseCommand("!Noor on")).toEqual({ name: "noor", mode: "on" });
+    expect(parseCommand("!NOOR OFF")).toEqual({ name: "noor", mode: "off" });
+    expect(parseCommand("/noor on")).toEqual({ name: "noor", mode: "on" });
+    expect(parseCommand("!noor")).toEqual({ name: "noor" });
+    expect(parseCommand("!noor later")).toEqual({ name: "noor" });
+    expect(parseUnknownBang("!noor on")).toBeUndefined();
+    expect(parseUnknownBang("!noor off")).toBeUndefined();
+    expect(parseCommand("!unnoor")).toBeUndefined();
+    expect(parseUnknownBang("!unnoor")).toEqual({ token: "!unnoor", args: "" });
+  });
+});
+
 describe("renderTemplate", () => {
   it("substitutes welcome placeholders", () => {
     expect(renderTemplate("hi @{username} ({user_id})", { username: "alice", user_id: "1" })).toBe(

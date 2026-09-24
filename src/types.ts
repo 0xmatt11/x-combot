@@ -209,6 +209,8 @@ export interface BotRuntimeConfig {
   ownerId: string;
   globalAdminIds: string[];
   defaults: DefaultsConfig;
+  /** X handle for `!noor`. Unset uses `noorrietje`. */
+  noorUsername?: string;
 }
 
 export interface XUser {

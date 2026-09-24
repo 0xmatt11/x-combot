@@ -275,6 +275,55 @@ describe("user timeline", () => {
     expect(url.searchParams.get("tweet.fields")).toBe("text");
     expect(url.searchParams.get("exclude")).toBe("retweets,replies");
   });
+
+  it("reads ids, time, and photo urls for Noor alert", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "55",
+                text: "look at this",
+                created_at: "2026-09-24T12:00:00.000Z",
+                attachments: { media_keys: ["3_photo", "7_video"] },
+              },
+              { id: "not-a-tweet", text: "skip" },
+            ],
+            includes: {
+              media: [
+                {
+                  media_key: "3_photo",
+                  type: "photo",
+                  url: "https://pbs.twimg.com/media/abc.jpg",
+                },
+                {
+                  media_key: "7_video",
+                  type: "video",
+                  url: "https://video.example/clip.mp4",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(client().listUserTweets("998877")).resolves.toEqual([
+      {
+        id: "55",
+        text: "look at this",
+        createdAtMs: Date.parse("2026-09-24T12:00:00.000Z"),
+        mediaUrls: ["https://pbs.twimg.com/media/abc.jpg"],
+      },
+    ]);
+    const url = new URL(String((fetchMock.mock.calls as unknown[][])[0]?.[0]));
+    expect(url.pathname).toBe("/2/users/998877/tweets");
+    expect(url.searchParams.get("max_results")).toBe("20");
+    expect(url.searchParams.get("tweet.fields")).toBe("id,text,created_at,attachments");
+    expect(url.searchParams.get("expansions")).toBe("attachments.media_keys");
+    expect(url.searchParams.get("exclude")).toBe("retweets,replies");
+  });
 });
 
 describe("DM image attach", () => {
