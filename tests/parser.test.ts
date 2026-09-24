@@ -409,6 +409,20 @@ describe("parseCommand !troll", () => {
   });
 });
 
+describe("parseCommand !linkroast", () => {
+  it("parses on and off without caring about case", () => {
+    expect(parseCommand("!linkroast on")).toEqual({ name: "linkroast", action: "on" });
+    expect(parseCommand("!LINKROAST ON")).toEqual({ name: "linkroast", action: "on" });
+    expect(parseCommand("!LinkRoast Off")).toEqual({ name: "linkroast", action: "off" });
+    expect(parseCommand("/linkroast OFF")).toEqual({ name: "linkroast", action: "off" });
+    expect(parseCommand("!linkroast")).toEqual({ name: "linkroast" });
+    expect(parseCommand("!linkroast later")).toEqual({ name: "linkroast" });
+    expect(parseUnknownBang("!linkroast on")).toBeUndefined();
+    expect(parseUnknownBang("!LINKROAST OFF")).toBeUndefined();
+    expect(parseUnknownBang("!linkroast")).toBeUndefined();
+  });
+});
+
 describe("parseCommand !noor", () => {
   it("parses on and off with the same case folding as other bang commands", () => {
     for (const text of ["!noor on", "!Noor on", "!NOOR ON", "!nOoR On", "/noor ON"]) {

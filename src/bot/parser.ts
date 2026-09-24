@@ -59,6 +59,7 @@ export type ParsedCommand =
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
   | { name: "untroll"; target?: UserRef }
+  | { name: "linkroast"; action?: "on" | "off" }
   | { name: "noor"; mode?: "on" | "off" }
   | { name: "noorabs"; mode?: "on" | "off" };
 
@@ -136,6 +137,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "stand",
   "troll",
   "untroll",
+  "linkroast",
   "noor",
   "noorabs",
 ]);
@@ -356,6 +358,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseTroll(rest);
     case "untroll":
       return parseUntroll(rest);
+    case "linkroast":
+      return parseLinkroast(rest);
     case "noor":
       return parseNoor(rest);
     case "noorabs":
@@ -391,6 +395,13 @@ function parseTroll(rest: string): ParsedCommand {
 function parseUntroll(rest: string): ParsedCommand {
   if (!rest) return { name: "untroll" };
   return { name: "untroll", target: trollTarget(rest) };
+}
+
+/** `!linkroast on` / `!linkroast off`. Anything else is the command with no action. */
+function parseLinkroast(rest: string): ParsedCommand {
+  if (/^on$/i.test(rest)) return { name: "linkroast", action: "on" };
+  if (/^off$/i.test(rest)) return { name: "linkroast", action: "off" };
+  return { name: "linkroast" };
 }
 
 /**

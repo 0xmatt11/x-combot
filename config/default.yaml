@@ -31,6 +31,7 @@ help: |
     !video <prompt> — generate a short video with Grok Imagine (needs an xAI key; takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
     !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
+    !linkroast on — roast people who drop X status links in this chat until !linkroast off
     !noor on — Noor alert for @noorrietje. Relays each new post with the status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. Photo posts also attach an Imagine troll remix. !noor off stops it. Name and on/off are case-insensitive
     !noorabs on — when a Noor alert fires, add "but look at muh pretty abs" and an Imagine close-up of skinny tanned abs. Needs !noor on. !noorabs off stops it
     !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
