@@ -322,7 +322,7 @@ The key is `XAI_API_KEY`. If that is unset, the grok LLM stack is used: `LLM_PRO
 | `BOOBS_IMAGE_PROVIDER` | Adult commands |
 | --- | --- |
 | unset | Imagine when a key exists, otherwise search |
-| `imagine` (aliases `grok`, `grok-imagine`) | Imagine. A missing key or a failed call falls back to search |
+| `imagine` (aliases `grok`, `grok-imagine`) | Imagine. A missing key or a non-moderation failure falls back to search. Content moderation is explained in the chat and does not search |
 | `search` | Skip Imagine and use the search cascade |
 
 `BOOBS_IMAGINE_MODEL` defaults to `grok-imagine-image-quality`. Any `grok-imagine-image…` id is accepted, including `grok-imagine-image` and `grok-imagine-image-2.0`. A bad id fails startup. `BOOBS_IMAGINE_ASPECT_RATIO` is optional. Omit it and the model chooses. Accepted values: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `2:1`, `1:2`, `19.5:9`, `9:19.5`, `20:9`, `9:20`, `21:9`, `5:2`, `auto`. A bad ratio fails startup. These three variables are env-only. They are not in `config/default.yaml`.
@@ -331,7 +331,7 @@ If the generated URL or byte hash matches one of the last 8 images posted in tha
 
 Imagine results skip the search text filter and the vision check, because the prompt is fixed.
 
-**Search cascade.** Used when Imagine is off, the key is missing, or Imagine fails. Default search provider is DuckDuckGo. No API key. It loads a `vqd` token from `https://duckduckgo.com/?q=…`, then `https://duckduckgo.com/i.js` with safesearch off (`p=-1`). The query is the fixed phrase for that command (no `18+`). If DuckDuckGo fails, returns no direct image URLs, or returns nothing that passes the text filter, the bot tries keyless Bing HTML (`https://www.bing.com/images/async`, `adlt=off`), then Reddit. Bing HTML does not use the Azure Image Search API or `BOOBS_SEARCH_API_KEY`. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. After the filter, URLs and downloaded byte hashes from the last 8 posts in that conversation are dropped.
+**Search cascade.** Used when Imagine is off, the key is missing, or Imagine fails for a reason other than content moderation. A moderation rejection is posted in the chat with five softer prompts and does not search. Default search provider is DuckDuckGo. No API key. It loads a `vqd` token from `https://duckduckgo.com/?q=…`, then `https://duckduckgo.com/i.js` with safesearch off (`p=-1`). The query is the fixed phrase for that command (no `18+`). If DuckDuckGo fails, returns no direct image URLs, or returns nothing that passes the text filter, the bot tries keyless Bing HTML (`https://www.bing.com/images/async`, `adlt=off`), then Reddit. Bing HTML does not use the Azure Image Search API or `BOOBS_SEARCH_API_KEY`. Set `BOOBS_SEARCH_PROVIDER=reddit` to skip DuckDuckGo and Bing HTML. After the filter, URLs and downloaded byte hashes from the last 8 posts in that conversation are dropped.
 
 Reddit reads `gateway.reddit.com` listings (`sort=hot`, `allow_over18=1`) for that command's fixed subreddits and keeps posts marked NSFW / `over_18` with a direct `i.redd.it`, `preview.redd.it`, or `i.imgur.com` image. The subreddit name stays with the hit so a short title from that board still counts as on-topic. Public `www.reddit.com/r/<sub>/hot.json` is only a fallback. That JSON is often HTTP 403 from cloud IPs.
 
@@ -358,9 +358,9 @@ A missing key on `serpapi` or `bing` makes the command say so and does not call 
 
 `!imagine a neon cat in a cyberpunk alley` generates one image from that prompt and posts it in the same group. `/imagine` works the same way. The prompt is trimmed and sent as written to the same client, model, and aspect ratio as the adult commands. It does not use the search cascade, and it stays available when `!boobs` is off. It is not under the adult rate limit.
 
-It needs the same xAI key as above. With no key the bot says image generation needs `XAI_API_KEY`. The image has no caption. The temporary URL is downloaded and uploaded as an inline photo (classic DM `dm_image`, encrypted Chat photo). If that upload fails and a URL exists, the bot posts the URL. If generation fails, it says to try again. It does not fall back to web search.
+It needs the same xAI key as above. With no key the bot says image generation needs `XAI_API_KEY`. The image has no caption. The temporary URL is downloaded and uploaded as an inline photo (classic DM `dm_image`, encrypted Chat photo). If that upload fails and a URL exists, the bot posts the URL. If Imagine blocks the image for content moderation, the bot says so in the same chat and suggests five softer prompts (from the chat model when LLM replies are enabled, otherwise a local rewrite). Other generation failures say to try again. `!imagine` does not fall back to web search. `!boobs`, `!ass`, and `!booty` use that same moderation reply and skip search.
 
-A blank `!imagine` replies with a one-line example. Prompts longer than 800 characters are refused. Prompts that mention minors are refused and are not sent to the API. A result whose URL or byte hash matches one of the last 8 images in that conversation is generated once more; a second repeat fails the command.
+A blank `!imagine` replies with a one-line example. Prompts are trimmed and sent as written; this bot does not cap their length. If the Imagine API rejects a prompt for length, the bot says it is too long. Prompts that mention minors are refused and are not sent to the API. A result whose URL or byte hash matches one of the last 8 images in that conversation is generated once more; a second repeat fails the command.
 
 ## LLM replies
 
