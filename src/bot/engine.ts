@@ -65,6 +65,7 @@ import {
 } from "./recent-images.js";
 import { matchFilters } from "./filters.js";
 import {
+  GameRoom,
   anagramReply,
   coinflipReply,
   diceReply,
@@ -73,12 +74,16 @@ import {
   guessReply,
   higherLowerReply,
   minesweeperReply,
+  namedPlayer,
   resolveDiceRoller,
   rpsReply,
   scrambleReply,
+  splitLeadingMention,
   truthOrDareReply,
   wordleReply,
   wouldYouRatherReply,
+  type GamePlayer,
+  type MultiplayerKind,
 } from "./games/index.js";
 import {
   isAdmin,
@@ -169,6 +174,8 @@ export class ModerationEngine {
    * stall moderation. Tests await this before reading the finished reply.
    */
   private readonly backgroundWork = new Set<Promise<void>>();
+  /** Tic-tac-toe, connect four, duel, hangman, and story. Memory only. */
+  private readonly gameRoom: GameRoom;
 
   constructor(
     private readonly store: Store,
@@ -178,6 +185,7 @@ export class ModerationEngine {
     private readonly deps: EngineDeps = {},
   ) {
     this.recentImages = deps.recentImages ?? createRecentImageMemory();
+    this.gameRoom = new GameRoom(() => this.nextRandom());
   }
 
   async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
@@ -807,6 +815,78 @@ export class ModerationEngine {
     return resolveDiceRoller(event, (userId) => this.lookupDiceUser(userId));
   }
 
+  /**
+   * Challenge target for a multiplayer game.
+   * `@user` wins. A bare command uses a trusted reply sender (encrypted Chat
+   * sets `replyToSenderId` only when the preview validates). A move ignores
+   * the reply so `!tictactoe 5` while quoting someone is still a move.
+   */
+  private async multiplayerOpponent(
+    event: DmEvent,
+    args: string,
+  ): Promise<{ challenged?: GamePlayer; rest: string; error?: string }> {
+    const split = splitLeadingMention(args);
+    if (split.username) {
+      const user = await this.resolveTarget(
+        { raw: `@${split.username}`, username: split.username },
+        event,
+      );
+      if (!user?.id) return { rest: split.rest, error: "Could not resolve that user." };
+      if (user.id === this.config.botUserId || user.id === event.senderId) {
+        return { rest: split.rest, error: "Pick someone else." };
+      }
+      return { challenged: await this.gamePlayer(user), rest: split.rest };
+    }
+    if (split.rest) return { rest: split.rest };
+    const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
+    if (!replyId) return { rest: "" };
+    if (replyId === event.senderId) {
+      return { rest: "", error: "Reply to someone else, or pass @user." };
+    }
+    if (replyId === this.config.botUserId) return { rest: "", error: "Pick someone else." };
+    const label = await resolveDiceRoller({ senderId: replyId }, (id) => this.lookupDiceUser(id));
+    return { challenged: namedPlayer(replyId, label), rest: "" };
+  }
+
+  private async gamePlayer(user: XUser): Promise<GamePlayer> {
+    const label = await resolveDiceRoller(
+      { sender: user, senderId: user.id },
+      (id) => this.lookupDiceUser(id),
+    );
+    return namedPlayer(user.id, label);
+  }
+
+  private async handleMultiplayer(
+    event: DmEvent,
+    command: Extract<ParsedCommand, { name: MultiplayerKind }>,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const actor = namedPlayer(event.senderId!, await this.diceRoller(event));
+    let challenged: GamePlayer | undefined;
+    let args = command.args ?? "";
+    if (command.name !== "story") {
+      const target = await this.multiplayerOpponent(event, args);
+      if (target.error) {
+        await this.reply(event.conversationId, target.error, actions);
+        return;
+      }
+      challenged = target.challenged;
+      args = target.rest;
+    }
+    await this.reply(
+      event.conversationId,
+      this.gameRoom.play(command.name, {
+        conversationId: event.conversationId,
+        actor,
+        challenged,
+        args,
+        nowMs,
+      }),
+      actions,
+    );
+  }
+
   private async lookupDiceUser(userId: string): Promise<XUser | undefined> {
     try {
       return await this.client.getUserById(userId);
@@ -1052,6 +1132,13 @@ export class ModerationEngine {
           }),
           actions,
         );
+        return;
+      case "tictactoe":
+      case "connect4":
+      case "duel":
+      case "hangman":
+      case "story":
+        await this.handleMultiplayer(event, command, actions, nowMs);
         return;
       default:
         break;

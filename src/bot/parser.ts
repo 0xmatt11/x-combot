@@ -42,7 +42,12 @@ export type ParsedCommand =
   | { name: "guess"; guess?: string }
   | { name: "higherlower"; call?: string }
   | { name: "wouldyourather"; choice?: string }
-  | { name: "truthordare"; mode?: string };
+  | { name: "truthordare"; mode?: string }
+  | { name: "tictactoe"; args?: string }
+  | { name: "connect4"; args?: string }
+  | { name: "duel"; args?: string }
+  | { name: "hangman"; args?: string }
+  | { name: "story"; args?: string };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -98,6 +103,11 @@ const KNOWN_COMMAND_NAMES = new Set([
   "higherlower",
   "wouldyourather",
   "truthordare",
+  "tictactoe",
+  "connect4",
+  "duel",
+  "hangman",
+  "story",
 ]);
 
 /**
@@ -284,6 +294,12 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "wouldyourather", choice: rest } : { name: "wouldyourather" };
     case "truthordare":
       return rest ? { name: "truthordare", mode: rest } : { name: "truthordare" };
+    case "tictactoe":
+    case "connect4":
+    case "duel":
+    case "hangman":
+    case "story":
+      return rest ? { name: name, args: rest } : { name: name };
     default:
       return undefined;
   }

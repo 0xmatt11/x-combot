@@ -181,7 +181,7 @@ describe("!games menu", () => {
     const lines = menu.split("\n");
     expect(lines[0]).toBe("Games:");
     expect(menu).toContain("Instant:\n!dice — roll dice");
-    expect(menu).toContain("Multiplayer (coming):");
+    expect(menu).toContain("Multiplayer:\n!tictactoe — tic-tac-toe");
     expect(menu).toContain("Word/solo (coming):");
     expect(menu).toContain("XP/casino (coming):");
     expect(menu).toContain("Board:\n!minesweeper — minesweeper");

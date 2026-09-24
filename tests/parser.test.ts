@@ -211,6 +211,23 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!truthordare dare")).toBeUndefined();
   });
 
+  it("parses multiplayer games and keeps them off the unknown-command path", () => {
+    expect(parseCommand("!tictactoe")).toEqual({ name: "tictactoe" });
+    expect(parseCommand("/tictactoe @bob")).toEqual({ name: "tictactoe", args: "@bob" });
+    expect(parseCommand("!connect4 4")).toEqual({ name: "connect4", args: "4" });
+    expect(parseCommand("!duel attack")).toEqual({ name: "duel", args: "attack" });
+    expect(parseCommand("/hangman start")).toEqual({ name: "hangman", args: "start" });
+    expect(parseCommand("!story Once upon a time.")).toEqual({
+      name: "story",
+      args: "Once upon a time.",
+    });
+    expect(parseUnknownBang("!tictactoe @bob")).toBeUndefined();
+    expect(parseUnknownBang("!connect4")).toBeUndefined();
+    expect(parseUnknownBang("!duel")).toBeUndefined();
+    expect(parseUnknownBang("!hangman e")).toBeUndefined();
+    expect(parseUnknownBang("/story stop")).toBeUndefined();
+  });
+
   it("parses LLM ask, summarize, and analyze commands", () => {
     expect(parseCommand("!ask what did we decide?")).toEqual({
       name: "ask",
@@ -260,7 +277,7 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!minesweeper easy")).toBeUndefined();
     expect(parseUnknownBang("!12345")).toBeUndefined();
     expect(parseCommand("!12345")).toBeUndefined();
-    expect(parseCommand("!tictactoe")).toBeUndefined();
+    expect(parseCommand("!slots")).toBeUndefined();
     expect(parseUnknownBang("!summary focus")).toBeUndefined();
     expect(parseUnknownBang("!delete 12")).toBeUndefined();
     expect(parseUnknownBang("!warn")).toBeUndefined();
