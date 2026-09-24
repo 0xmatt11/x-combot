@@ -394,13 +394,76 @@ describe("Noor alert relay", () => {
     expect(imaginePrompts[0]).toContain("coffee outside");
     expect(imaginePrompts[0]).toContain("latte");
     expect(order[0]).toMatch(/^text:coffee outside\nhttps:\/\/x\.com\/noorrietje\/status\/20/);
+    expect(order[0]).not.toContain(media);
     expect(order[1]).toBe(`image:${media}`);
     expect(order[2]).toMatch(/^text:what she really means to say is "/);
     expect(order[3]).toBe("image:https://api.x.ai/v1/images/generations");
-    expect(client.images).toHaveLength(2);
+    expect(client.images).toEqual([
+      { conversationId: groupId, url: media, mimeType: "image/jpeg", bytes: bytes.byteLength },
+      {
+        conversationId: groupId,
+        url: "https://api.x.ai/v1/images/generations",
+        mimeType: "image/png",
+        bytes: 3,
+      },
+    ]);
+    expect(client.images.every((row) => row.bytes > 0)).toBe(true);
     expect(client.sent[1]?.text).toBe(
       `what she really means to say is "please look at my little coffee moment"`,
     );
+  });
+
+  it("attaches every downloaded photo and the Imagine remix URL as sendImage bytes", async () => {
+    const herA = "https://pbs.twimg.com/media/one.jpg";
+    const herB = "https://pbs.twimg.com/media/two.jpg";
+    const remixUrl = "https://imgen.x.ai/remix.jpg";
+    const files = new Map<string, { bytes: Uint8Array; mimeType: string }>([
+      [herA, { bytes: Uint8Array.from([1, 1, 1, 1]), mimeType: "image/jpeg" }],
+      [herB, { bytes: Uint8Array.from([2, 2, 2, 2]), mimeType: "image/jpeg" }],
+      [remixUrl, { bytes: Uint8Array.from([9, 9, 9, 9, 9]), mimeType: "image/jpeg" }],
+    ]);
+    const { engine, client } = setup({
+      llm: new VisionMock("notice the outfit"),
+      imagine: {
+        async generate() {
+          return { url: remixUrl };
+        },
+      },
+      fetchImage: async (url) => files.get(url),
+    });
+    const order: string[] = [];
+    const sendMessage = client.sendMessage.bind(client);
+    const sendImage = client.sendImage.bind(client);
+    client.sendMessage = async (conversationId, text) => {
+      order.push(`text:${text}`);
+      return sendMessage(conversationId, text);
+    };
+    client.sendImage = async (conversationId, image) => {
+      order.push(`image:${image.url}:${image.bytes?.byteLength ?? 0}`);
+      return sendImage(conversationId, image);
+    };
+    const now = 1_700_000_000_000;
+    await engine.processEvent(message({ id: "on", text: "!noor on" }), now);
+    order.length = 0;
+    client.sent.length = 0;
+    client.tweets.set(noor.id, [tweet("21", "two pics", now + 10, [herA, herB])]);
+    await engine.pollNoorAlerts(now + NOOR_ALERT_POLL_MS);
+
+    expect(order.map((line) => line.split(":")[0])).toEqual([
+      "text",
+      "image",
+      "image",
+      "text",
+      "image",
+    ]);
+    expect(order[1]).toBe(`image:${herA}:4`);
+    expect(order[2]).toBe(`image:${herB}:4`);
+    expect(order[3]).toMatch(/^text:what she really means to say is "/);
+    expect(order[4]).toBe(`image:${remixUrl}:5`);
+    expect(client.sent.map((row) => row.text).some((text) => text === herA || text === herB || text === remixUrl)).toBe(
+      false,
+    );
+    expect(client.images.map((row) => row.bytes)).toEqual([4, 4, 5]);
   });
 
   it("does not call vision or Imagine for a text-only post", async () => {
@@ -443,6 +506,7 @@ describe("Noor alert relay", () => {
     expect(client.images).toEqual([
       { conversationId: groupId, url: media, mimeType: "image/jpeg", bytes: bytes.byteLength },
     ]);
+    expect(client.images[0]?.bytes).toBeGreaterThan(0);
 
     const plain = setup();
     await plain.engine.processEvent(message({ id: "on2", text: "!noor on" }), now);

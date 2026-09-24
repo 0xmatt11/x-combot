@@ -1235,20 +1235,11 @@ export class ModerationEngine {
       formatNoorPost(tweet, username, extraLinks),
     );
     for (const photo of loaded) {
-      try {
-        await this.client.sendImage(conversationId, {
-          url: photo.url,
-          bytes: photo.image.bytes,
-          mimeType: photo.image.mimeType,
-        });
-      } catch (error) {
-        log.warn(`Noor media attach failed conversation=${conversationId}`, error);
-        try {
-          await this.client.sendMessage(conversationId, photo.url);
-        } catch (linkError) {
-          log.warn(`Noor media link failed conversation=${conversationId}`, linkError);
-        }
-      }
+      await this.sendNoorAttachedImage(conversationId, {
+        url: photo.url,
+        bytes: photo.image.bytes,
+        mimeType: photo.image.mimeType,
+      });
     }
     try {
       await this.client.sendMessage(conversationId, noorMeansLine(inner));
@@ -1257,6 +1248,34 @@ export class ModerationEngine {
     }
     if (mediaUrls.length > 0) {
       await this.postNoorRemix(conversationId, tweet.text, notes);
+    }
+  }
+
+  /**
+   * Same photo path as `!imagine`: `sendImage` with bytes. A failed upload
+   * posts the https URL, which is what classic DMs do when they cannot attach.
+   */
+  private async sendNoorAttachedImage(
+    conversationId: string,
+    image: { url: string; bytes: Uint8Array; mimeType?: string },
+  ): Promise<void> {
+    if (image.bytes.byteLength > 0) {
+      try {
+        await this.client.sendImage(conversationId, {
+          url: image.url,
+          bytes: image.bytes,
+          mimeType: image.mimeType,
+        });
+        return;
+      } catch (error) {
+        log.warn(`Noor image attach failed conversation=${conversationId}`, error);
+      }
+    }
+    if (!image.url.startsWith("https://")) return;
+    try {
+      await this.client.sendMessage(conversationId, image.url);
+    } catch (error) {
+      log.warn(`Noor image link failed conversation=${conversationId}`, error);
     }
   }
 
@@ -1312,17 +1331,42 @@ export class ModerationEngine {
       log.warn(`Noor remix failed conversation=${conversationId}`, error);
       return;
     }
-    const actions: EngineActions = {
-      replies: [],
-      deletes: [],
-      notifies: [],
-      muted: false,
-      warned: false,
-      llm: false,
-    };
-    const outcome = await this.postGeneratedImage(conversationId, generated, actions, "Noor remix");
-    if (outcome !== "posted") {
-      log.warn(`Noor remix was not posted conversation=${conversationId} (${outcome})`);
+    const attached = await this.noorRemixBytes(generated);
+    if (!attached) {
+      log.warn(`Noor remix had no image bytes conversation=${conversationId}`);
+      if (generated.url?.startsWith("https://")) {
+        try {
+          await this.client.sendMessage(conversationId, generated.url);
+        } catch (error) {
+          log.warn(`Noor remix link failed conversation=${conversationId}`, error);
+        }
+      }
+      return;
+    }
+    await this.sendNoorAttachedImage(conversationId, attached);
+  }
+
+  /** Prefer bytes already on the Imagine result, then download the temporary URL. */
+  private async noorRemixBytes(
+    image: ImagineImage,
+  ): Promise<{ url: string; bytes: Uint8Array; mimeType?: string } | undefined> {
+    if (image.bytes && image.bytes.byteLength > 0) {
+      return {
+        url: image.url?.startsWith("https://")
+          ? image.url
+          : "https://api.x.ai/v1/images/generations",
+        bytes: image.bytes,
+        mimeType: image.mimeType,
+      };
+    }
+    if (!image.url?.startsWith("https://") || !this.deps.fetchImage) return undefined;
+    try {
+      const fetched = await this.deps.fetchImage(image.url);
+      if (!fetched?.bytes?.byteLength) return undefined;
+      return { url: image.url, bytes: fetched.bytes, mimeType: fetched.mimeType };
+    } catch (error) {
+      log.warn("Noor remix download failed", error);
+      return undefined;
     }
   }
 
