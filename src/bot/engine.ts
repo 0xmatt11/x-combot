@@ -16,7 +16,13 @@ import type {
   XUser,
 } from "../types.js";
 import { isChatGroupId } from "../chat/ids.js";
-import { displayName, isGroupConversation, isNumericUserId, type XClient } from "../x/client.js";
+import {
+  displayName,
+  isGroupConversation,
+  isNumericUserId,
+  type UserTweet,
+  type XClient,
+} from "../x/client.js";
 import type { ChatMessage, LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { fetchConversationTurns } from "../llm/history.js";
@@ -27,6 +33,25 @@ import {
   stripApiIds,
   TROLL_COOLDOWN_MS,
 } from "./troll.js";
+import {
+  buildNoorAbsPrompt,
+  buildNoorImaginePrompt,
+  buildNoorRoastMessages,
+  fallbackNoorRoast,
+  formatNoorPost,
+  NOOR_ABS_CODA,
+  NOOR_ALERT_POLL_MS,
+  NOOR_MEDIA_LIMIT,
+  NOOR_VISION_PROMPT,
+  noorMeansLine,
+  noorVisionPayload,
+  normalizeNoorUsername,
+  planNoorRelay,
+  sanitizeNoorRoast,
+  sanitizeNoorVision,
+  snowflakeTimeMs,
+} from "./noor.js";
+import type { NoorAlert } from "../store.js";
 import {
   ADULT_IMAGE_RETRY_MESSAGE,
   ADULT_VISION_UNAVAILABLE_MESSAGE,
@@ -213,6 +238,10 @@ export class ModerationEngine {
   private readonly backgroundWork = new Set<Promise<void>>();
   /** Tic-tac-toe, connect four, duel, hangman, and story. Memory only. */
   private readonly gameRoom: GameRoom;
+  /** Resolved `!noor` account. Cleared when the configured handle changes. */
+  private noorAccount?: { username: string; id: string };
+  private noorLastPollMs = 0;
+  private noorPollInFlight = false;
 
   constructor(
     private readonly store: Store,
@@ -1060,6 +1089,399 @@ export class ModerationEngine {
    * Replays never reach here: `alreadyHandled` claims the event first.
    * Muted, filtered, and flood-stopped messages return before this runs.
    */
+  /**
+   * `!noor on` / `!noor off` for this conversation.
+   * Enable stamps the watermark at `nowMs` so older posts are not relayed.
+   */
+  private async handleNoor(
+    event: DmEvent,
+    command: { name: "noor"; mode?: "on" | "off" },
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    const handle = normalizeNoorUsername(this.config.noorUsername);
+    if (command.mode === "on") {
+      const result = this.store.enableNoorAlert(conversationId, nowMs);
+      await this.reply(
+        conversationId,
+        result === "already"
+          ? `Noor alert is already on for @${handle}. !noor off to stop.`
+          : `Noor alert on for @${handle}. New posts only. !noor off to stop.`,
+        actions,
+      );
+      return;
+    }
+    if (command.mode === "off") {
+      const hadAbs = this.store.getNoorAlert(conversationId)?.absEnabled === true;
+      const result = this.store.disableNoorAlert(conversationId);
+      await this.reply(
+        conversationId,
+        result === "already"
+          ? "Noor alert is already off."
+          : hadAbs
+            ? "Noor alert off. Abs coda off too."
+            : "Noor alert off.",
+        actions,
+      );
+      return;
+    }
+    await this.reply(conversationId, "Use !noor on or !noor off.", actions);
+  }
+
+  /**
+   * `!noorabs on` / `!noorabs off`. Abs mode does not turn Noor on.
+   * `!noor off` clears the abs flag in the store.
+   */
+  private async handleNoorAbs(
+    event: DmEvent,
+    command: { name: "noorabs"; mode?: "on" | "off" },
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (command.mode === "on") {
+      const result = this.store.enableNoorAbs(conversationId);
+      const text =
+        result === "need-noor"
+          ? "Turn on !noor first."
+          : result === "already"
+            ? "Noor abs is already on. !noorabs off to stop."
+            : "Noor abs on. New posts end with the abs coda. !noorabs off to stop.";
+      await this.reply(conversationId, text, actions);
+      return;
+    }
+    if (command.mode === "off") {
+      const result = this.store.disableNoorAbs(conversationId);
+      await this.reply(
+        conversationId,
+        result === "already" ? "Noor abs is already off." : "Noor abs off.",
+        actions,
+      );
+      return;
+    }
+    await this.reply(conversationId, "Use !noorabs on or !noorabs off.", actions);
+  }
+
+  /**
+   * One timeline read, then one relay per new post in each conversation that
+   * has Noor alert on. A second call inside the poll window does nothing.
+   */
+  async pollNoorAlerts(nowMs = Date.now()): Promise<void> {
+    if (this.noorPollInFlight) return;
+    const alerts = this.store.listEnabledNoorAlerts();
+    if (alerts.length === 0) return;
+    if (nowMs - this.noorLastPollMs < NOOR_ALERT_POLL_MS - 1_000) return;
+    this.noorPollInFlight = true;
+    this.noorLastPollMs = nowMs;
+    try {
+      const account = await this.resolveNoorAccount();
+      if (!account) return;
+      let tweets: UserTweet[];
+      try {
+        tweets = await this.client.listUserTweets(account.id);
+      } catch (error) {
+        log.warn(`Noor timeline fetch failed @${account.username}`, error);
+        return;
+      }
+      for (const alert of alerts) {
+        await this.relayNoorAlert(alert, tweets, account.username);
+      }
+    } finally {
+      this.noorPollInFlight = false;
+    }
+  }
+
+  private async resolveNoorAccount(): Promise<{ username: string; id: string } | undefined> {
+    const username = normalizeNoorUsername(this.config.noorUsername);
+    if (this.noorAccount?.username === username) return this.noorAccount;
+    try {
+      const user = await this.client.getUserByUsername(username);
+      if (!user?.id) {
+        log.warn(`Noor alert user @${username} was not found`);
+        return undefined;
+      }
+      this.noorAccount = { username, id: user.id };
+      return this.noorAccount;
+    } catch (error) {
+      log.warn(`Noor alert user lookup failed @${username}`, error);
+      return undefined;
+    }
+  }
+
+  private async relayNoorAlert(
+    alert: NoorAlert,
+    tweets: readonly UserTweet[],
+    username: string,
+  ): Promise<void> {
+    const watermark = { sinceMs: alert.sinceMs, tweetId: alert.tweetId };
+    const { relay, next } = planNoorRelay(tweets, watermark);
+    if (relay.length === 0) {
+      if (next.tweetId !== alert.tweetId || next.sinceMs !== alert.sinceMs) {
+        this.store.setNoorWatermark(alert.conversationId, next.sinceMs, next.tweetId);
+      }
+      return;
+    }
+    let sinceMs = alert.sinceMs;
+    for (const tweet of relay) {
+      try {
+        await this.postNoorTweet(alert.conversationId, tweet, username, alert.absEnabled);
+      } catch (error) {
+        log.warn(
+          `Noor relay failed conversation=${alert.conversationId} tweet=${tweet.id}`,
+          error,
+        );
+        return;
+      }
+      const time = tweet.createdAtMs ?? snowflakeTimeMs(tweet.id);
+      if (time !== undefined && time > sinceMs) sinceMs = time;
+      this.store.setNoorWatermark(alert.conversationId, sinceMs, tweet.id);
+    }
+    const lastId = relay[relay.length - 1]?.id;
+    if (next.tweetId && (next.tweetId !== lastId || next.sinceMs > sinceMs)) {
+      this.store.setNoorWatermark(
+        alert.conversationId,
+        Math.max(sinceMs, next.sinceMs),
+        next.tweetId,
+      );
+    }
+  }
+
+  /**
+   * Post her text and photo, then the roast, then one Imagine parody when the
+   * post had a photo. The roast is composed first so a model failure still
+   * uses the fallback template before anything is sent.
+   */
+  private async postNoorTweet(
+    conversationId: string,
+    tweet: UserTweet,
+    username: string,
+    absEnabled: boolean,
+  ): Promise<void> {
+    const mediaUrls = tweet.mediaUrls.filter((url) => url.startsWith("https://"));
+    const loaded: { url: string; image: AdultVisionImage }[] = [];
+    const missed: string[] = [];
+    for (const url of mediaUrls.slice(0, NOOR_MEDIA_LIMIT)) {
+      const image = await this.loadNoorImage(url);
+      if (image) loaded.push({ url, image });
+      else missed.push(url);
+    }
+    const extraLinks = [...missed, ...mediaUrls.slice(NOOR_MEDIA_LIMIT)];
+    const notes = await this.describeNoorPhotos(
+      conversationId,
+      loaded.map((photo) => photo.image),
+    );
+    const inner = await this.composeNoorRoast(conversationId, tweet.text, notes);
+    await this.client.sendMessage(
+      conversationId,
+      formatNoorPost(tweet, username, extraLinks),
+    );
+    for (const photo of loaded) {
+      await this.sendNoorAttachedImage(conversationId, {
+        url: photo.url,
+        bytes: photo.image.bytes,
+        mimeType: photo.image.mimeType,
+      });
+    }
+    try {
+      await this.client.sendMessage(conversationId, noorMeansLine(inner));
+    } catch (error) {
+      log.warn(`Noor roast post failed conversation=${conversationId} tweet=${tweet.id}`, error);
+    }
+    if (mediaUrls.length > 0) {
+      await this.postNoorRemix(conversationId, tweet.text, notes);
+    }
+    if (absEnabled) {
+      await this.postNoorAbs(conversationId);
+    }
+  }
+
+  /**
+   * Same photo path as `!imagine`: `sendImage` with bytes. A failed upload
+   * posts the https URL, which is what classic DMs do when they cannot attach.
+   */
+  private async sendNoorAttachedImage(
+    conversationId: string,
+    image: { url: string; bytes: Uint8Array; mimeType?: string },
+  ): Promise<void> {
+    if (image.bytes.byteLength > 0) {
+      try {
+        await this.client.sendImage(conversationId, {
+          url: image.url,
+          bytes: image.bytes,
+          mimeType: image.mimeType,
+        });
+        return;
+      } catch (error) {
+        log.warn(`Noor image attach failed conversation=${conversationId}`, error);
+      }
+    }
+    if (!image.url.startsWith("https://")) return;
+    try {
+      await this.client.sendMessage(conversationId, image.url);
+    } catch (error) {
+      log.warn(`Noor image link failed conversation=${conversationId}`, error);
+    }
+  }
+
+  /** Grok vision description of each downloaded photo. Failures stay text-only. */
+  private async describeNoorPhotos(
+    conversationId: string,
+    photos: readonly AdultVisionImage[],
+  ): Promise<string[]> {
+    const llm = this.llmClient;
+    if (!llm?.completeVision || photos.length === 0) return [];
+    if (!this.conversationConfig(conversationId).llmEnabled) return [];
+    const notes: string[] = [];
+    for (const photo of photos) {
+      try {
+        const reply = await llm.completeVision(NOOR_VISION_PROMPT, noorVisionPayload(photo));
+        const note = sanitizeNoorVision(reply);
+        if (note) notes.push(note);
+      } catch (error) {
+        log.warn(`Noor vision failed conversation=${conversationId}`, error);
+      }
+    }
+    return notes;
+  }
+
+  /**
+   * One Imagine parody of her photo, posted after the roast. A missing key or
+   * a failed generation leaves the text relay in place.
+   */
+  private async postNoorRemix(
+    conversationId: string,
+    tweetText: string,
+    imageNotes: readonly string[],
+  ): Promise<void> {
+    const imagine = this.deps.imagine;
+    if (!imagine) {
+      log.info(`Noor remix skipped conversation=${conversationId} (imagine unavailable)`);
+      return;
+    }
+    const built = buildNoorImaginePrompt(tweetText, imageNotes);
+    if (!built) {
+      log.info(`Noor remix skipped conversation=${conversationId} (no safe prompt)`);
+      return;
+    }
+    const normalized = normalizeImaginePrompt(built);
+    if (!normalized.ok) {
+      log.info(`Noor remix skipped conversation=${conversationId} (${normalized.reason})`);
+      return;
+    }
+    let generated: ImagineImage;
+    try {
+      generated = await imagine.generate(normalized.prompt);
+    } catch (error) {
+      log.warn(`Noor remix failed conversation=${conversationId}`, error);
+      return;
+    }
+    const attached = await this.noorRemixBytes(generated);
+    if (!attached) {
+      log.warn(`Noor remix had no image bytes conversation=${conversationId}`);
+      if (generated.url?.startsWith("https://")) {
+        try {
+          await this.client.sendMessage(conversationId, generated.url);
+        } catch (error) {
+          log.warn(`Noor remix link failed conversation=${conversationId}`, error);
+        }
+      }
+      return;
+    }
+    await this.sendNoorAttachedImage(conversationId, attached);
+  }
+
+  /**
+   * After the normal relay, post the abs line and one new Imagine still.
+   * Each relay calls Imagine again (a fresh framing token, no static file).
+   * A failed generation is logged and the text coda still stands.
+   */
+  private async postNoorAbs(conversationId: string): Promise<void> {
+    try {
+      await this.client.sendMessage(conversationId, NOOR_ABS_CODA);
+    } catch (error) {
+      log.warn(`Noor abs coda failed conversation=${conversationId}`, error);
+    }
+    const imagine = this.deps.imagine;
+    if (!imagine) {
+      log.info(`Noor abs image skipped conversation=${conversationId} (imagine unavailable)`);
+      return;
+    }
+    const normalized = normalizeImaginePrompt(buildNoorAbsPrompt());
+    if (!normalized.ok) {
+      log.info(`Noor abs image skipped conversation=${conversationId} (${normalized.reason})`);
+      return;
+    }
+    let generated: ImagineImage;
+    try {
+      generated = await imagine.generate(normalized.prompt);
+    } catch (error) {
+      log.warn(`Noor abs image failed conversation=${conversationId}`, error);
+      return;
+    }
+    const attached = await this.noorRemixBytes(generated);
+    if (!attached) {
+      log.warn(`Noor abs image had no bytes conversation=${conversationId}`);
+      return;
+    }
+    await this.sendNoorAttachedImage(conversationId, attached);
+  }
+
+  /** Prefer bytes already on the Imagine result, then download the temporary URL. */
+  private async noorRemixBytes(
+    image: ImagineImage,
+  ): Promise<{ url: string; bytes: Uint8Array; mimeType?: string } | undefined> {
+    if (image.bytes && image.bytes.byteLength > 0) {
+      return {
+        url: image.url?.startsWith("https://")
+          ? image.url
+          : "https://api.x.ai/v1/images/generations",
+        bytes: image.bytes,
+        mimeType: image.mimeType,
+      };
+    }
+    if (!image.url?.startsWith("https://") || !this.deps.fetchImage) return undefined;
+    try {
+      const fetched = await this.deps.fetchImage(image.url);
+      if (!fetched?.bytes?.byteLength) return undefined;
+      return { url: image.url, bytes: fetched.bytes, mimeType: fetched.mimeType };
+    } catch (error) {
+      log.warn("Noor remix download failed", error);
+      return undefined;
+    }
+  }
+
+  private async loadNoorImage(url: string): Promise<AdultVisionImage | undefined> {
+    if (!this.deps.fetchImage) return undefined;
+    try {
+      const image = await this.deps.fetchImage(url);
+      if (!image?.bytes?.byteLength) return undefined;
+      return image;
+    } catch (error) {
+      log.warn("Noor media download failed", error);
+      return undefined;
+    }
+  }
+
+  private async composeNoorRoast(
+    conversationId: string,
+    tweetText: string,
+    imageNotes: readonly string[] = [],
+  ): Promise<string> {
+    const fallback = () => fallbackNoorRoast(tweetText);
+    if (containsBannedAgeTerm(tweetText) || imageNotes.some((note) => containsBannedAgeTerm(note))) {
+      return fallbackNoorRoast("");
+    }
+    const settings = this.conversationConfig(conversationId);
+    if (!this.llmClient || !settings.llmEnabled) return fallback();
+    try {
+      const answer = await this.llmClient.complete(buildNoorRoastMessages(tweetText, imageNotes));
+      return sanitizeNoorRoast(answer, tweetText);
+    } catch (error) {
+      log.warn(`Noor roast failed conversation=${conversationId}`, error);
+      return fallback();
+    }
+  }
+
   private async trollIfTarget(
     event: DmEvent,
     senderId: string,
@@ -1402,6 +1824,12 @@ export class ModerationEngine {
         return;
       case "untroll":
         await this.handleUntroll(event, command, actions);
+        return;
+      case "noor":
+        await this.handleNoor(event, command, actions, nowMs);
+        return;
+      case "noorabs":
+        await this.handleNoorAbs(event, command, actions);
         return;
       case "dice":
         await this.reply(

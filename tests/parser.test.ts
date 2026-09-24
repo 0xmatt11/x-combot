@@ -409,6 +409,39 @@ describe("parseCommand !troll", () => {
   });
 });
 
+describe("parseCommand !noor", () => {
+  it("parses on and off with the same case folding as other bang commands", () => {
+    for (const text of ["!noor on", "!Noor on", "!NOOR ON", "!nOoR On", "/noor ON"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noor", mode: "on" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    for (const text of ["!noor off", "!Noor off", "!NOOR OFF", "!nOoR oFf"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noor", mode: "off" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    expect(parseCommand("!noor")).toEqual({ name: "noor" });
+    expect(parseCommand("!noor later")).toEqual({ name: "noor" });
+    expect(parseCommand("!unnoor")).toBeUndefined();
+    expect(parseUnknownBang("!unnoor")).toEqual({ token: "!unnoor", args: "" });
+    expect(parseCommand("!noor abs")).toEqual({ name: "noor" });
+  });
+});
+
+describe("parseCommand !noorabs", () => {
+  it("folds the command name and on/off the same way as !noor", () => {
+    for (const text of ["!noorabs on", "!NoorAbs on", "!NOORABS ON", "!nOoRaBs On", "/noorabs ON"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noorabs", mode: "on" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    for (const text of ["!noorabs off", "!NoorAbs off", "!NOORABS OFF", "!nOoRaBs oFf"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noorabs", mode: "off" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    expect(parseCommand("!noorabs")).toEqual({ name: "noorabs" });
+    expect(parseCommand("!noorabs later")).toEqual({ name: "noorabs" });
+  });
+});
+
 describe("renderTemplate", () => {
   it("substitutes welcome placeholders", () => {
     expect(renderTemplate("hi @{username} ({user_id})", { username: "alice", user_id: "1" })).toBe(

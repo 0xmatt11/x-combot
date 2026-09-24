@@ -20,6 +20,7 @@ import {
   DM_EXPANSIONS,
   EVENT_TYPES,
   USER_FIELDS,
+  type UserTweet,
   type XClient,
 } from "./client.js";
 
@@ -127,6 +128,57 @@ export class LiveXClient implements XClient {
       if (text) posts.push(text);
     }
     return posts;
+  }
+
+  /**
+   * Public posts for Noor alert. Same user-token scopes as `listRecentPosts`.
+   * One page of 20. Photos come back as https URLs; video and GIF stay on the status link.
+   */
+  async listUserTweets(userId: string): Promise<UserTweet[]> {
+    const payload = await this.request<{
+      data?: {
+        id?: string;
+        text?: string;
+        created_at?: string;
+        attachments?: { media_keys?: string[] };
+      }[];
+      includes?: {
+        media?: { media_key?: string; type?: string; url?: string }[];
+      };
+    }>(`/2/users/${encodeURIComponent(userId)}/tweets`, {
+      search: {
+        max_results: "20",
+        "tweet.fields": "id,text,created_at,attachments",
+        expansions: "attachments.media_keys",
+        "media.fields": "media_key,type,url",
+        exclude: "retweets,replies",
+      },
+    });
+    const photos = new Map<string, string>();
+    for (const media of payload.includes?.media ?? []) {
+      if (media.type !== "photo" || !media.media_key) continue;
+      const url = media.url?.trim();
+      if (!url?.startsWith("https://")) continue;
+      photos.set(media.media_key, url);
+    }
+    const tweets: UserTweet[] = [];
+    for (const tweet of payload.data ?? []) {
+      const id = tweet.id?.trim();
+      if (!id || !/^\d+$/.test(id)) continue;
+      const created = tweet.created_at ? Date.parse(tweet.created_at) : Number.NaN;
+      const mediaUrls: string[] = [];
+      for (const key of tweet.attachments?.media_keys ?? []) {
+        const url = photos.get(key);
+        if (url) mediaUrls.push(url);
+      }
+      tweets.push({
+        id,
+        text: tweet.text?.trim() ?? "",
+        createdAtMs: Number.isFinite(created) ? created : undefined,
+        mediaUrls,
+      });
+    }
+    return tweets;
   }
 
   async getUserById(id: string): Promise<XUser | undefined> {

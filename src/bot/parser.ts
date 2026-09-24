@@ -58,7 +58,9 @@ export type ParsedCommand =
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
-  | { name: "untroll"; target?: UserRef };
+  | { name: "untroll"; target?: UserRef }
+  | { name: "noor"; mode?: "on" | "off" }
+  | { name: "noorabs"; mode?: "on" | "off" };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -134,6 +136,8 @@ const KNOWN_COMMAND_NAMES = new Set([
   "stand",
   "troll",
   "untroll",
+  "noor",
+  "noorabs",
 ]);
 
 /**
@@ -352,6 +356,10 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseTroll(rest);
     case "untroll":
       return parseUntroll(rest);
+    case "noor":
+      return parseNoor(rest);
+    case "noorabs":
+      return parseNoorAbs(rest);
     default:
       return undefined;
   }
@@ -383,6 +391,28 @@ function parseTroll(rest: string): ParsedCommand {
 function parseUntroll(rest: string): ParsedCommand {
   if (!rest) return { name: "untroll" };
   return { name: "untroll", target: trollTarget(rest) };
+}
+
+/**
+ * `!noor on` / `!noor off`. The command name is already lowercased in
+ * `matchBang` (same as `!troll`). The on/off word uses that same folding.
+ * Anything else is a usage reply, not an unknown bang.
+ */
+function parseNoor(rest: string): ParsedCommand {
+  const mode = rest.toLowerCase();
+  if (mode === "on" || mode === "off") return { name: "noor", mode };
+  return { name: "noor" };
+}
+
+/**
+ * `!noorabs on` / `!noorabs off`. Same folding as `!noor`: the command token
+ * is lowercased in `matchBang`, and on/off uses `rest.toLowerCase()`.
+ * `!noor abs` is not this command.
+ */
+function parseNoorAbs(rest: string): ParsedCommand {
+  const mode = rest.toLowerCase();
+  if (mode === "on" || mode === "off") return { name: "noorabs", mode };
+  return { name: "noorabs" };
 }
 
 function trollTarget(rest: string): UserRef {
