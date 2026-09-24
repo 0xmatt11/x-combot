@@ -1,10 +1,23 @@
 import { log } from "../log.js";
 import type { Store } from "../store.js";
-import type { DeleteHint, DeleteResult, DmEvent, OutboundImage, SendMessageResult } from "../types.js";
+import type {
+  DeleteHint,
+  DeleteResult,
+  DmEvent,
+  OutboundImage,
+  OutboundVideo,
+  SendMessageResult,
+} from "../types.js";
 import { logDecryptErrors } from "./decrypt-log.js";
 import { isChatGroupId, watermarkKey } from "./ids.js";
 import { groupIdsFromInboxPage } from "./listen.js";
-import type { ChatCipher, ConversationKeySet, SigningKeyEntry } from "./cipher.js";
+import {
+  CHAT_MEDIA_TYPE_VIDEO,
+  type ChatCipher,
+  type ChatMediaAttachment,
+  type ConversationKeySet,
+  type SigningKeyEntry,
+} from "./cipher.js";
 import { loadWasmModule } from "./wasm-engine.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
 import { chatEventToDm } from "./normalize.js";
@@ -163,18 +176,55 @@ export class ChatService {
     if (!bytes || bytes.byteLength === 0) {
       throw new Error("No image bytes to attach to Chat.");
     }
+    const inspected = await inspectChatImage(bytes, image.mimeType);
+    return this.sendChatMedia(conversationId, bytes, {
+      width: inspected.width,
+      height: inspected.height,
+      filename: inspected.filename,
+    });
+  }
+
+  /**
+   * Inline Chat video. Same encrypt-and-upload path as `sendImage`, with
+   * `media_type` 3 so clients play an mp4 instead of treating the bytes as a photo.
+   * Throws on failure so the caller can post the temporary https URL.
+   */
+  async sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult> {
+    const bytes = video.bytes;
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error("No video bytes to attach to Chat.");
+    }
+    const width = positiveEven(video.width) ?? 1280;
+    const height = positiveEven(video.height) ?? 720;
+    return this.sendChatMedia(conversationId, bytes, {
+      width,
+      height,
+      filename: "video.mp4",
+      mediaType: CHAT_MEDIA_TYPE_VIDEO,
+    });
+  }
+
+  /**
+   * encryptStream, upload the ciphertext, then send an inline media attachment.
+   * `mediaType` omitted means an image. Video passes `CHAT_MEDIA_TYPE_VIDEO`.
+   */
+  private async sendChatMedia(
+    conversationId: string,
+    bytes: Uint8Array,
+    attachment: Pick<ChatMediaAttachment, "width" | "height" | "filename" | "mediaType">,
+  ): Promise<SendMessageResult> {
     const latest = this.conversationKeys.get(conversationId);
     if (!latest) {
       throw new Error(
         `No conversation key cached for ${conversationId}. The bot must decrypt a KeyChange before sending Chat media.`,
       );
     }
-    const inspected = await inspectChatImage(bytes, image.mimeType);
     const ciphertext = this.cipher.encryptStream(bytes, latest.key);
     if (ciphertext.byteLength === 0) {
       throw new Error("Chat media encryption produced empty ciphertext.");
     }
     const mediaHashKey = await this.http.uploadChatMedia(conversationId, ciphertext);
+    const label = attachment.mediaType === CHAT_MEDIA_TYPE_VIDEO ? "video" : "image";
     let payload;
     try {
       payload = this.cipher.encryptMessage(conversationId, "", {
@@ -183,16 +233,17 @@ export class ChatService {
         attachments: [
           {
             mediaHashKey,
-            width: inspected.width,
-            height: inspected.height,
+            width: attachment.width,
+            height: attachment.height,
             filesizeBytes: bytes.byteLength,
-            filename: inspected.filename,
+            filename: attachment.filename,
+            ...(attachment.mediaType !== undefined ? { mediaType: attachment.mediaType } : {}),
           },
         ],
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Cannot encrypt a Chat image in ${conversationId}: ${message}`);
+      throw new Error(`Cannot encrypt a Chat ${label} in ${conversationId}: ${message}`);
     }
     const body = sendMessageBody(payload, this.tokens.get(conversationId));
     const sent = await this.http.sendChatMessage(conversationId, body);
@@ -536,6 +587,12 @@ async function inspectChatImage(
     // Dimensions are optional. Upload still proceeds with the caller mime.
   }
   return { width, height, filename: `image.${extensionForMime(mime)}` };
+}
+
+function positiveEven(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 2) return undefined;
+  const rounded = Math.round(value);
+  return rounded % 2 === 0 ? rounded : rounded + 1;
 }
 
 function extensionForMime(mime: string): string {

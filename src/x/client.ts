@@ -3,6 +3,7 @@ import type {
   DeleteResult,
   DmEvent,
   OutboundImage,
+  OutboundVideo,
   SendMessageResult,
   XUser,
 } from "../types.js";
@@ -30,6 +31,12 @@ export interface XClient {
    * inline media attachment. Callers post `image.url` as text when this throws.
    */
   sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult>;
+  /**
+   * Attach an mp4. Encrypted Chat (`g…`) reuses `encryptStream` and
+   * `POST /2/chat/media/upload`, then sets `media_type` 3. Classic group DMs
+   * throw so the caller can post the temporary URL.
+   */
+  sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult>;
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult>;
   deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult>;
 }

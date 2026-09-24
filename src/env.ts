@@ -7,6 +7,14 @@ import {
   type AdultImageProviderName,
   type ImagineAspectRatio,
 } from "./bot/imagine.js";
+import {
+  normalizeVideoAspectRatio,
+  normalizeVideoDuration,
+  normalizeVideoModel,
+  normalizeVideoResolution,
+  type VideoAspectRatio,
+  type VideoResolution,
+} from "./bot/video.js";
 import { parseChatConversationIds } from "./chat/ids.js";
 
 function required(name: string): string {
@@ -65,6 +73,47 @@ function optionalImagineAspectRatio(name: string): ImagineAspectRatio | undefine
   const ratio = normalizeImagineAspectRatio(value);
   if (!ratio) throw new Error(`${name} must be an Imagine aspect ratio such as 3:4, 2:3, or auto`);
   return ratio;
+}
+
+function optionalVideoModel(name: string): string | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const model = normalizeVideoModel(value);
+  if (!model) {
+    throw new Error(`${name} must be a grok-imagine-video model id (for example grok-imagine-video-1.5)`);
+  }
+  return model;
+}
+
+function optionalVideoDuration(name: string): number | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be a whole number of seconds from 1 to 15`);
+  }
+  const duration = normalizeVideoDuration(Number(value));
+  if (duration === undefined) {
+    throw new Error(`${name} must be a whole number of seconds from 1 to 15`);
+  }
+  return duration;
+}
+
+function optionalVideoAspectRatio(name: string): VideoAspectRatio | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const ratio = normalizeVideoAspectRatio(value);
+  if (!ratio) {
+    throw new Error(`${name} must be a video aspect ratio such as 16:9, 9:16, 1:1, or 4:3`);
+  }
+  return ratio;
+}
+
+function optionalVideoResolution(name: string): VideoResolution | undefined {
+  const value = optional(name);
+  if (!value) return undefined;
+  const resolution = normalizeVideoResolution(value);
+  if (!resolution) throw new Error(`${name} must be 480p, 720p, or 1080p`);
+  return resolution;
 }
 
 function optionalBoobsProvider(
@@ -164,6 +213,14 @@ export interface Env {
   boobsImagineModel?: string;
   /** Optional Imagine aspect ratio. Unset lets the model choose. */
   boobsImagineAspectRatio?: ImagineAspectRatio;
+  /** Video model id. Unset uses `grok-imagine-video-1.5`. */
+  videoImagineModel?: string;
+  /** Clip length in seconds (1–15). Unset uses 5. */
+  videoImagineDuration?: number;
+  /** Video aspect ratio. Unset uses `16:9`. */
+  videoImagineAspectRatio?: VideoAspectRatio;
+  /** Video resolution. Unset uses `720p`. */
+  videoImagineResolution?: VideoResolution;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -219,5 +276,9 @@ export function loadEnv(requireOwner = true): Env {
     boobsImageProvider: optionalAdultImageProvider("BOOBS_IMAGE_PROVIDER"),
     boobsImagineModel: optionalImagineModel("BOOBS_IMAGINE_MODEL"),
     boobsImagineAspectRatio: optionalImagineAspectRatio("BOOBS_IMAGINE_ASPECT_RATIO"),
+    videoImagineModel: optionalVideoModel("VIDEO_IMAGINE_MODEL"),
+    videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
+    videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
+    videoImagineResolution: optionalVideoResolution("VIDEO_IMAGINE_RESOLUTION"),
   };
 }

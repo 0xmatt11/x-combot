@@ -252,10 +252,13 @@ export async function suggestSofterImaginePrompts(
   }
 }
 
-/** Chat text: moderation line, then five copyable prompts. */
-export function formatImagineModerationReply(prompts: readonly string[]): string {
+/** Chat text: moderation line, then five copyable prompts. `intro` defaults to the image line. */
+export function formatImagineModerationReply(
+  prompts: readonly string[],
+  intro = IMAGINE_MODERATED_INTRO,
+): string {
   const lines = prompts.slice(0, IMAGINE_SUGGESTION_COUNT).map((prompt, index) => `${index + 1}. ${prompt}`);
-  return [IMAGINE_MODERATED_INTRO, ...lines].join("\n");
+  return [intro, ...lines].join("\n");
 }
 
 export function heuristicSofterImaginePrompts(prompt: string): string[] {
@@ -431,7 +434,7 @@ function imagineHttpError(status: number, text: string): ImagineError {
   return new ImagineError(message);
 }
 
-function bodyIsModerated(text: string): boolean {
+export function bodyIsModerated(text: string): boolean {
   const body = readImagineErrorBody(text);
   if (moderationSignal(`${body.code ?? ""} ${body.error ?? ""}`)) return true;
   if (body.code || body.error) return false;
@@ -458,7 +461,7 @@ function readImagineErrorBody(text: string): { code?: string; error?: string } {
   }
 }
 
-function bodyIsTooLong(text: string): boolean {
+export function bodyIsTooLong(text: string): boolean {
   const body = readImagineErrorBody(text);
   const structured = `${body.code ?? ""} ${body.error ?? ""}`;
   if (body.code || body.error) return lengthSignal(structured);
@@ -571,7 +574,7 @@ function cleanSuggestionLine(line: string): string | undefined {
   text = text.replace(/^\d+\s*[\).:-]\s*/, "");
   text = text.replace(/^[-*•]\s*/, "");
   text = text.replace(/^["']|["']$/g, "");
-  text = text.replace(/^(?:!|\/)imagine\s+/i, "");
+  text = text.replace(/^(?:!|\/)(?:imagine|video)\s+/i, "");
   text = tidyPrompt(text);
   if (!text) return undefined;
   if (/^(?:here are|these are|alternatives?|suggestions?|prompts?)\b/i.test(text)) return undefined;

@@ -1098,6 +1098,54 @@ describe("ChatService.sendImage", () => {
     expect(uploads).toBe(0);
     expect(http.sends).toHaveLength(0);
   });
+
+  it("uploads an mp4 with media_type 3 on the same Chat media path", async () => {
+    const cipher = new FakeCipher();
+    const key = new Uint8Array(32).fill(7);
+    cipher.events.set("blob-99", { type: "message", id: "e1", content: { text: "hi" } });
+    cipher.conversationKeys = { keys: { "99": key }, latestVersion: "99" };
+    const http = new FakeHttp();
+    http.pages.push(page("blob-99"));
+    const uploads: Uint8Array[] = [];
+    http.uploadChatMedia = async (_id, ciphertext) => {
+      uploads.push(Uint8Array.from(ciphertext));
+      return "hash-video";
+    };
+    const encrypted: { conversationId: string; text: string; options?: EncryptMessageOptions }[] = [];
+    cipher.encryptStream = (plaintext) => plaintext;
+    cipher.encryptMessage = (conversationId, text, options) => {
+      encrypted.push({ conversationId, text, options });
+      return {
+        messageId: "mid-vid",
+        encryptedContent: "enc:",
+        encodedEventSignature: "sig",
+      };
+    };
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    await service.listHistory({ conversationId: "g1" });
+    const bytes = Uint8Array.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70]);
+    const result = await service.sendVideo("g1", {
+      url: "https://vidgen.x.ai/clip.mp4",
+      bytes,
+      mimeType: "video/mp4",
+      width: 1280,
+      height: 720,
+    });
+    store.close();
+
+    expect(uploads).toHaveLength(1);
+    expect(Array.from(uploads[0]!)).toEqual(Array.from(bytes));
+    expect(encrypted[0]).toMatchObject({ conversationId: "g1", text: "" });
+    const attachment = encrypted[0]?.options?.attachments?.[0] as ChatMediaAttachment;
+    expect(attachment.mediaHashKey).toBe("hash-video");
+    expect(attachment.filename).toBe("video.mp4");
+    expect(attachment.filesizeBytes).toBe(bytes.byteLength);
+    expect(attachment.width).toBe(1280);
+    expect(attachment.height).toBe(720);
+    expect(attachment.mediaType).toBe(3);
+    expect(result).toEqual({ dmEventId: "mid-vid", dmConversationId: "g1" });
+  });
 });
 
 describe("Chat group discovery", () => {

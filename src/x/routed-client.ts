@@ -5,6 +5,7 @@ import type {
   DeleteResult,
   DmEvent,
   OutboundImage,
+  OutboundVideo,
   SendMessageResult,
   XUser,
 } from "../types.js";
@@ -67,6 +68,18 @@ export class RoutedXClient implements XClient {
       );
     }
     return this.dm.sendImage(conversationId, image);
+  }
+
+  async sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult> {
+    if (this.chat && isChatGroupId(conversationId)) {
+      return this.chat.sendVideo(conversationId, video);
+    }
+    if (isChatGroupId(conversationId)) {
+      throw new Error(
+        "Encrypted X Chat video send needs Chat configured (encryptStream + POST /2/chat/media/upload + inline video attachment).",
+      );
+    }
+    return this.dm.sendVideo(conversationId, video);
   }
 
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult> {
