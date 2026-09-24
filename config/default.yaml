@@ -5,7 +5,8 @@ welcome:
   enabled: true
   text: |
     Welcome @{username}!
-    Please read the group rules with !rules. Type !help for commands.
+    I'm Milady bot — I help run this chat.
+    I can show !rules, answer with !ask, summarize with !summarize, generate images and videos (!imagine / !video), speak a line (!voice), post fun photos when those commands are enabled, roast with !troll, and track XP (!xp / !top). Type !help for the full list.
 
 # Posted when someone leaves or is removed. X reports both as the same event
 # (classic ParticipantsLeave, Chat groupChange membersRemoved), so the line
