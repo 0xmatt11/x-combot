@@ -389,10 +389,14 @@ function parseUntroll(rest: string): ParsedCommand {
   return { name: "untroll", target: trollTarget(rest) };
 }
 
-/** `!noor on` / `!noor off`. Anything else is a usage reply, not an unknown bang. */
+/**
+ * `!noor on` / `!noor off`. The command name is already lowercased in
+ * `matchBang` (same as `!troll`). The on/off word uses that same folding.
+ * Anything else is a usage reply, not an unknown bang.
+ */
 function parseNoor(rest: string): ParsedCommand {
-  if (/^on$/i.test(rest)) return { name: "noor", mode: "on" };
-  if (/^off$/i.test(rest)) return { name: "noor", mode: "off" };
+  const mode = rest.toLowerCase();
+  if (mode === "on" || mode === "off") return { name: "noor", mode };
   return { name: "noor" };
 }
 

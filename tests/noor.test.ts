@@ -219,7 +219,7 @@ describe("Noor alert relay", () => {
   it("acks on and off, and a second on does not reset the watermark", async () => {
     const { engine, client, store } = setup();
     const now = 1_700_000_000_000;
-    await engine.processEvent(message({ id: "on", text: "!Noor on" }), now);
+    await engine.processEvent(message({ id: "on", text: "!nOoR On" }), now);
     expect(client.sent.map((row) => row.text)).toEqual([
       "Noor alert on for @noorrietje. New posts only. !noor off to stop.",
     ]);
@@ -230,10 +230,10 @@ describe("Noor alert relay", () => {
       "Noor alert is already on for @noorrietje. !noor off to stop.",
     );
     expect(store.getNoorAlert(groupId)?.tweetId).toBe("42");
-    await engine.processEvent(message({ id: "off", text: "!noor off" }), now + 20);
+    await engine.processEvent(message({ id: "off", text: "!NOOR OFF" }), now + 20);
     expect(client.sent.at(-1)?.text).toBe("Noor alert off.");
     expect(store.getNoorAlert(groupId)?.enabled).toBe(false);
-    await engine.processEvent(message({ id: "off2", text: "!NOOR OFF" }), now + 30);
+    await engine.processEvent(message({ id: "off2", text: "!Noor off" }), now + 30);
     expect(client.sent.at(-1)?.text).toBe("Noor alert is already off.");
     await engine.processEvent(message({ id: "huh", text: "!noor please" }), now + 40);
     expect(client.sent.at(-1)?.text).toBe("Use !noor on or !noor off.");

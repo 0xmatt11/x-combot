@@ -410,16 +410,17 @@ describe("parseCommand !troll", () => {
 });
 
 describe("parseCommand !noor", () => {
-  it("parses !noor on and !noor off case-insensitively", () => {
-    expect(parseCommand("!noor on")).toEqual({ name: "noor", mode: "on" });
-    expect(parseCommand("!noor off")).toEqual({ name: "noor", mode: "off" });
-    expect(parseCommand("!Noor on")).toEqual({ name: "noor", mode: "on" });
-    expect(parseCommand("!NOOR OFF")).toEqual({ name: "noor", mode: "off" });
-    expect(parseCommand("/noor on")).toEqual({ name: "noor", mode: "on" });
+  it("parses on and off with the same case folding as other bang commands", () => {
+    for (const text of ["!noor on", "!Noor on", "!NOOR ON", "!nOoR On", "/noor ON"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noor", mode: "on" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
+    for (const text of ["!noor off", "!Noor off", "!NOOR OFF", "!nOoR oFf"]) {
+      expect(parseCommand(text), text).toEqual({ name: "noor", mode: "off" });
+      expect(parseUnknownBang(text), text).toBeUndefined();
+    }
     expect(parseCommand("!noor")).toEqual({ name: "noor" });
     expect(parseCommand("!noor later")).toEqual({ name: "noor" });
-    expect(parseUnknownBang("!noor on")).toBeUndefined();
-    expect(parseUnknownBang("!noor off")).toBeUndefined();
     expect(parseCommand("!unnoor")).toBeUndefined();
     expect(parseUnknownBang("!unnoor")).toEqual({ token: "!unnoor", args: "" });
   });

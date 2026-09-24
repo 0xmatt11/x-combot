@@ -501,7 +501,7 @@ The target is one row per conversation in SQLite (`troll_targets`), so it surviv
 
 ## Noor alert
 
-`!noor on` turns the alert on for this conversation. `!noor off` turns it off. `/noor` works the same way, and the words are case-insensitive (`!Noor on`). A second `!noor on` leaves the watermark where it is. There is no `!unnoor`.
+`!noor on` turns the alert on for this conversation. `!noor off` turns it off. `/noor` works the same way. The command name and the on/off word use the same case folding as other bang commands, so `!Noor on`, `!NOOR ON`, and `!nOoR On` are the same command. A second `!noor on` leaves the watermark where it is. There is no `!unnoor`.
 
 While it is on, the bot polls `GET /2/users/:id/tweets` about once a minute (the same user-token scopes as troll mode: `tweet.read` and `users.read`). The account defaults to @noorrietje. `NOOR_ALERT_USERNAME` overrides it. The first enable sets the watermark to that moment, so older posts are not dumped into the chat. Each new post is relayed once: the text and status URL (and a photo attachment when the existing image upload path can fetch one), then a line `what she really means to say is "…"`. That line is a short sarcastic rewrite from the same LLM path as `!troll`. If the model is off or the call fails, a fixed template is used instead. One row per conversation in SQLite (`noor_alerts`) stores the enabled flag and the watermark. A timeline failure is logged and that cycle relays nothing, so the same post can be tried again on the next poll.
 
