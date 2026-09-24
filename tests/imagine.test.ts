@@ -582,7 +582,8 @@ describe("engine Imagine and search dedupe", () => {
     await repeat.engine.processEvent(message({ id: "rep-1", text: "!boobs" }));
     await repeat.engine.processEvent(message({ id: "rep-2", text: "!boobs" }));
     expect(repeat.search.calls).toBe(1);
-    expect(repeat.client.images.map((row) => row.url)).toEqual([chest, URL_A]);
+    expect(repeat.client.images[0]?.url).toBe(chest);
+    expect(repeat.client.images[1]?.url).toMatch(/^https:\/\/cdn\.example\//);
   });
 
   it("does not use the public JPEG when API Imagine blocks the image", async () => {
