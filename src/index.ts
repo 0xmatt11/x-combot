@@ -384,7 +384,9 @@ async function openChatService(
     } else {
       log.info(`X Chat groups (allowlist): ${[...listen.policy.allow].join(", ")}`);
     }
-    return new ChatService(chatHttpFromLive(client), cipher, store);
+    return new ChatService(chatHttpFromLive(client), cipher, store, {
+      remoteKeyCachePath: env.chatRemoteKeysPath,
+    });
   } catch (error) {
     if (!listen.implicitAll) throw error;
     log.error(

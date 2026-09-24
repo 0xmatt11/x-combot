@@ -119,6 +119,16 @@ If both the file and `CHAT_PIN` are set, a file whose public key matches one reg
 
 If a key file exists, `CHAT_LISTEN` is unset, and `CHAT_CONVERSATION_IDS` is empty, Chat turns on by itself (`all`). A failure to open that file falls back to classic group DMs and logs the error. Setting `CHAT_PIN` or `CHAT_LISTEN` makes a bad identity fail startup instead of falling back.
 
+### Member public-key cache
+
+Decrypt needs each member's `GET /2/users/{id}/public_keys` result, and that route is rate limited. A successful response is kept in memory and written to `data/chat-remote-keys.json` (mode `0600`). That file is not `data/chat-keys.json`. Juicebox unlock and the identity file are unchanged. Realm tokens from `juicebox_config` are not written into the cache.
+
+A restart reads the cache before any public_keys request. Cached users are not fetched again until the entry is 24 hours old (1 hour when that account had no keys) or the entry does not parse. A decrypt error can ask for one more fetch, and only once the cached fetch is at least 15 minutes old. That extra fetch does not repeat until the entry expires, so a conversation that cannot be decrypted does not poll public_keys on every failure. A 429 or 402 does not write an empty entry. If a cached copy exists, decrypt keeps using it through the Retry-After window instead of stalling with an empty cache. `!status` still reports the in-memory counts and does not fetch.
+
+`CHAT_REMOTE_KEYS_PATH` moves the file. The default is `data/chat-remote-keys.json`, beside `CHAT_KEYS_PATH`. Delete it to force a refetch. It is gitignored. Do not commit it.
+
+Conversation keys recovered while decrypting are stored in the same file so a restart can send Chat media before the next KeyChange. Those bytes decrypt the group, so they stay in this mode `0600` file and are not logged. A newer decrypted version replaces the saved one. `chat:rotate` still requests member keys when the API is not in backoff, and uses a non-empty cached list if that request is rate limited.
+
 ### Which groups
 
 | `CHAT_LISTEN` | `CHAT_CONVERSATION_IDS` | Result |
@@ -611,6 +621,7 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `CHAT_CONVERSATION_IDS` | Allowlist of `g…` ids. Empty plus a Chat identity means every encrypted group |
 | `CHAT_CONVERSATION_DENY_IDS` | Groups to skip |
 | `CHAT_KEYS_PATH` | Default `data/chat-keys.json` |
+| `CHAT_REMOTE_KEYS_PATH` | Member public_keys cache. Default `data/chat-remote-keys.json` (beside the identity file). Restarts reuse it. Not the bot identity |
 | `CHAT_PIN` | One-time Juicebox PIN. Needs `juicebox-sdk`. Not needed after the key file matches a registered public key |
 | `CHAT_POLL_INTERVAL_MS` | Chat catch-up interval. Overrides the Activity 5-minute default |
 | `CHAT_POLL_IDLE_MAX_MS` | Cap for quiet Chat polls when Activity is off. Default 120000 |

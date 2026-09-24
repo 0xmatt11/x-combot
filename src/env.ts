@@ -24,6 +24,7 @@ import {
 } from "./bot/video.js";
 import { normalizeVoiceLanguage } from "./bot/voice.js";
 import { parseChatConversationIds } from "./chat/ids.js";
+import { remoteKeyCachePathBeside } from "./chat/remote-key-cache.js";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -283,6 +284,11 @@ export interface Env {
   /** Forces all / allowlist / off. Unset follows the allowlist and identity. */
   chatListen?: "all" | "allowlist" | "off";
   chatKeysPath: string;
+  /**
+   * Member public_keys cache (mode 0600). Not the bot identity file.
+   * Default sits beside `chatKeysPath`.
+   */
+  chatRemoteKeysPath: string;
   /** Juicebox PIN. Used only when no local key file exists. Never commit this. */
   chatPin?: string;
   chatPollIntervalMs?: number;
@@ -402,6 +408,10 @@ export function loadEnv(requireOwner = true): Env {
     ),
     chatListen: optionalChatListen("CHAT_LISTEN"),
     chatKeysPath: path.resolve(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
+    chatRemoteKeysPath: path.resolve(
+      optional("CHAT_REMOTE_KEYS_PATH") ??
+        remoteKeyCachePathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
+    ),
     chatPin: optional("CHAT_PIN"),
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,
     dmPoll: optionalBool("DM_POLL"),

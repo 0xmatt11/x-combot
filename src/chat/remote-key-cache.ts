@@ -1,0 +1,258 @@
+import fs from "node:fs";
+import path from "node:path";
+import type { SigningKeyEntry } from "./cipher.js";
+import type { RemotePublicKey } from "./wire.js";
+
+/**
+ * Disk cache of other members' public keys and conversation keys recovered
+ * while decrypting. This is not the bot identity (`data/chat-keys.json`).
+ * Juicebox realm tokens are not stored.
+ */
+export const REMOTE_KEY_CACHE_SCHEMA = 1;
+
+/** Successful lists that contain a key stay fresh this long. */
+export const REMOTE_PUBLIC_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** An empty 200 is rechecked sooner, so a new registration is not stuck all day. */
+export const EMPTY_REMOTE_PUBLIC_KEY_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * After a decrypt error that looks like a missing key, wait at least this long
+ * since the last successful fetch before calling public_keys again.
+ */
+export const DECRYPT_KEY_REFRESH_MIN_MS = 15 * 60 * 1000;
+
+export interface CachedRemoteUser {
+  fetchedAt: number;
+  keys: RemotePublicKey[];
+  signing: SigningKeyEntry[];
+}
+
+export interface CachedConversationKey {
+  version: string;
+  /** Raw conversation key. Secret: it decrypts that group's messages. */
+  key: Uint8Array;
+}
+
+export interface RemoteKeyCacheSnapshot {
+  users: Map<string, CachedRemoteUser>;
+  conversations: Map<string, CachedConversationKey>;
+}
+
+export interface LoadedRemoteKeyCache extends RemoteKeyCacheSnapshot {
+  /** Set when the file existed but the whole document could not be used. */
+  invalid?: string;
+  skippedUsers: number;
+}
+
+interface DiskRemoteKey {
+  user_id: string;
+  public_key_version: string;
+  public_key: string;
+  signing_public_key: string;
+  identity_public_key_signature: string;
+}
+
+interface DiskSigningKey {
+  user_id: string;
+  public_key_version: string;
+  public_key: string;
+  identity_public_key: string;
+  identity_public_key_signature: string;
+}
+
+interface DiskUser {
+  fetched_at: number;
+  keys: DiskRemoteKey[];
+  signing: DiskSigningKey[];
+}
+
+interface DiskConversation {
+  version: string;
+  key_b64: string;
+  saved_at?: number;
+}
+
+/** Default location: beside the identity file, still under `data/` unless that path moves. */
+export function remoteKeyCachePathBeside(chatKeysPath: string): string {
+  return path.join(path.dirname(chatKeysPath), "chat-remote-keys.json");
+}
+
+export function loadRemoteKeyCache(filePath: string): LoadedRemoteKeyCache {
+  const empty: LoadedRemoteKeyCache = {
+    users: new Map(),
+    conversations: new Map(),
+    skippedUsers: 0,
+  };
+  if (!fs.existsSync(filePath)) return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ...empty, invalid: message };
+  }
+  if (!isRecord(parsed) || parsed.schema !== REMOTE_KEY_CACHE_SCHEMA) {
+    return { ...empty, invalid: "schema" };
+  }
+  if (!isRecord(parsed.users)) return { ...empty, invalid: "users" };
+
+  const users = new Map<string, CachedRemoteUser>();
+  let skippedUsers = 0;
+  for (const [userId, value] of Object.entries(parsed.users)) {
+    const user = parseUser(userId, value);
+    if (!user) {
+      skippedUsers += 1;
+      continue;
+    }
+    users.set(userId, user);
+  }
+
+  const conversations = new Map<string, CachedConversationKey>();
+  if (isRecord(parsed.conversations)) {
+    for (const [conversationId, value] of Object.entries(parsed.conversations)) {
+      const saved = parseConversation(conversationId, value);
+      if (saved) conversations.set(conversationId, saved);
+    }
+  }
+
+  return { users, conversations, skippedUsers };
+}
+
+export function saveRemoteKeyCache(filePath: string, snapshot: RemoteKeyCacheSnapshot): void {
+  const users: Record<string, DiskUser> = {};
+  for (const [userId, user] of snapshot.users) {
+    users[userId] = {
+      fetched_at: user.fetchedAt,
+      keys: user.keys.map(diskKey),
+      signing: user.signing.map(diskSigning),
+    };
+  }
+  const conversations: Record<string, DiskConversation> = {};
+  for (const [conversationId, saved] of snapshot.conversations) {
+    if (!saved.version || saved.key.byteLength === 0) continue;
+    conversations[conversationId] = {
+      version: saved.version,
+      key_b64: Buffer.from(saved.key).toString("base64"),
+    };
+  }
+  const body = {
+    schema: REMOTE_KEY_CACHE_SCHEMA,
+    users,
+    conversations,
+  };
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, filePath);
+  fs.chmodSync(filePath, 0o600);
+}
+
+function parseUser(userId: string, value: unknown): CachedRemoteUser | undefined {
+  if (!isSafeId(userId) || !isRecord(value)) return undefined;
+  if (typeof value.fetched_at !== "number" || !Number.isFinite(value.fetched_at) || value.fetched_at < 0) {
+    return undefined;
+  }
+  if (!Array.isArray(value.keys)) return undefined;
+  const keys: RemotePublicKey[] = [];
+  for (const item of value.keys) {
+    const key = parseRemoteKey(userId, item);
+    if (!key) return undefined;
+    keys.push(key);
+  }
+  const signing: SigningKeyEntry[] = [];
+  if (value.signing !== undefined) {
+    if (!Array.isArray(value.signing)) return undefined;
+    for (const item of value.signing) {
+      const entry = parseSigning(userId, item);
+      if (!entry) return undefined;
+      signing.push(entry);
+    }
+  }
+  return { fetchedAt: value.fetched_at, keys, signing };
+}
+
+function parseRemoteKey(userId: string, value: unknown): RemotePublicKey | undefined {
+  if (!isRecord(value)) return undefined;
+  const publicKey = requiredString(value.public_key);
+  const signingPublicKey = requiredString(value.signing_public_key);
+  const identityPublicKeySignature = requiredString(value.identity_public_key_signature);
+  const publicKeyVersion = requiredString(value.public_key_version);
+  const recordedUser = requiredString(value.user_id);
+  if (!publicKey || !signingPublicKey || !identityPublicKeySignature || !publicKeyVersion) return undefined;
+  if (recordedUser && recordedUser !== userId) return undefined;
+  return {
+    userId,
+    publicKey,
+    signingPublicKey,
+    identityPublicKeySignature,
+    publicKeyVersion,
+  };
+}
+
+function parseSigning(userId: string, value: unknown): SigningKeyEntry | undefined {
+  if (!isRecord(value)) return undefined;
+  const publicKey = requiredString(value.public_key);
+  const identityPublicKey = requiredString(value.identity_public_key);
+  const identityPublicKeySignature = requiredString(value.identity_public_key_signature);
+  const publicKeyVersion = requiredString(value.public_key_version);
+  const recordedUser = requiredString(value.user_id);
+  if (!publicKey || !identityPublicKey || !identityPublicKeySignature || !publicKeyVersion) return undefined;
+  if (recordedUser && recordedUser !== userId) return undefined;
+  return {
+    userId,
+    publicKeyVersion,
+    publicKey,
+    identityPublicKey,
+    identityPublicKeySignature,
+  };
+}
+
+function parseConversation(conversationId: string, value: unknown): CachedConversationKey | undefined {
+  if (!isSafeId(conversationId) || !isRecord(value)) return undefined;
+  const version = requiredString(value.version);
+  const keyB64 = requiredString(value.key_b64);
+  if (!version || !keyB64) return undefined;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(keyB64, "base64");
+  } catch {
+    return undefined;
+  }
+  if (bytes.byteLength === 0) return undefined;
+  return { version, key: Uint8Array.from(bytes) };
+}
+
+function diskKey(key: RemotePublicKey): DiskRemoteKey {
+  return {
+    user_id: key.userId,
+    public_key_version: key.publicKeyVersion,
+    public_key: key.publicKey,
+    signing_public_key: key.signingPublicKey,
+    identity_public_key_signature: key.identityPublicKeySignature,
+  };
+}
+
+function diskSigning(entry: SigningKeyEntry): DiskSigningKey {
+  return {
+    user_id: entry.userId,
+    public_key_version: entry.publicKeyVersion,
+    public_key: entry.publicKey,
+    identity_public_key: entry.identityPublicKey,
+    identity_public_key_signature: entry.identityPublicKeySignature,
+  };
+}
+
+function requiredString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function isSafeId(value: string): boolean {
+  return value.trim() === value && value.length > 0 && value.length <= 128 && !/[\r\n\0]/.test(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
