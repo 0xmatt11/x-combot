@@ -10,15 +10,15 @@ import { ModerationEngine } from "./bot/engine.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
 import { createImageSearch } from "./bot/image-search.js";
+import { createUserFacingImagine } from "./bot/imagine-backend.js";
+import { closeImagineBrowser } from "./bot/imagine-browser.js";
 import {
-  createImagineClient,
   DEFAULT_IMAGINE_MODEL,
   resolveAdultImageProvider,
   resolveImagineApiKey,
 } from "./bot/imagine.js";
 import { imaginePublicUrlsFor, type ImaginePublicUrls } from "./bot/imagine-public.js";
 import {
-  createVideoClient,
   DEFAULT_VIDEO_ASPECT_RATIO,
   DEFAULT_VIDEO_DURATION,
   DEFAULT_VIDEO_MODEL,
@@ -91,18 +91,36 @@ async function main(): Promise<void> {
   }
   const searchProvider = env.boobsSearchProvider ?? "duckduckgo";
   const imagineKey = resolveImagineApiKey(env);
+  const backend = env.imagineBackend;
   const imageChoice = resolveAdultImageProvider({
     provider: env.boobsImageProvider,
     apiKey: imagineKey,
+    backend,
   });
   const imagineModel = env.boobsImagineModel ?? DEFAULT_IMAGINE_MODEL;
-  const imagine = imagineKey
-    ? createImagineClient({
-        apiKey: imagineKey,
-        model: imagineModel,
-        aspectRatio: env.boobsImagineAspectRatio,
-      })
-    : undefined;
+  const videoModel = env.videoImagineModel ?? DEFAULT_VIDEO_MODEL;
+  const videoDuration = env.videoImagineDuration ?? DEFAULT_VIDEO_DURATION;
+  const videoAspect = env.videoImagineAspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
+  const videoResolution = env.videoImagineResolution ?? DEFAULT_VIDEO_RESOLUTION;
+  const userFacing = createUserFacingImagine({
+    backend,
+    apiKey: imagineKey,
+    imagineModel,
+    aspectRatio: env.boobsImagineAspectRatio,
+    videoModel,
+    videoDuration,
+    videoAspectRatio: videoAspect,
+    videoResolution,
+    browser: {
+      chromeProfile: env.imagineChromeProfile,
+      cdpUrl: env.imagineBrowserCdpUrl,
+      headless: env.imagineBrowserHeadless,
+      channel: env.imagineBrowserChannel,
+      timeoutMs: env.imagineBrowserTimeoutMs,
+    },
+  });
+  const imagine = userFacing.imagine;
+  const video = userFacing.video;
   if (imageChoice.imagineKeyMissing) {
     log.warn(
       "BOOBS_IMAGE_PROVIDER=imagine but no xAI API key is set. !boobs, !ass, and !booty will use image search. !imagine, !video, and !voice stay off until XAI_API_KEY is set (or the grok LLM key stack).",
@@ -119,13 +137,30 @@ async function main(): Promise<void> {
     }
     if (!(needsKey && !env.boobsSearchApiKey && imageChoice.provider === "search")) {
       const source =
-        imageChoice.provider === "imagine" ? `imagine model=${imagineModel}` : `search ${searchProvider}`;
+        imageChoice.provider === "imagine"
+          ? backend === "browser"
+            ? "imagine browser grok.com/imagine"
+            : `imagine model=${imagineModel}`
+          : `search ${searchProvider}`;
       log.info(
         `Adult image commands enabled (!boobs, !ass, !booty, provider=${source}, vision=${defaults.boobs.vision === true ? "on" : "off"}). Classic group DMs upload a dm_image; encrypted Chat uploads an inline Chat photo (encryptStream + /2/chat/media/upload).`,
       );
     }
   }
-  if (imagine) {
+  if (backend === "browser") {
+    log.info(
+      "Imagine backend=browser. !imagine, !video, and adult Imagine images use https://grok.com/imagine. api.x.ai image and video generations are off.",
+    );
+    if (env.imagineBrowserCdpUrl) {
+      log.info("Imagine browser attaches to the signed-in Chrome over CDP.");
+    } else if (env.imagineChromeProfile) {
+      log.info(`Imagine browser Chrome profile ${env.imagineChromeProfile}.`);
+    } else {
+      log.warn(
+        "IMAGINE_CHROME_PROFILE and IMAGINE_BROWSER_CDP_URL are unset. Imagine commands will say so in chat and will not use the API.",
+      );
+    }
+  } else if (imagine) {
     log.info(`!imagine enabled (model=${imagineModel}).`);
   }
   const imaginePublic: ImaginePublicUrls | undefined =
@@ -147,30 +182,17 @@ async function main(): Promise<void> {
     const boobsVideos = env.boobsImaginePublicBoobsVideoUrls?.length ?? 0;
     if (!chest && bootyCount === 0 && assVideos + bootyVideos + boobsVideos === 0) {
       log.warn(
-        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG or video URL is set. !boobs, !ass, and !booty stay on API Imagine and search. This build does not drive grok.com.",
+        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG or video URL is set. Adult commands stay on Imagine, then search. The bank is a static file list, not an api.x.ai generation.",
       );
     } else {
       const booty =
         bootyCount === 0 ? "unset" : bootyCount === 1 ? "1 url" : `${bootyCount} urls`;
       log.info(
-        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}, assVideos=${assVideos}, bootyVideos=${bootyVideos}, boobsVideos=${boobsVideos}). Used after API Imagine misses and before search. grok.com is not automated.`,
+        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}, assVideos=${assVideos}, bootyVideos=${bootyVideos}, boobsVideos=${boobsVideos}). Static fetch after Imagine misses and before search.`,
       );
     }
   }
-  const videoModel = env.videoImagineModel ?? DEFAULT_VIDEO_MODEL;
-  const videoDuration = env.videoImagineDuration ?? DEFAULT_VIDEO_DURATION;
-  const videoAspect = env.videoImagineAspectRatio ?? DEFAULT_VIDEO_ASPECT_RATIO;
-  const videoResolution = env.videoImagineResolution ?? DEFAULT_VIDEO_RESOLUTION;
-  const video = imagineKey
-    ? createVideoClient({
-        apiKey: imagineKey,
-        model: videoModel,
-        duration: videoDuration,
-        aspectRatio: videoAspect,
-        resolution: videoResolution,
-      })
-    : undefined;
-  if (video) {
+  if (video && backend === "api") {
     log.info(
       `!video enabled (model=${videoModel}, duration=${videoDuration}s, aspect=${videoAspect}, resolution=${videoResolution}).`,
     );
@@ -318,6 +340,7 @@ async function main(): Promise<void> {
     noorPoller.stop();
     activityRuntime?.stop();
     void activityRuntime?.webhook?.close();
+    void closeImagineBrowser();
     store.close();
     process.exit(0);
   };

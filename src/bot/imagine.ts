@@ -24,7 +24,8 @@ export const IMAGINE_MODERATED_INTRO =
 
 export const IMAGINE_SUGGESTION_COUNT = 5;
 
-export type ImagineErrorKind = "moderated" | "failed";
+export type ImagineErrorKind = "moderated" | "failed" | "session";
+export type ImagineBackend = "browser" | "api";
 
 export const IMAGINE_ASPECT_RATIOS = [
   "1:1",
@@ -79,6 +80,70 @@ export function isImagineModerationError(error: unknown): boolean {
   if (error instanceof ImagineError && error.kind === "moderated") return true;
   const message = error instanceof Error ? error.message : "";
   return moderationSignal(message);
+}
+
+/** Signed-out or unwired Chrome session. Callers must not fall through to the API. */
+export function isImagineSessionError(error: unknown): boolean {
+  return error instanceof ImagineError && error.kind === "session";
+}
+
+/**
+ * `IMAGINE_BACKEND`. Unset means browser. `IMAGINE_USE_BROWSER=false` selects
+ * the API only when `IMAGINE_BACKEND` itself is unset.
+ */
+export function normalizeImagineBackend(value: string): ImagineBackend | undefined {
+  const folded = value.trim().toLowerCase();
+  if (folded === "browser" || folded === "gui" || folded === "web") return "browser";
+  if (folded === "api") return "api";
+  return undefined;
+}
+
+export function resolveImagineBackend(input: {
+  imagineBackend?: string;
+  imagineUseBrowser?: boolean;
+}): ImagineBackend {
+  const raw = input.imagineBackend?.trim();
+  if (raw) {
+    const parsed = normalizeImagineBackend(raw);
+    if (!parsed) throw new Error("IMAGINE_BACKEND must be browser or api");
+    return parsed;
+  }
+  if (input.imagineUseBrowser === false) return "api";
+  return "browser";
+}
+
+/**
+ * Image and video generation HTTP routes. Browser mode must not request these.
+ * Chat completions and TTS on the same host are a different meter and stay allowed.
+ */
+export function isImagineGenerationApiUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+  if (url.hostname !== "api.x.ai") return false;
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/v1/images/generations") return true;
+  if (path === "/v1/videos/generations") return true;
+  return path.startsWith("/v1/videos/");
+}
+
+/** https asset URL that can be posted in chat. The Imagine page itself is not a file. */
+export function isShareableMediaUrl(raw: string): boolean {
+  if (!raw.startsWith("https://")) return false;
+  if (isImagineGenerationApiUrl(raw)) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password) return false;
+  if (url.hostname === "grok.com" && /^\/imagine\/?$/.test(url.pathname)) return false;
+  return true;
 }
 
 const ASPECT_RATIO_SET = new Set<string>(IMAGINE_ASPECT_RATIOS);
@@ -157,13 +222,18 @@ export interface AdultImageProviderChoice {
 /**
  * Adult commands use Imagine when a key exists, unless `search` is requested.
  * An explicit `imagine` with no key falls back to search.
+ * Browser mode uses Imagine without an API key. `search` still skips generation.
  */
 export function resolveAdultImageProvider(input: {
   provider?: AdultImageProviderName;
   apiKey?: string;
+  backend?: ImagineBackend;
 }): AdultImageProviderChoice {
   if (input.provider === "search") {
     return { provider: "search", imagineKeyMissing: false };
+  }
+  if (input.backend === "browser") {
+    return { provider: "imagine", imagineKeyMissing: false };
   }
   if (input.apiKey) {
     return { provider: "imagine", imagineKeyMissing: false };
@@ -287,6 +357,10 @@ export function heuristicSofterImaginePrompts(prompt: string): string[] {
   );
 }
 
+/**
+ * Emergency API client. Constructed only when `IMAGINE_BACKEND=api`.
+ * Browser mode must not call this for user-facing generations.
+ */
 export function createImagineClient(options: {
   apiKey: string;
   model?: string;
