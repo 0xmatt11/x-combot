@@ -24,8 +24,8 @@ help: |
   Public commands:
     !help — this message
     !rules — group rules
-    !boobs — chest / cleavage photo (off unless enabled)
-    !ass / !booty / !booties — butt photo (same switch as !boobs)
+    !boobs — chest / cleavage photo or clip (off unless enabled)
+    !ass / !booty / !booties — butt photo or clip (same switch as !boobs)
     !imagine <prompt> — generate an image with Grok Imagine (needs an xAI key)
     !video <prompt> — generate a short video with Grok Imagine (needs an xAI key; takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)

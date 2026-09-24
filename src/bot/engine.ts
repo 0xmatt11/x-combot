@@ -66,8 +66,8 @@ import {
   type VideoGenerator,
 } from "./video.js";
 import {
-  imaginePublicUrlsFor,
-  pickImaginePublicUrl,
+  imaginePublicPoolFor,
+  pickImaginePublicMedia,
   type ImaginePublicUrls,
 } from "./imagine-public.js";
 import {
@@ -190,9 +190,10 @@ export interface EngineDeps {
    */
   adultImageProvider?: AdultImageProviderName;
   /**
-   * Optional already-hosted Imagine public JPEGs. Tried after API Imagine
-   * misses and before search. Absent means that step is off.
-   * `bootyUrls` is the `!ass` / `!booty` bank; a single `bootyUrl` still works.
+   * Optional already-hosted Imagine public JPEGs and mp4s. Tried after API
+   * Imagine misses and before search. Absent means that step is off.
+   * `bootyUrls` is the shared `!ass` / `!booty` still bank; a single `bootyUrl`
+   * still works. Video lists are command-specific and mix with those stills.
    * `!imagine` does not use this.
    */
   imaginePublic?: ImaginePublicUrls;
@@ -2260,15 +2261,13 @@ export class ModerationEngine {
   }
 
   /**
-   * Download a JPEG the operator already has on imagine-public.x.ai and attach
-   * those bytes on the existing photo path (`sendImage` → classic `dm_image`
-   * or Chat `encryptStream` + `/2/chat/media/upload`). The CDN address is not
-   * posted as text.
-   * `!boobs` uses one chest URL. `!ass` / `!booty` use the booty bank when
-   * more than one URL is configured, otherwise the single booty URL.
-   * A recent URL, a repeated byte hash, a non-JPEG download, or a failed
-   * attach is skipped and another bank URL is tried. A miss returns false so
-   * search can run. This does not call grok.com.
+   * Attach one item from the operator's still bank mixed with that command's
+   * mp4 bank. A JPEG uses the existing photo path. An mp4 is downloaded and
+   * sent with `sendVideo` in encrypted Chat. Classic DMs cannot attach mp4,
+   * so a video draw is skipped. A recent URL, a repeated byte hash, a bad
+   * download, or a failed upload tries another candidate. The source URL is
+   * not posted as text. A miss returns false so search can run. This does
+   * not call grok.com.
    */
   private async tryImaginePublic(
     conversationId: string,
@@ -2276,41 +2275,117 @@ export class ModerationEngine {
     _actions: EngineActions,
     label: string,
   ): Promise<boolean> {
-    const pending = imaginePublicUrlsFor(this.deps.imaginePublic, command);
+    const pending = imaginePublicPoolFor(this.deps.imaginePublic, command);
+    let notedVideoSkip = false;
     while (pending.length > 0) {
-      const url = pickImaginePublicUrl(pending, () => this.nextRandom());
-      if (!url) return false;
-      const index = pending.indexOf(url);
+      const item = pickImaginePublicMedia(pending, () => this.nextRandom());
+      if (!item) return false;
+      const index = pending.indexOf(item);
       if (index >= 0) pending.splice(index, 1);
-      if (this.recentImages.hasUrl(conversationId, url)) {
-        log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
+      if (item.kind === "video") {
+        if (!isChatGroupId(conversationId) || !this.deps.fetchVideo) {
+          if (!notedVideoSkip) {
+            log.warn(
+              `${label} Imagine public video skipped; encrypted Chat upload is unavailable conversation=${conversationId}`,
+            );
+            notedVideoSkip = true;
+          }
+          continue;
+        }
+        if (await this.postImaginePublicVideo(conversationId, item.url, label)) return true;
         continue;
       }
-      const fetched = await this.loadImaginePublic(url, conversationId, label);
-      if (!fetched) continue;
-      const hash = imageContentHash(fetched.bytes);
-      if (this.recentImages.hasHash(conversationId, hash)) {
-        log.warn(`${label} Imagine public image repeated a recent hash conversation=${conversationId}`);
-        continue;
-      }
-      try {
-        await this.client.sendImage(conversationId, {
-          url,
-          bytes: fetched.bytes,
-          mimeType: fetched.mimeType,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        log.warn(
-          `${label} Imagine public attach failed conversation=${conversationId} host=${imageHost(url)} (${detail})`,
-        );
-        continue;
-      }
-      this.recentImages.remember(conversationId, { url, hash });
-      log.info(`${label} posted native image conversation=${conversationId} host=${imageHost(url)}`);
-      return true;
+      if (await this.postImaginePublicImage(conversationId, item.url, label)) return true;
     }
     return false;
+  }
+
+  private async postImaginePublicImage(
+    conversationId: string,
+    url: string,
+    label: string,
+  ): Promise<boolean> {
+    if (this.recentImages.hasUrl(conversationId, url)) {
+      log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
+      return false;
+    }
+    const fetched = await this.loadImaginePublic(url, conversationId, label);
+    if (!fetched) return false;
+    const hash = imageContentHash(fetched.bytes);
+    if (this.recentImages.hasHash(conversationId, hash)) {
+      log.warn(`${label} Imagine public image repeated a recent hash conversation=${conversationId}`);
+      return false;
+    }
+    try {
+      await this.client.sendImage(conversationId, {
+        url,
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      log.warn(
+        `${label} Imagine public attach failed conversation=${conversationId} host=${imageHost(url)} (${detail})`,
+      );
+      return false;
+    }
+    this.recentImages.remember(conversationId, { url, hash });
+    log.info(`${label} posted native image conversation=${conversationId} host=${imageHost(url)}`);
+    return true;
+  }
+
+  private async postImaginePublicVideo(
+    conversationId: string,
+    url: string,
+    label: string,
+  ): Promise<boolean> {
+    if (this.recentImages.hasUrl(conversationId, url)) {
+      log.warn(`${label} Imagine public video was already posted conversation=${conversationId}`);
+      return false;
+    }
+    const fetchVideo = this.deps.fetchVideo;
+    if (!fetchVideo) return false;
+    let fetched: { bytes: Uint8Array; mimeType: string } | undefined;
+    try {
+      fetched = await fetchVideo(url);
+    } catch {
+      log.warn(
+        `${label} Imagine public video download failed conversation=${conversationId} host=${imageHost(url)}`,
+      );
+      return false;
+    }
+    const mime = fetched?.mimeType?.split(";")[0]?.trim().toLowerCase();
+    if (
+      !fetched ||
+      fetched.bytes.byteLength === 0 ||
+      (mime !== "video/mp4" && mime !== "application/mp4")
+    ) {
+      log.warn(
+        `${label} Imagine public video unavailable conversation=${conversationId} host=${imageHost(url)}`,
+      );
+      return false;
+    }
+    const hash = imageContentHash(fetched.bytes);
+    if (this.recentImages.hasHash(conversationId, hash)) {
+      log.warn(`${label} Imagine public video repeated a recent hash conversation=${conversationId}`);
+      return false;
+    }
+    try {
+      await this.client.sendVideo(conversationId, {
+        url,
+        bytes: fetched.bytes,
+        mimeType: "video/mp4",
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      log.warn(
+        `${label} Imagine public video attach failed conversation=${conversationId} host=${imageHost(url)} (${detail})`,
+      );
+      return false;
+    }
+    this.recentImages.remember(conversationId, { url, hash });
+    log.info(`${label} posted native video conversation=${conversationId} host=${imageHost(url)}`);
+    return true;
   }
 
   private async loadImaginePublic(

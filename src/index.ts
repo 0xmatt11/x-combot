@@ -132,20 +132,26 @@ async function main(): Promise<void> {
           chestUrl: env.boobsImaginePublicUrl,
           bootyUrl: env.boobsImaginePublicBootyUrl,
           bootyUrls: env.boobsImaginePublicBootyUrls,
+          assVideoUrls: env.boobsImaginePublicAssVideoUrls,
+          bootyVideoUrls: env.boobsImaginePublicBootyVideoUrls,
+          boobsVideoUrls: env.boobsImaginePublicBoobsVideoUrls,
         }
       : undefined;
   if (env.boobsImagineApp === true) {
     const chest = imaginePublicUrlsFor(imaginePublic, "boobs").length > 0;
     const bootyCount = imaginePublicUrlsFor(imaginePublic, "ass").length;
-    if (!chest && bootyCount === 0) {
+    const assVideos = env.boobsImaginePublicAssVideoUrls?.length ?? 0;
+    const bootyVideos = env.boobsImaginePublicBootyVideoUrls?.length ?? 0;
+    const boobsVideos = env.boobsImaginePublicBoobsVideoUrls?.length ?? 0;
+    if (!chest && bootyCount === 0 && assVideos + bootyVideos + boobsVideos === 0) {
       log.warn(
-        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG URL is set. !boobs, !ass, and !booty stay on API Imagine and search. This build does not drive grok.com.",
+        "BOOBS_IMAGINE_APP is on but no imagine-public JPEG or video URL is set. !boobs, !ass, and !booty stay on API Imagine and search. This build does not drive grok.com.",
       );
     } else {
       const booty =
         bootyCount === 0 ? "unset" : bootyCount === 1 ? "1 url" : `${bootyCount} urls`;
       log.info(
-        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}). Used after API Imagine misses and before search. grok.com is not automated.`,
+        `Imagine public CDN fallback on for adult photos (chest=${chest ? "set" : "unset"}, booty=${booty}, assVideos=${assVideos}, bootyVideos=${bootyVideos}, boobsVideos=${boobsVideos}). Used after API Imagine misses and before search. grok.com is not automated.`,
       );
     }
   }

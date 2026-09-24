@@ -33,6 +33,7 @@ import { MockXClient } from "../src/x/mock-client.js";
 
 const alice: XUser = { id: "u-alice", username: "alice", name: "Alice" };
 const groupId = "1578398451921985538";
+const chatGroupId = "g2029561975647150382";
 const otherGroupId = "1578398451921985599";
 const URL_A = "https://cdn.example/a.jpg";
 const URL_B = "https://cdn.example/b.jpg";
@@ -417,14 +418,24 @@ describe("engine Imagine and search dedupe", () => {
     sameBytes?: boolean;
     perUser?: number;
     windowMs?: number;
-    imaginePublic?: { chestUrl?: string; bootyUrl?: string; bootyUrls?: readonly string[] };
+    imaginePublic?: {
+      chestUrl?: string;
+      bootyUrl?: string;
+      bootyUrls?: readonly string[];
+      assVideoUrls?: readonly string[];
+      bootyVideoUrls?: readonly string[];
+      boobsVideoUrls?: readonly string[];
+    };
     random?: () => number;
+    failSendVideo?: boolean;
     fetchImage?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
+    fetchVideo?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
   }) {
     const store = new Store(":memory:");
     stores.push(store);
     const client = new MockXClient();
     client.failSendImage = options?.failSendImage ?? false;
+    client.failSendVideo = options?.failSendVideo ?? false;
     const search = {
       calls: 0,
       async searchAdultChestImages() {
@@ -478,6 +489,7 @@ describe("engine Imagine and search dedupe", () => {
         })),
       imagine: options?.imagine === false ? undefined : imagine,
       imaginePublic: options?.imaginePublic,
+      fetchVideo: options?.fetchVideo,
       adultImageProvider: options?.provider,
       recentImages: createRecentImageMemory(options?.recentLimit ?? 8),
       random: options?.random ?? (() => 0),
@@ -724,6 +736,160 @@ describe("engine Imagine and search dedupe", () => {
     await engine.processEvent(message({ id: "chest-1", text: "!boobs" }));
     expect(search.calls).toBe(0);
     expect(client.images.map((row) => row.url)).toEqual([second, chest]);
+  });
+
+  it("mixes a command video into the still bank and posts it on Chat", async () => {
+    const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
+    const assMp4 =
+      "https://imagine-public.x.ai/imagine-public/videos/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4";
+    const bootyMp4 = "https://vidgen.x.ai/booty-clip.mp4?sig=1";
+    const boobsMp4 =
+      "https://imagine-public.x.ai/imagine-public/videos/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.mp4";
+    const fetches: string[] = [];
+    const { engine, client, search } = setup({
+      provider: "search",
+      random: () => 0.99,
+      imaginePublic: {
+        chestUrl: chest,
+        bootyUrl: booty,
+        assVideoUrls: [assMp4],
+        bootyVideoUrls: [bootyMp4],
+        boobsVideoUrls: [boobsMp4],
+      },
+      fetchVideo: async (url) => {
+        fetches.push(url);
+        const tag = url.includes("aaaaaaaa") ? 1 : url.includes("booty") ? 2 : 3;
+        return { bytes: Uint8Array.from([tag, 2, 3, 4]), mimeType: "video/mp4" };
+      },
+    });
+    await engine.processEvent(message({ id: "mix-ass", conversationId: chatGroupId, text: "!ass" }));
+    await engine.processEvent(
+      message({ id: "mix-booty", conversationId: chatGroupId, text: "!booty" }),
+    );
+    await engine.processEvent(
+      message({ id: "mix-boobs", conversationId: chatGroupId, text: "!boobs" }),
+    );
+    expect(search.calls).toBe(0);
+    expect(client.images).toHaveLength(0);
+    expect(client.sent).toHaveLength(0);
+    expect(fetches).toEqual([assMp4, bootyMp4, boobsMp4]);
+    expect(client.videos).toEqual([
+      {
+        conversationId: chatGroupId,
+        url: assMp4,
+        mimeType: "video/mp4",
+        bytes: 4,
+        width: undefined,
+        height: undefined,
+      },
+      {
+        conversationId: chatGroupId,
+        url: bootyMp4,
+        mimeType: "video/mp4",
+        bytes: 4,
+        width: undefined,
+        height: undefined,
+      },
+      {
+        conversationId: chatGroupId,
+        url: boobsMp4,
+        mimeType: "video/mp4",
+        bytes: 4,
+        width: undefined,
+        height: undefined,
+      },
+    ]);
+  });
+
+  it("posts the still when the roll is an image and keeps a classic DM off mp4", async () => {
+    const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
+    const assMp4 =
+      "https://imagine-public.x.ai/imagine-public/videos/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4";
+    const fetches: string[] = [];
+    const imageRoll = setup({
+      provider: "search",
+      random: () => 0,
+      imaginePublic: { bootyUrl: booty, assVideoUrls: [assMp4] },
+      fetchVideo: async (url) => {
+        fetches.push(url);
+        return { bytes: Uint8Array.from([1, 2, 3, 4]), mimeType: "video/mp4" };
+      },
+    });
+    await imageRoll.engine.processEvent(
+      message({ id: "still-roll", conversationId: chatGroupId, text: "!ass" }),
+    );
+    expect(fetches).toEqual([]);
+    expect(imageRoll.client.videos).toHaveLength(0);
+    expect(imageRoll.client.images.map((row) => row.url)).toEqual([booty]);
+    expect(imageRoll.search.calls).toBe(0);
+
+    const classic = setup({
+      provider: "search",
+      random: () => 0.99,
+      imaginePublic: { bootyUrl: booty, assVideoUrls: [assMp4] },
+      fetchVideo: async (url) => {
+        fetches.push(url);
+        return { bytes: Uint8Array.from([1, 2, 3, 4]), mimeType: "video/mp4" };
+      },
+    });
+    await classic.engine.processEvent(message({ id: "classic-vid", text: "!ass" }));
+    expect(fetches).toEqual([]);
+    expect(classic.client.videos).toHaveLength(0);
+    expect(classic.client.images.map((row) => row.url)).toEqual([booty]);
+    expect(classic.client.sent.map((row) => row.text).join("\n")).not.toContain(assMp4);
+    expect(classic.search.calls).toBe(0);
+  });
+
+  it("tries the next bank item when a video download or upload fails", async () => {
+    const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
+    const first =
+      "https://imagine-public.x.ai/imagine-public/videos/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4";
+    const second = "https://vidgen.x.ai/next-clip.mp4";
+    const downloaded = setup({
+      provider: "search",
+      imaginePublic: { bootyVideoUrls: [first, second] },
+      fetchVideo: async (url) =>
+        url === first
+          ? undefined
+          : { bytes: Uint8Array.from([9, 8, 7, 6]), mimeType: "video/mp4" },
+    });
+    await downloaded.engine.processEvent(
+      message({ id: "vid-next", conversationId: chatGroupId, text: "!booty" }),
+    );
+    expect(downloaded.search.calls).toBe(0);
+    expect(downloaded.client.videos.map((row) => row.url)).toEqual([second]);
+    expect(downloaded.client.sent).toHaveLength(0);
+
+    const uploaded = setup({
+      provider: "search",
+      random: () => 0.99,
+      failSendVideo: true,
+      imaginePublic: { bootyUrl: booty, assVideoUrls: [first] },
+      fetchVideo: async () => ({ bytes: Uint8Array.from([1, 2, 3, 4]), mimeType: "video/mp4" }),
+    });
+    await uploaded.engine.processEvent(
+      message({ id: "vid-attach", conversationId: chatGroupId, text: "!ass" }),
+    );
+    expect(uploaded.client.videos).toHaveLength(0);
+    expect(uploaded.client.images.map((row) => row.url)).toEqual([booty]);
+    expect(uploaded.client.sent.map((row) => row.text).join("\n")).not.toContain(first);
+    expect(uploaded.search.calls).toBe(0);
+
+    const missed = setup({
+      provider: "search",
+      imaginePublic: { boobsVideoUrls: [second] },
+      fetchVideo: async () => {
+        throw new Error("download failed");
+      },
+    });
+    await missed.engine.processEvent(
+      message({ id: "vid-miss", conversationId: chatGroupId, text: "!boobs" }),
+    );
+    expect(missed.client.videos).toHaveLength(0);
+    expect(missed.client.sent.map((row) => row.text).join("\n")).not.toContain(second);
+    expect(missed.search.calls).toBe(1);
+    expect(missed.client.images.map((row) => row.url)).toEqual([URL_A]);
   });
 
   it("falls back to search when Imagine fails and skips Imagine when search is selected", async () => {
