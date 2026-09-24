@@ -10,6 +10,7 @@ import {
 import {
   parseImaginePublicImageUrl,
   parseImaginePublicImageUrlList,
+  parseImaginePublicVideoUrlList,
 } from "./bot/imagine-public.js";
 import {
   normalizeVideoAspectRatio,
@@ -91,6 +92,18 @@ function optionalImaginePublicUrlList(name: string): string[] | undefined {
   if (invalid.length > 0) {
     throw new Error(
       `${name} must be https JPEG URLs on imagine-public.x.ai (/imagine-public/images/<uuid>.jpg, no query), separated by commas or whitespace`,
+    );
+  }
+  return urls.length > 0 ? urls : undefined;
+}
+
+function optionalImaginePublicVideoUrls(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || !raw.trim()) return undefined;
+  const { urls, invalid } = parseImaginePublicVideoUrlList(raw);
+  if (invalid.length > 0) {
+    throw new Error(
+      `${name} must be https mp4 URLs (imagine-public.x.ai with no query, or another https host whose path ends in .mp4), separated by commas or whitespace`,
     );
   }
   return urls.length > 0 ? urls : undefined;
@@ -275,6 +288,13 @@ export interface Env {
    * Merged with `boobsImaginePublicBootyUrl`. Ignored unless `boobsImagineApp` is true.
    */
   boobsImaginePublicBootyUrls?: string[];
+  /**
+   * Command-specific mp4 banks mixed with that command's stills.
+   * Ignored unless `boobsImagineApp` is true. Classic DMs cannot attach them.
+   */
+  boobsImaginePublicAssVideoUrls?: string[];
+  boobsImaginePublicBootyVideoUrls?: string[];
+  boobsImaginePublicBoobsVideoUrls?: string[];
   /** Video model id. Unset uses `grok-imagine-video-1.5`. */
   videoImagineModel?: string;
   /** Clip length in seconds (1–15). Unset uses 5. */
@@ -346,6 +366,13 @@ export function loadEnv(requireOwner = true): Env {
     boobsImaginePublicUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_URL"),
     boobsImaginePublicBootyUrl: optionalImaginePublicUrl("BOOBS_IMAGINE_PUBLIC_BOOTY_URL"),
     boobsImaginePublicBootyUrls: optionalImaginePublicUrlList("BOOBS_IMAGINE_PUBLIC_BOOTY_URLS"),
+    boobsImaginePublicAssVideoUrls: optionalImaginePublicVideoUrls("BOOBS_IMAGINE_PUBLIC_ASS_VIDEO_URLS"),
+    boobsImaginePublicBootyVideoUrls: optionalImaginePublicVideoUrls(
+      "BOOBS_IMAGINE_PUBLIC_BOOTY_VIDEO_URLS",
+    ),
+    boobsImaginePublicBoobsVideoUrls: optionalImaginePublicVideoUrls(
+      "BOOBS_IMAGINE_PUBLIC_BOOBS_VIDEO_URLS",
+    ),
     videoImagineModel: optionalVideoModel("VIDEO_IMAGINE_MODEL"),
     videoImagineDuration: optionalVideoDuration("VIDEO_IMAGINE_DURATION"),
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
