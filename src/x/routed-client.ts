@@ -4,6 +4,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  MediaCaption,
   OutboundAudio,
   OutboundImage,
   OutboundVideo,
@@ -60,11 +61,15 @@ export class RoutedXClient implements XClient {
     return this.dm.listConversationDmEvents(params);
   }
 
-  sendMessage(conversationId: string, text: string): Promise<SendMessageResult> {
+  sendMessage(
+    conversationId: string,
+    text: string,
+    caption?: MediaCaption,
+  ): Promise<SendMessageResult> {
     if (this.chat && isChatGroupId(conversationId)) {
-      return this.chat.sendText(conversationId, text);
+      return this.chat.sendText(conversationId, text, caption);
     }
-    return this.dm.sendMessage(conversationId, text);
+    return this.dm.sendMessage(conversationId, text, caption);
   }
 
   async sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult> {

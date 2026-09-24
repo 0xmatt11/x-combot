@@ -268,6 +268,11 @@ export interface DmEvent {
   sequenceId?: string;
   /** Set when this message is a reply and the decrypted preview (or caller) names a target. */
   replyTo?: ReplyTarget;
+  /**
+   * Base64 raw signed Chat event (`encoded_event`). Kept so a later send can
+   * `encryptReply` to this message. Not logged and not written to SQLite.
+   */
+  encodedEvent?: string;
   /** On `ReactionAdd`, the sequence id of the message that was reacted to. */
   reactionTargetSequenceId?: string;
   /**
@@ -289,12 +294,40 @@ export interface SendMessageResult {
   dmConversationId: string;
 }
 
+/**
+ * Minimal caption for one media post.
+ * Adult commands set `text` to `@handle` (or a display name) and, in encrypted
+ * Chat, `replyTo` so the post threads under the command message.
+ */
+export interface MediaCaption {
+  /** Visible text. Adult posts use only the requester's label. No 18+ line. */
+  text: string;
+  /**
+   * UTF-8 byte range of an `@handle` inside `text`.
+   * Chat sends this as a mention entity. Classic DMs rely on the `@handle` text.
+   */
+  mention?: { username: string; start: number; end: number };
+  /**
+   * Thread this post under the command. Encrypted Chat uses `encryptReply`.
+   * Classic group DMs have no reply field, so only `text` is sent.
+   */
+  replyTo?: {
+    sequenceId?: string;
+    senderId?: string;
+    previewText?: string;
+    /** Base64 raw signed Chat event. Preferred input to `encryptReply`. */
+    rawEvent?: string;
+  };
+}
+
 /** Image bytes to attach, plus the source URL used when attach is impossible. */
 export interface OutboundImage {
   /** Direct https URL. Do not log this; CDN links can carry signatures. */
   url: string;
   bytes?: Uint8Array;
   mimeType?: string;
+  /** Mention and reply target. Absent means no caption, as `!imagine` does. */
+  caption?: MediaCaption;
 }
 
 /** Video bytes to attach. Classic DMs cannot take mp4; encrypted Chat uses media_type 3. */
@@ -305,6 +338,8 @@ export interface OutboundVideo {
   mimeType?: string;
   width?: number;
   height?: number;
+  /** Mention and reply target. Absent means no caption, as `!video` does. */
+  caption?: MediaCaption;
 }
 
 /**

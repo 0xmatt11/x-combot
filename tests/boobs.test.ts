@@ -996,14 +996,21 @@ describe("!boobs engine", () => {
     return { engine, client, search };
   }
 
-  it("searches and attaches a native image with no caption", async () => {
+  it("searches and attaches a native image that mentions the requester", async () => {
     const { engine, client, search } = setup();
     const actions = await engine.processEvent(
       message({ id: "b1", senderId: alice.id, text: "!Boobs" }),
     );
     expect(search.calls).toBe(1);
     expect(client.images).toEqual([
-      { conversationId: groupId, url: SAFE_URL, mimeType: "image/jpeg", bytes: 3 },
+      {
+        conversationId: groupId,
+        url: SAFE_URL,
+        mimeType: "image/jpeg",
+        bytes: 3,
+        caption: "@alice",
+        mention: "alice",
+      },
     ]);
     expect(client.sent).toHaveLength(0);
     expect(actions.replies).toEqual([]);
@@ -1015,7 +1022,7 @@ describe("!boobs engine", () => {
     await engine.processEvent(message({ id: "b2", senderId: alice.id, text: "!boobs" }));
     expect(search.calls).toBe(1);
     expect(client.images).toHaveLength(0);
-    expect(client.sent.map((row) => row.text)).toEqual([SAFE_URL]);
+    expect(client.sent.map((row) => row.text)).toEqual([`@alice ${SAFE_URL}`]);
   });
 
   it("does not search when disabled, when extra text is present, or when results are unsafe", async () => {
@@ -1175,6 +1182,7 @@ describe("!boobs engine", () => {
     expect(loaded.help).toMatch(/!booty/);
     expect(loaded.help).toMatch(/saved imagine-public bank/);
     expect(loaded.help).toMatch(/does not open grok\.com\/imagine/);
+    expect(loaded.help).toMatch(/Tags you and replies to your command/);
     expect(loaded.help).toMatch(/!imagine/);
     expect(loaded.boobs?.enabled).toBe(false);
     expect(loaded.boobs?.rate_limit_per_user).toBe(0);
@@ -1243,7 +1251,7 @@ describe("!ass and !booty", () => {
     return { engine, client, search };
   }
 
-  it("attaches a native image for both aliases with no caption", async () => {
+  it("attaches a native image for both aliases and mentions the requester", async () => {
     const { engine, client, search } = setup();
     const ass = await engine.processEvent(message({ id: "ass-1", senderId: alice.id, text: "!ass" }));
     const booty = await engine.processEvent(
@@ -1257,12 +1265,16 @@ describe("!ass and !booty", () => {
         url: "https://i.redd.it/adult-butt.jpg",
         mimeType: "image/jpeg",
         bytes: 3,
+        caption: "@alice",
+        mention: "alice",
       },
       {
         conversationId: groupId,
         url: "https://i.redd.it/adult-butt-2.jpg",
         mimeType: "image/jpeg",
         bytes: 3,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
     expect(client.sent).toHaveLength(0);
@@ -1277,8 +1289,8 @@ describe("!ass and !booty", () => {
       message({ id: "ass-link", senderId: alice.id, text: "!booty" }),
     );
     expect(client.images).toHaveLength(0);
-    expect(client.sent.map((row) => row.text)).toEqual(["https://i.redd.it/adult-butt.jpg"]);
-    expect(actions.replies).toEqual(["https://i.redd.it/adult-butt.jpg"]);
+    expect(client.sent.map((row) => row.text)).toEqual(["@alice https://i.redd.it/adult-butt.jpg"]);
+    expect(actions.replies).toEqual(["@alice https://i.redd.it/adult-butt.jpg"]);
     expect(actions.replies.join("\n")).not.toContain("18+");
   });
 
@@ -1349,13 +1361,17 @@ describe("RoutedXClient image delivery", () => {
 
   it("posts the https URL when Chat media upload fails and does not use dm_image", async () => {
     const dm = new MockXClient();
-    const texts: string[] = [];
+    const texts: { text: string; caption?: import("../src/types.js").MediaCaption }[] = [];
     const chat = {
       sendImage: async () => {
         throw new Error("Chat media upload failed");
       },
-      sendText: async (conversationId: string, text: string) => {
-        texts.push(text);
+      sendText: async (
+        conversationId: string,
+        text: string,
+        caption?: import("../src/types.js").MediaCaption,
+      ) => {
+        texts.push({ text, caption });
         return { dmEventId: "text-1", dmConversationId: conversationId };
       },
     } as unknown as import("../src/chat/service.js").ChatService;
@@ -1379,10 +1395,32 @@ describe("RoutedXClient image delivery", () => {
       },
     );
     await engine.processEvent(
-      message({ id: "chat-boobs", senderId: alice.id, text: "!boobs", conversationId: chatGroupId }),
+      message({
+        id: "chat-boobs",
+        senderId: alice.id,
+        text: "!boobs",
+        conversationId: chatGroupId,
+        sequenceId: "55",
+        encodedEvent: "blob-cmd",
+      }),
     );
     store.close();
     expect(dm.images).toHaveLength(0);
-    expect(texts).toEqual([SAFE_URL]);
+    expect(texts).toEqual([
+      {
+        text: `@alice ${SAFE_URL}`,
+        caption: {
+          text: "@alice",
+          mention: { username: "alice", start: 0, end: 6 },
+          replyTo: {
+            sequenceId: "55",
+            senderId: alice.id,
+            previewText: "!boobs",
+            rawEvent: "blob-cmd",
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(texts)).not.toContain("18+");
   });
 });

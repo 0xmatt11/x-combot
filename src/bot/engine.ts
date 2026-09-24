@@ -12,6 +12,7 @@ import type {
   ConversationSettings,
   DmEvent,
   LlmContextMode,
+  MediaCaption,
   ResolvedConversationConfig,
   XUser,
 } from "../types.js";
@@ -2506,8 +2507,10 @@ export class ModerationEngine {
 
     // Saved bank only. These commands do not open grok.com/imagine and do not
     // call the Imagine generate client (browser or api.x.ai). An empty or
-    // exhausted bank falls through to search.
-    if (await this.tryImaginePublic(conversationId, command, actions, label)) return;
+    // exhausted bank falls through to search. The post mentions the requester
+    // and, in encrypted Chat, replies to their command.
+    const caption = await this.adultMediaCaption(event);
+    if (await this.tryImaginePublic(conversationId, command, actions, label, caption)) return;
 
     const search = this.deps.imageSearch;
     if (!search) {
@@ -2558,6 +2561,7 @@ export class ModerationEngine {
       selection.image,
       actions,
       label,
+      caption,
       selection.fetched,
     );
     if (delivery.posted) {
@@ -2831,6 +2835,7 @@ export class ModerationEngine {
       { url: url!, adult: true },
       actions,
       label,
+      undefined,
       materialized.fetched,
     );
     if (!delivery.posted) return "failed";
@@ -2875,6 +2880,7 @@ export class ModerationEngine {
     command: AdultImageCommand,
     _actions: EngineActions,
     label: string,
+    caption: MediaCaption,
   ): Promise<boolean> {
     const pending = imaginePublicPoolFor(this.deps.imaginePublic, command);
     let notedVideoSkip = false;
@@ -2893,10 +2899,10 @@ export class ModerationEngine {
           }
           continue;
         }
-        if (await this.postImaginePublicVideo(conversationId, item.url, label)) return true;
+        if (await this.postImaginePublicVideo(conversationId, item.url, label, caption)) return true;
         continue;
       }
-      if (await this.postImaginePublicImage(conversationId, item.url, label)) return true;
+      if (await this.postImaginePublicImage(conversationId, item.url, label, caption)) return true;
     }
     return false;
   }
@@ -2905,6 +2911,7 @@ export class ModerationEngine {
     conversationId: string,
     url: string,
     label: string,
+    caption: MediaCaption,
   ): Promise<boolean> {
     if (this.recentImages.hasUrl(conversationId, url)) {
       log.warn(`${label} Imagine public image was already posted conversation=${conversationId}`);
@@ -2922,6 +2929,7 @@ export class ModerationEngine {
         url,
         bytes: fetched.bytes,
         mimeType: fetched.mimeType,
+        caption,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -2939,6 +2947,7 @@ export class ModerationEngine {
     conversationId: string,
     url: string,
     label: string,
+    caption: MediaCaption,
   ): Promise<boolean> {
     if (this.recentImages.hasUrl(conversationId, url)) {
       log.warn(`${label} Imagine public video was already posted conversation=${conversationId}`);
@@ -2976,6 +2985,7 @@ export class ModerationEngine {
         url,
         bytes: fetched.bytes,
         mimeType: "video/mp4",
+        caption,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -3024,6 +3034,7 @@ export class ModerationEngine {
     image: AdultImageCandidate,
     actions: EngineActions,
     label: string,
+    caption?: MediaCaption,
     alreadyFetched?: AdultVisionImage,
   ): Promise<{ posted: boolean; hash?: string }> {
     const host = imageHost(image.url);
@@ -3043,8 +3054,8 @@ export class ModerationEngine {
           url: image.url,
           bytes: fetched.bytes,
           mimeType: fetched.mimeType,
+          ...(caption ? { caption } : {}),
         });
-        // The image is the whole message. Do not record a caption such as "18+".
         log.info(`${label} posted native image conversation=${conversationId} host=${host}`);
         return { posted: true, hash };
       } catch (error) {
@@ -3055,9 +3066,40 @@ export class ModerationEngine {
       }
     }
 
-    await this.reply(conversationId, image.url, actions);
+    if (caption) {
+      const link = `${caption.text} ${image.url}`;
+      await this.client.sendMessage(conversationId, link, caption);
+      actions.replies.push(link);
+    } else {
+      await this.reply(conversationId, image.url, actions);
+    }
     log.info(`${label} posted image link conversation=${conversationId} host=${host}`);
     return { posted: true, hash };
+  }
+
+  /**
+   * `@handle` when we know one, otherwise the same chat label other commands use.
+   * Encrypted Chat also threads the post under the command via `encryptReply`.
+   */
+  private async adultMediaCaption(event: DmEvent): Promise<MediaCaption> {
+    const senderId = event.senderId ?? "";
+    const text = await this.chatLabel(event.sender, senderId, event.conversationId);
+    const mention = handleMention(text);
+    const canReply = Boolean(event.sequenceId || event.encodedEvent);
+    return {
+      text,
+      ...(mention ? { mention } : {}),
+      ...(canReply
+        ? {
+            replyTo: {
+              ...(event.sequenceId ? { sequenceId: event.sequenceId } : {}),
+              ...(event.senderId ? { senderId: event.senderId } : {}),
+              ...(event.text ? { previewText: event.text } : {}),
+              ...(event.encodedEvent ? { rawEvent: event.encodedEvent } : {}),
+            },
+          }
+        : {}),
+    };
   }
 
   private async applyWarn(
@@ -3234,6 +3276,14 @@ export class ModerationEngine {
 }
 
 /** A cap applies only when some count is positive and the window is positive. `0` is unlimited. */
+/** `@handle` covering the whole label. Display names are not a Chat mention entity. */
+function handleMention(text: string): MediaCaption["mention"] | undefined {
+  const match = /^@([A-Za-z0-9_]{1,15})$/.exec(text);
+  const username = match?.[1];
+  if (!username) return undefined;
+  return { username, start: 0, end: new TextEncoder().encode(text).byteLength };
+}
+
 function boobsRateLimitActive(settings: ResolvedConversationConfig): boolean {
   const hasCap = settings.boobsRateLimitPerUser > 0 || settings.boobsRateLimitPerConversation > 0;
   return hasCap && settings.boobsRateLimitWindowMs > 0;

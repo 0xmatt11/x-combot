@@ -89,6 +89,10 @@ class FakeCipher implements ChatCipher {
     };
   }
 
+  encryptReply(conversationId: string, text: string) {
+    return this.encryptMessage(conversationId, text);
+  }
+
   encryptStream(plaintext: Uint8Array, _conversationKey: Uint8Array) {
     return plaintext;
   }

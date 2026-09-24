@@ -276,8 +276,8 @@ Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2
 | `!ask <question>` | LLM reply. Also `@botname …` and the wake prefixes in YAML |
 | `!summarize [focus]` | Load history and summarize |
 | `!analyze [prompt]` | Load history and answer about the thread |
-| `!boobs` | One chest / cleavage photo or clip from the saved imagine-public bank. Off unless enabled. Does not open grok.com/imagine. No extra arguments. See [Adult photos](#adult-photos) |
-| `!ass` / `!booty` / `!booties` | One butt photo or clip from that same saved bank. Same switch, rate limit, and media path as `!boobs`. No caption |
+| `!boobs` | One chest / cleavage photo or clip from the saved imagine-public bank. Off unless enabled. Tags the requester and replies to their command. Does not open grok.com/imagine. No extra arguments. See [Adult photos](#adult-photos) |
+| `!ass` / `!booty` / `!booties` | One butt photo or clip from that same saved bank. Same switch, rate limit, mention, and reply as `!boobs`. No other caption |
 | `!imagine <prompt>` | One image from that prompt on grok.com/imagine (Chrome session). Stays on when `!boobs` is off. See [Imagine](#imagine) |
 | `!video <prompt>` | One short video from that prompt on grok.com/imagine. Takes a few minutes. See [Video](#video) |
 | `!voice` | Menu of four personas. `!voice sexy <text>` (or `1`, `dude` / `2`, `scared` / `3`, `horny` / `4`) speaks that line. See [Voice](#voice) |
@@ -408,7 +408,7 @@ Open hands (`!blackjack`, `!poker`, `!crash`) and trivia questions are in-memory
 
 ## Adult photos
 
-`!boobs` posts a chest or cleavage photo. `!ass`, `!booty`, and `!booties` post a butt-from-behind photo (`!booties` is an alias of `!booty`). They are **off** unless you opt in. None of them send a caption or an `18+` label. Extra text is refused and is not used as a prompt or a search query.
+`!boobs` posts a chest or cleavage photo. `!ass`, `!booty`, and `!booties` post a butt-from-behind photo (`!booties` is an alias of `!booty`). They are **off** unless you opt in. The post tags the person who sent the command (`@handle` when that account has one) and, in encrypted Chat, is a reply to that command message. There is no other caption and no `18+` label. Extra text is refused and is not used as a prompt or a search query.
 
 ```bash
 BOOBS_ENABLED=true
@@ -441,7 +441,7 @@ Each still must be `https://imagine-public.x.ai/imagine-public/images/<uuid>.jpg
 
 The three video variables are separate banks. A call builds one pool from that command's stills plus that command's videos and picks uniformly at random. `!ass` does not play a `!booty` clip. Each entry is an https mp4: `imagine-public.x.ai` with no query, or any other https host whose path ends in `.mp4` (a query string is allowed, the same shape `!video` downloads). Lists use the same comma, whitespace, newline, and `#` comment rules. A bad entry fails startup.
 
-A JPEG is uploaded on the existing photo path (classic `dm_image`, or Chat `encryptStream` plus `POST /2/chat/media/upload`). An mp4 is downloaded with the same helper as `!video` and posted with Chat `sendVideo` (`media_type` 3). Classic group DMs cannot attach mp4, so a video draw is skipped and another pool item is tried. A failed download or upload does the same and does not post the mp4 URL as text. There is no caption and no `18+` label. The pool is the first step for these commands. It does not wait on Imagine, and a grok.com moderation or signed-out session does not apply here. A URL or byte hash already in that conversation's last 8 posts is skipped and another item is tried. A download that is not a JPEG, or not an mp4, is skipped the same way. If the pool for that command is empty, or every candidate is skipped, the command continues to search. Startup logs the chest still, the booty still count, and the three video counts. `!imagine` and `!video` ignore the flag and these variables.
+A JPEG is uploaded on the existing photo path (classic `dm_image`, or Chat `encryptStream` plus `POST /2/chat/media/upload`). An mp4 is downloaded with the same helper as `!video` and posted with Chat `sendVideo` (`media_type` 3). Classic group DMs cannot attach mp4, so a video draw is skipped and another pool item is tried. A failed download or upload does the same and does not post the mp4 URL as text. The only text on the post is the requester's `@handle` (or display name). Encrypted Chat sends that with `encryptReply`, so the photo or clip is threaded under the command, and the handle is a mention entity. Classic group DMs have no reply field, so the same `@handle` is the message text next to the attachment. There is no `18+` label. The pool is the first step for these commands. It does not wait on Imagine, and a grok.com moderation or signed-out session does not apply here. A URL or byte hash already in that conversation's last 8 posts is skipped and another item is tried. A download that is not a JPEG, or not an mp4, is skipped the same way. If the pool for that command is empty, or every candidate is skipped, the command continues to search. Startup logs the chest still, the booty still count, and the three video counts. `!imagine` and `!video` ignore the flag and these variables.
 
 `config/booty-bank.example.txt` is a copy-paste list. The process does not load it. On deploy set:
 
@@ -471,9 +471,9 @@ A missing key on `serpapi` or `bing` makes the command say so and does not call 
 
 | Conversation | Delivery |
 | --- | --- |
-| Classic group DM | Download (https, max 5 MB, jpeg/png/gif/webp) and upload with `POST /2/media/upload` (`media_category` `dm_image` or `dm_gif`). The message is attachments only, no `text` field, so there is no caption. Needs `media.write`. |
-| Encrypted Chat (`g…`) | Inline photo. Bytes are `encryptStream`'d, uploaded via `POST /2/chat/media/upload`, then referenced from `encryptMessage` as `attachment_type: "media"` with `media_type` omitted so clients render a photo, not a file. The encrypted text is an empty string and is not shown as a caption. |
-| Search, if upload or download fails and a URL exists | The image URL is sent as a text message. A saved-bank upload that fails tries the next bank item and does not post the CDN URL as text. |
+| Classic group DM | Download (https, max 5 MB, jpeg/png/gif/webp) and upload with `POST /2/media/upload` (`media_category` `dm_image` or `dm_gif`). The message text is only `@handle`. Classic DMs have no reply field. Needs `media.write`. |
+| Encrypted Chat (`g…`) | Inline photo or mp4. Bytes are `encryptStream`'d, uploaded via `POST /2/chat/media/upload`, then sent with `encryptReply` so the post threads under the command. The text is `@handle` with a mention entity. `media_type` is omitted for a photo and set to 3 for an mp4. |
+| Search, if upload or download fails and a URL exists | The text is `@handle` plus the image URL. In encrypted Chat that message replies to the command. A saved-bank upload that fails tries the next bank item and does not post the CDN URL as text. |
 
 ## Imagine
 

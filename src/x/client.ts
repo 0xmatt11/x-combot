@@ -2,6 +2,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  MediaCaption,
   OutboundAudio,
   OutboundImage,
   OutboundVideo,
@@ -44,6 +45,7 @@ export interface XClient {
   sendMessage(
     conversationId: string,
     text: string,
+    caption?: MediaCaption,
   ): Promise<SendMessageResult>;
   /**
    * Attach an image. Classic group DMs use media upload plus `attachments.media_id`.

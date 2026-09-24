@@ -81,10 +81,23 @@ export const CHAT_MEDIA_TYPE_VIDEO = 3;
 /** `media_type` for an inline Chat audio clip (chat-xdk `MediaType::Audio`). */
 export const CHAT_MEDIA_TYPE_AUDIO = 4;
 
+/** `[startByte, endByte, entityType]`. `mention` tags an `@handle`. */
+export type ChatEntity = [number, number, string];
+
 export interface EncryptMessageOptions {
   conversationKey?: Uint8Array;
   conversationKeyVersion?: string;
   attachments?: ChatMediaAttachment[];
+  entities?: ChatEntity[];
+}
+
+/** `encryptReply` adds the message this post threads under. */
+export interface EncryptReplyOptions extends EncryptMessageOptions {
+  /** Base64 raw signed event. The SDK derives the preview from it. */
+  replyToEvent?: string;
+  replyToSequenceId?: string;
+  replyToSenderId?: string;
+  replyToText?: string;
 }
 
 export interface SendPayload {
@@ -141,6 +154,8 @@ export interface ChatCipher {
   matchesRegisteredKey(publicKey: string): boolean;
   loadedIdentity(): LoadedChatIdentity | undefined;
   encryptMessage(conversationId: string, text: string, options?: EncryptMessageOptions): SendPayload;
+  /** Encrypt a reply to an existing Chat message. Same payload shape as `encryptMessage`. */
+  encryptReply(conversationId: string, text: string, options?: EncryptReplyOptions): SendPayload;
   /** Streaming encrypt for Chat media (`encryptStream` / secretstream). */
   encryptStream(plaintext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
   prepareMessageDelete(

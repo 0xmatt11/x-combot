@@ -391,6 +391,20 @@ describe("DM image attach", () => {
     });
     expect(message.text).toBeUndefined();
     expect(JSON.stringify(message)).not.toContain("18+");
+
+    const tagged = await live.sendImage("1578398451921985538", {
+      url: "https://i.redd.it/should-not-be-logged.jpg",
+      bytes: Uint8Array.from([1, 2, 3, 4]),
+      mimeType: "image/jpeg",
+      caption: { text: "@alice", mention: { username: "alice", start: 0, end: 6 } },
+    });
+    expect(tagged.dmEventId).toBe("evt-9");
+    const taggedBody = JSON.parse(String(calls.at(-1)?.init.body));
+    expect(taggedBody).toEqual({
+      text: "@alice",
+      attachments: [{ media_id: "999" }],
+    });
+    expect(JSON.stringify(taggedBody)).not.toContain("18+");
     expect(String(calls[0]?.init.headers && (calls[0].init.headers as Record<string, string>).Authorization)).toBe(
       "Bearer test-access-token",
     );

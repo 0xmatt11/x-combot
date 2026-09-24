@@ -2,6 +2,7 @@ import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  MediaCaption,
   OutboundAudio,
   OutboundImage,
   OutboundVideo,
@@ -11,8 +12,23 @@ import type {
 import type { UserTweet, XClient } from "./client.js";
 
 export class MockXClient implements XClient {
-  readonly sent: { conversationId: string; text: string }[] = [];
-  readonly images: { conversationId: string; url: string; mimeType?: string; bytes: number }[] = [];
+  readonly sent: {
+    conversationId: string;
+    text: string;
+    replyToSequenceId?: string;
+    replyToEvent?: string;
+  }[] = [];
+  readonly images: {
+    conversationId: string;
+    url: string;
+    mimeType?: string;
+    bytes: number;
+    caption?: string;
+    mention?: string;
+    replyToSequenceId?: string;
+    replyToSenderId?: string;
+    replyToEvent?: string;
+  }[] = [];
   readonly videos: {
     conversationId: string;
     url: string;
@@ -20,6 +36,11 @@ export class MockXClient implements XClient {
     bytes: number;
     width?: number;
     height?: number;
+    caption?: string;
+    mention?: string;
+    replyToSequenceId?: string;
+    replyToSenderId?: string;
+    replyToEvent?: string;
   }[] = [];
   readonly audios: {
     conversationId: string;
@@ -108,9 +129,19 @@ export class MockXClient implements XClient {
     return { events };
   }
 
-  async sendMessage(conversationId: string, text: string): Promise<SendMessageResult> {
+  async sendMessage(
+    conversationId: string,
+    text: string,
+    caption?: MediaCaption,
+  ): Promise<SendMessageResult> {
     const dmEventId = `sent-${this.sent.length + 1}`;
-    this.sent.push({ conversationId, text });
+    const reply = caption?.replyTo;
+    this.sent.push({
+      conversationId,
+      text,
+      ...(reply?.sequenceId ? { replyToSequenceId: reply.sequenceId } : {}),
+      ...(reply?.rawEvent ? { replyToEvent: reply.rawEvent } : {}),
+    });
     return { dmEventId, dmConversationId: conversationId };
   }
 
@@ -126,6 +157,7 @@ export class MockXClient implements XClient {
       url: image.url,
       mimeType: image.mimeType,
       bytes: image.bytes.byteLength,
+      ...captionRecord(image.caption),
     });
     return { dmEventId: `img-${this.images.length}`, dmConversationId: conversationId };
   }
@@ -144,6 +176,7 @@ export class MockXClient implements XClient {
       bytes: video.bytes.byteLength,
       width: video.width,
       height: video.height,
+      ...captionRecord(video.caption),
     });
     return { dmEventId: `vid-${this.videos.length}`, dmConversationId: conversationId };
   }
@@ -187,4 +220,22 @@ export class MockXClient implements XClient {
     this.deleted.push(eventId);
     return { deleted: true };
   }
+}
+
+function captionRecord(caption: MediaCaption | undefined): {
+  caption?: string;
+  mention?: string;
+  replyToSequenceId?: string;
+  replyToSenderId?: string;
+  replyToEvent?: string;
+} {
+  if (!caption) return {};
+  const reply = caption.replyTo;
+  return {
+    caption: caption.text,
+    ...(caption.mention ? { mention: caption.mention.username } : {}),
+    ...(reply?.sequenceId ? { replyToSequenceId: reply.sequenceId } : {}),
+    ...(reply?.senderId ? { replyToSenderId: reply.senderId } : {}),
+    ...(reply?.rawEvent ? { replyToEvent: reply.rawEvent } : {}),
+  };
 }

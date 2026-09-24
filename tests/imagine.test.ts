@@ -518,7 +518,7 @@ describe("engine Imagine and search dedupe", () => {
     expect(client.sent.map((row) => row.text)).toEqual(["No matching image came back. Try again."]);
   });
 
-  it("attaches a configured imagine-public JPEG and does not call Imagine, with no caption", async () => {
+  it("attaches a configured imagine-public JPEG, mentions the requester, and does not call Imagine", async () => {
     const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
     const booty = "https://imagine-public.x.ai/imagine-public/images/11111111-2222-4333-8444-555555555555.jpg";
     const posted = setup({
@@ -529,7 +529,14 @@ describe("engine Imagine and search dedupe", () => {
     expect(posted.imagine.prompts).toHaveLength(0);
     expect(posted.search.calls).toBe(0);
     expect(posted.client.images).toEqual([
-      { conversationId: groupId, url: chest, mimeType: "image/jpeg", bytes: 2 },
+      {
+        conversationId: groupId,
+        url: chest,
+        mimeType: "image/jpeg",
+        bytes: 2,
+        caption: "@alice",
+        mention: "alice",
+      },
     ]);
     expect(posted.client.sent).toHaveLength(0);
     expect(actions.replies).toEqual([]);
@@ -562,13 +569,26 @@ describe("engine Imagine and search dedupe", () => {
         url: image.url,
         mimeType: image.mimeType,
         bytes: image.bytes.byteLength,
+        ...(image.caption
+          ? {
+              caption: image.caption.text,
+              ...(image.caption.mention ? { mention: image.caption.mention.username } : {}),
+            }
+          : {}),
       });
       return { dmEventId: `img-${client.images.length}`, dmConversationId: conversationId };
     };
 
     await engine.processEvent(message({ id: "bytes-1", text: "!booty" }));
     expect(client.images).toEqual([
-      { conversationId: groupId, url: second, mimeType: "image/jpeg", bytes: 2 },
+      {
+        conversationId: groupId,
+        url: second,
+        mimeType: "image/jpeg",
+        bytes: 2,
+        caption: "@alice",
+        mention: "alice",
+      },
     ]);
     expect(client.sent).toHaveLength(0);
     expect(search.calls).toBe(0);
@@ -770,6 +790,8 @@ describe("engine Imagine and search dedupe", () => {
         bytes: 4,
         width: undefined,
         height: undefined,
+        caption: "@alice",
+        mention: "alice",
       },
       {
         conversationId: chatGroupId,
@@ -778,6 +800,8 @@ describe("engine Imagine and search dedupe", () => {
         bytes: 4,
         width: undefined,
         height: undefined,
+        caption: "@alice",
+        mention: "alice",
       },
       {
         conversationId: chatGroupId,
@@ -786,8 +810,79 @@ describe("engine Imagine and search dedupe", () => {
         bytes: 4,
         width: undefined,
         height: undefined,
+        caption: "@alice",
+        mention: "alice",
       },
     ]);
+  });
+
+  it("replies to the command when a bank still or clip is posted in Chat", async () => {
+    const chest =
+      "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
+    const clip =
+      "https://imagine-public.x.ai/imagine-public/videos/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.mp4";
+    const still = setup({
+      provider: "imagine",
+      imaginePublic: { chestUrl: chest },
+    });
+    await still.engine.processEvent(
+      message({
+        id: "reply-still",
+        conversationId: chatGroupId,
+        text: "!boobs",
+        sequenceId: "55",
+        encodedEvent: "blob-cmd",
+      }),
+    );
+    expect(still.imagine.prompts).toHaveLength(0);
+    expect(still.search.calls).toBe(0);
+    expect(still.client.images).toEqual([
+      {
+        conversationId: chatGroupId,
+        url: chest,
+        mimeType: "image/jpeg",
+        bytes: 2,
+        caption: "@alice",
+        mention: "alice",
+        replyToSequenceId: "55",
+        replyToSenderId: alice.id,
+        replyToEvent: "blob-cmd",
+      },
+    ]);
+    expect(JSON.stringify(still.client.images)).not.toContain("18+");
+
+    const video = setup({
+      provider: "imagine",
+      imaginePublic: { boobsVideoUrls: [clip] },
+      fetchVideo: async () => ({ bytes: Uint8Array.from([1, 2, 3, 4]), mimeType: "video/mp4" }),
+    });
+    await video.engine.processEvent(
+      message({
+        id: "reply-clip",
+        conversationId: chatGroupId,
+        text: "!boobs",
+        sequenceId: "56",
+        encodedEvent: "blob-clip",
+      }),
+    );
+    expect(video.imagine.prompts).toHaveLength(0);
+    expect(video.search.calls).toBe(0);
+    expect(video.client.videos).toEqual([
+      {
+        conversationId: chatGroupId,
+        url: clip,
+        mimeType: "video/mp4",
+        bytes: 4,
+        width: undefined,
+        height: undefined,
+        caption: "@alice",
+        mention: "alice",
+        replyToSequenceId: "56",
+        replyToSenderId: alice.id,
+        replyToEvent: "blob-clip",
+      },
+    ]);
+    expect(JSON.stringify(video.client.videos)).not.toContain("18+");
   });
 
   it("posts the still when the roll is an image and keeps a classic DM off mp4", async () => {

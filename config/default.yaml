@@ -26,8 +26,8 @@ help: |
     !help — this message
     !status — health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
     !rules — group rules
-    !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty (off unless enabled; does not open grok.com/imagine)
-    !ass / !booty / !booties — butt photo or clip from that same saved bank (same switch as !boobs; does not open grok.com/imagine)
+    !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty. Tags you and replies to your command (off unless enabled; does not open grok.com/imagine)
+    !ass / !booty / !booties — butt photo or clip from that same saved bank. Same tag and reply (same switch as !boobs; does not open grok.com/imagine)
     !imagine <prompt> — image from grok.com/imagine in the signed-in Chrome session (not the xAI API)
     !video <prompt> — short video from grok.com/imagine in that same Chrome session (takes a few minutes)
     !voice — pick a persona, then a line. Bare !voice lists them: 1 sexy girl, 2 regular dude, 3 scared girl, 4 really horny girl (!voice sexy hello, !voice 2 what's up)
@@ -166,7 +166,9 @@ xp:
 # (BOOBS_SEARCH_PROVIDER). If DuckDuckGo fails or its hits are off-topic,
 # keyless Bing HTML (adlt=off) runs next, then Reddit. Search also skips the
 # last few posted URLs and image hashes in that conversation.
-# The command ignores extra text so members cannot change the prompt. See the README.
+# The command ignores extra text so members cannot change the prompt. A posted
+# photo or clip tags the requester (@handle) and, in encrypted Chat, replies
+# to their command. See the README.
 # !imagine <prompt> uses the Imagine path and does not use this switch.
 # Rate limits are off: 0 means unlimited. A positive per-user or per-conversation
 # count is enforced only when rate_limit_window_ms is also positive.
