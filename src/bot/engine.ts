@@ -64,6 +64,7 @@ import {
   type RecentImageMemory,
 } from "./recent-images.js";
 import { matchFilters } from "./filters.js";
+import { floodDetectionEnabled } from "./flood.js";
 import {
   GameRoom,
   anagramReply,
@@ -346,40 +347,44 @@ export class ModerationEngine {
         return actions;
       }
 
-      const count = this.store.recordFloodEvent(
-        event.conversationId,
-        senderId,
-        event.id,
-        nowMs,
-        settings.floodWindowMs,
-      );
-      if (count > settings.floodMaxMessages) {
-        if (settings.attemptDeleteOnFlood) {
-          await this.tryDelete(event.id, actions, event);
-        }
-        this.store.mute(
+      // 0 or a negative max, or a non-positive window, disables flood.
+      // Skip the record: `count > 0` would mute every message.
+      if (floodDetectionEnabled(settings.floodMaxMessages, settings.floodWindowMs)) {
+        const count = this.store.recordFloodEvent(
           event.conversationId,
           senderId,
-          nowMs + settings.floodMuteMs,
-          "flood",
+          event.id,
+          nowMs,
+          settings.floodWindowMs,
         );
-        actions.muted = true;
-        await this.reply(
-          event.conversationId,
-          `${await this.chatLabel(event.sender, senderId, event.conversationId)} is flooding and has been soft-muted for ${Math.round(settings.floodMuteMs / 60000)} min. (X cannot kick users from group DMs.)`,
-          actions,
-        );
-        if (settings.warnOnFlood) {
-          await this.applyWarn(
-            event,
+        if (count > settings.floodMaxMessages) {
+          if (settings.attemptDeleteOnFlood) {
+            await this.tryDelete(event.id, actions, event);
+          }
+          this.store.mute(
+            event.conversationId,
             senderId,
-            this.config.botUserId,
+            nowMs + settings.floodMuteMs,
             "flood",
-            settings,
+          );
+          actions.muted = true;
+          await this.reply(
+            event.conversationId,
+            `${await this.chatLabel(event.sender, senderId, event.conversationId)} is flooding and has been soft-muted for ${Math.round(settings.floodMuteMs / 60000)} min. (X cannot kick users from group DMs.)`,
             actions,
           );
+          if (settings.warnOnFlood) {
+            await this.applyWarn(
+              event,
+              senderId,
+              this.config.botUserId,
+              "flood",
+              settings,
+              actions,
+            );
+          }
+          return actions;
         }
-        return actions;
       }
     }
 
@@ -2143,12 +2148,19 @@ function parseSetting(key: string, value: string): ConversationSettings | undefi
   return undefined;
 }
 
+function formatFloodSetting(settings: ResolvedConversationConfig): string {
+  if (!floodDetectionEnabled(settings.floodMaxMessages, settings.floodWindowMs)) {
+    return `flood: off (max_messages ${settings.floodMaxMessages}, window_ms ${settings.floodWindowMs}; 0 disables flood)`;
+  }
+  return `flood: ${settings.floodMaxMessages} msgs / ${settings.floodWindowMs}ms, mute ${settings.floodMuteMs}ms (0 disables flood)`;
+}
+
 function formatSettings(settings: ResolvedConversationConfig): string {
   return [
     `welcome_enabled: ${settings.welcomeEnabled}`,
     `leave_enabled: ${settings.leaveEnabled}`,
     `warn_limit: ${settings.warnLimit}`,
-    `flood: ${settings.floodMaxMessages} msgs / ${settings.floodWindowMs}ms, mute ${settings.floodMuteMs}ms`,
+    formatFloodSetting(settings),
     `filters: ${settings.filters.length}`,
     `auto_mute_ms: ${settings.autoMuteMs}`,
     `llm_enabled: ${settings.llmEnabled}`,

@@ -67,13 +67,17 @@ help: |
     !del [event_id] — try to delete (classic DM: only the bot's own event; Chat: delete-for-all if this account sent it or is a group admin)
     !note [key] [text] — save or list admin notes
     !get <key> — read a note
-    !set <key> <value> — per-conversation setting
-    !settings — show this conversation's settings
+    !set <key> <value> — per-conversation setting. flood_max_messages 0 (or negative) disables flood; flood_window_ms 0 does too
+    !settings — show this conversation's settings (0 disables flood)
     !admin add|remove @user — conversation admin allowlist
     !admins — list admins
 
+# Off by default. Flood runs only when max_messages and window_ms are both
+# above 0. 0 or a negative max_messages disables it, and so does window_ms: 0,
+# including a per-conversation !set. window_ms and mute_ms stay so a group can
+# turn flood back on without inventing a mute duration.
 flood:
-  max_messages: 5
+  max_messages: 0
   window_ms: 8000
   mute_ms: 300000
   warn_on_flood: true

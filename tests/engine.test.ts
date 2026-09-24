@@ -54,15 +54,26 @@ describe("ModerationEngine", () => {
     stores.length = 0;
   });
 
-  function setup(): { engine: ModerationEngine; client: MockXClient; store: Store } {
+  function setup(
+    flood?: Partial<DefaultsConfig["flood"]>,
+  ): { engine: ModerationEngine; client: MockXClient; store: Store } {
     const store = new Store(":memory:");
     stores.push(store);
     const client = new MockXClient();
     client.addUser(alice);
     client.addUser(bob);
     client.addUser(owner);
-    const engine = new ModerationEngine(store, client, runtime());
+    const config = runtime();
+    if (flood) config.defaults = { ...defaults, flood: { ...defaults.flood, ...flood } };
+    const engine = new ModerationEngine(store, client, config);
     return { engine, client, store };
+  }
+
+  function floodEventCount(store: Store): number {
+    const row = store.db.prepare("SELECT COUNT(*) AS count FROM flood_events").get() as {
+      count: number;
+    };
+    return row.count;
   }
 
   it("sends a welcome on ParticipantsJoin", async () => {
@@ -384,6 +395,90 @@ describe("ModerationEngine", () => {
     expect(result.muted).toBe(true);
     expect(store.isMuted(groupId, bob.id, now + 4)).toBe(true);
     expect(client.sent.some((row) => /flooding/i.test(row.text))).toBe(true);
+    expect(floodEventCount(store)).toBe(4);
+  });
+
+  it("does not mute when flood max_messages is 0", async () => {
+    const { engine, client, store } = setup({ max_messages: 0 });
+    const now = 1_000_000;
+    for (let i = 0; i < 6; i++) {
+      const result = await engine.processEvent(
+        message({ id: `off-${i}`, senderId: bob.id, text: `m${i}` }),
+        now + i,
+      );
+      expect(result.muted).toBe(false);
+    }
+    expect(store.isMuted(groupId, bob.id, now + 10)).toBe(false);
+    expect(store.getWarnCount(groupId, bob.id)).toBe(0);
+    expect(client.sent.some((row) => /flooding/i.test(row.text))).toBe(false);
+    expect(floodEventCount(store)).toBe(0);
+  });
+
+  it("does not mute when flood window_ms is 0 or max_messages is negative", async () => {
+    const now = 1_000_000;
+    for (const flood of [{ window_ms: 0 }, { max_messages: -1 }] as const) {
+      const { engine, client, store } = setup(flood);
+      for (let i = 0; i < 6; i++) {
+        const result = await engine.processEvent(
+          message({ id: `skip-${flood.window_ms ?? "max"}-${i}`, senderId: bob.id, text: `m${i}` }),
+          now + i,
+        );
+        expect(result.muted).toBe(false);
+      }
+      expect(store.isMuted(groupId, bob.id, now + 10)).toBe(false);
+      expect(store.getWarnCount(groupId, bob.id)).toBe(0);
+      expect(client.sent.some((row) => /flooding/i.test(row.text))).toBe(false);
+      expect(floodEventCount(store)).toBe(0);
+    }
+  });
+
+  it.each([
+    { key: "flood_max_messages", value: "0" },
+    { key: "flood_max_messages", value: "-1" },
+    { key: "flood_window_ms", value: "0" },
+  ])("!set $key $value disables flood for that conversation", async ({ key, value }) => {
+    const { engine, client, store } = setup();
+    const now = 2_000_000;
+    await engine.processEvent(
+      message({ id: `set-${key}-${value}`, senderId: owner.id, text: `!set ${key} ${value}` }),
+      now,
+    );
+    for (let i = 0; i < 6; i++) {
+      const result = await engine.processEvent(
+        message({ id: `set-off-${key}-${value}-${i}`, senderId: bob.id, text: `m${i}` }),
+        now + 1 + i,
+      );
+      expect(result.muted).toBe(false);
+    }
+    expect(store.isMuted(groupId, bob.id, now + 20)).toBe(false);
+    expect(store.getWarnCount(groupId, bob.id)).toBe(0);
+    expect(client.sent.some((row) => /flooding/i.test(row.text))).toBe(false);
+    expect(floodEventCount(store)).toBe(0);
+  });
+
+  it("says that 0 disables flood in !settings", async () => {
+    const enabled = setup();
+    await enabled.engine.processEvent(
+      message({ id: "settings-on", senderId: owner.id, text: "!settings" }),
+    );
+    expect(enabled.client.sent.at(-1)?.text).toMatch(/flood: 3 msgs \/ 10000ms, mute 60000ms \(0 disables flood\)/);
+
+    const disabled = setup({ max_messages: 0 });
+    await disabled.engine.processEvent(
+      message({ id: "settings-off", senderId: owner.id, text: "!settings" }),
+    );
+    expect(disabled.client.sent.at(-1)?.text).toMatch(
+      /flood: off \(max_messages 0, window_ms 10000; 0 disables flood\)/,
+    );
+  });
+
+  it("still filters and warns when flood is disabled", async () => {
+    const { engine, store } = setup({ max_messages: 0 });
+    await engine.processEvent(
+      message({ id: "spam-off", senderId: bob.id, text: "buy spamlink now" }),
+    );
+    expect(store.getWarnCount(groupId, bob.id)).toBe(1);
+    expect(store.isMuted(groupId, bob.id)).toBe(false);
   });
 
   it("filters keyword messages and warns", async () => {
@@ -431,6 +526,16 @@ describe("leave announcement text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.leave?.enabled).toBe(true);
     expect(loaded.leave?.text).toBe("@{username} has left");
+  });
+
+  it("loads flood off by default and documents that 0 disables it", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    expect(loaded.flood.max_messages).toBe(0);
+    expect(loaded.flood.window_ms).toBe(8000);
+    expect(loaded.flood.mute_ms).toBe(300_000);
+    expect(loaded.help).toMatch(/flood_max_messages 0 \(or negative\) disables flood/);
+    expect(loaded.help).toMatch(/flood_window_ms 0 does too/);
+    expect(loaded.help).toMatch(/0 disables flood/);
   });
 });
 
