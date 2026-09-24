@@ -543,6 +543,49 @@ describe("engine Imagine and search dedupe", () => {
     expect(JSON.stringify(ass.replies)).not.toContain("18+");
   });
 
+  it("uploads imagine-public JPEG bytes and does not post the CDN URL when attach fails", async () => {
+    const first = "https://imagine-public.x.ai/imagine-public/images/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jpg";
+    const second = "https://imagine-public.x.ai/imagine-public/images/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jpg";
+    let attaches = 0;
+    const { engine, client, search } = setup({
+      provider: "search",
+      imaginePublic: { bootyUrls: [first, second] },
+    });
+    client.sendImage = async (conversationId, image) => {
+      attaches += 1;
+      if (!image.bytes || image.bytes.byteLength === 0) {
+        throw new Error("missing image bytes");
+      }
+      if (attaches === 1) throw new Error("native media attach failed");
+      client.images.push({
+        conversationId,
+        url: image.url,
+        mimeType: image.mimeType,
+        bytes: image.bytes.byteLength,
+      });
+      return { dmEventId: `img-${client.images.length}`, dmConversationId: conversationId };
+    };
+
+    await engine.processEvent(message({ id: "bytes-1", text: "!booty" }));
+    expect(client.images).toEqual([
+      { conversationId: groupId, url: second, mimeType: "image/jpeg", bytes: 2 },
+    ]);
+    expect(client.sent).toHaveLength(0);
+    expect(search.calls).toBe(0);
+    expect(JSON.stringify(client.sent)).not.toContain(first);
+    expect(JSON.stringify(client.images)).not.toContain("https://cdn.example");
+
+    const blocked = setup({
+      provider: "search",
+      failSendImage: true,
+      imaginePublic: { bootyUrl: first },
+    });
+    await blocked.engine.processEvent(message({ id: "bytes-2", text: "!ass" }));
+    expect(blocked.client.images).toHaveLength(0);
+    expect(blocked.client.sent.map((row) => row.text).join("\n")).not.toContain("imagine-public.x.ai");
+    expect(blocked.search.calls).toBe(1);
+  });
+
   it("keeps API Imagine ahead of a configured public JPEG and does not search", async () => {
     const chest = "https://imagine-public.x.ai/imagine-public/images/8f99def9-25a9-4803-b281-873fd4564123.jpg";
     const { engine, client, search, imagine } = setup({

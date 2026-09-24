@@ -1936,16 +1936,20 @@ export class ModerationEngine {
   }
 
   /**
-   * Attach a JPEG the operator already has on imagine-public.x.ai.
+   * Download a JPEG the operator already has on imagine-public.x.ai and attach
+   * those bytes on the existing photo path (`sendImage` → classic `dm_image`
+   * or Chat `encryptStream` + `/2/chat/media/upload`). The CDN address is not
+   * posted as text.
    * `!boobs` uses one chest URL. `!ass` / `!booty` use the booty bank when
    * more than one URL is configured, otherwise the single booty URL.
-   * A recent URL or a repeated byte hash is skipped and another bank URL is
-   * tried. A miss returns false so search can run. This does not call grok.com.
+   * A recent URL, a repeated byte hash, a non-JPEG download, or a failed
+   * attach is skipped and another bank URL is tried. A miss returns false so
+   * search can run. This does not call grok.com.
    */
   private async tryImaginePublic(
     conversationId: string,
     command: AdultImageCommand,
-    actions: EngineActions,
+    _actions: EngineActions,
     label: string,
   ): Promise<boolean> {
     const pending = imaginePublicUrlsFor(this.deps.imaginePublic, command);
@@ -1965,15 +1969,21 @@ export class ModerationEngine {
         log.warn(`${label} Imagine public image repeated a recent hash conversation=${conversationId}`);
         continue;
       }
-      const delivery = await this.deliverAdultImage(
-        conversationId,
-        { url, adult: true },
-        actions,
-        label,
-        fetched,
-      );
-      if (!delivery.posted) return false;
-      this.recentImages.remember(conversationId, { url, hash: delivery.hash ?? hash });
+      try {
+        await this.client.sendImage(conversationId, {
+          url,
+          bytes: fetched.bytes,
+          mimeType: fetched.mimeType,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        log.warn(
+          `${label} Imagine public attach failed conversation=${conversationId} host=${imageHost(url)} (${detail})`,
+        );
+        continue;
+      }
+      this.recentImages.remember(conversationId, { url, hash });
+      log.info(`${label} posted native image conversation=${conversationId} host=${imageHost(url)}`);
       return true;
     }
     return false;
