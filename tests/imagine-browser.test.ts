@@ -372,6 +372,7 @@ describe("browser Imagine in the engine", () => {
   it("posts !video bytes in Chat and does not download", async () => {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     const downloads: string[] = [];
     const { video } = createUserFacingImagine({

@@ -1358,6 +1358,7 @@ describe("RoutedXClient image delivery", () => {
       },
     } as unknown as import("../src/chat/service.js").ChatService;
     const store = new Store(":memory:");
+    store.authorizeChat(chatGroupId);
     const engine = new ModerationEngine(
       store,
       new RoutedXClient(dm, chat),

@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { CHAT_WATERMARK_PREFIX, isChatGroupId } from "./chat/ids.js";
 import type { ConversationSettings } from "./types.js";
+
+/** Set once, after existing Chat watermarks are copied into `chat_authorizations`. */
+export const CHAT_AUTH_GRANDFATHER_KEY = "chat_auth_grandfathered";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS warns (
@@ -168,6 +172,11 @@ CREATE TABLE IF NOT EXISTS noor_alerts (
   tweet_id TEXT,
   abs_enabled INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS chat_authorizations (
+  conversation_id TEXT PRIMARY KEY,
+  authorized_at TEXT NOT NULL
+);
 `;
 
 export class Store {
@@ -181,6 +190,7 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
     this.ensureNoorAbsColumn();
+    this.grandfatherChatAuthorizations();
   }
 
   /**
@@ -251,6 +261,51 @@ export class Store {
         "INSERT INTO watermarks (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       )
       .run(key, value);
+  }
+
+  /**
+   * Encrypted Chat groups (`g…`) the owner has authorized with `!auth`,
+   * plus groups that already had a Chat watermark the first time this
+   * database was opened after the gate was added.
+   */
+  isChatAuthorized(conversationId: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM chat_authorizations WHERE conversation_id = ?")
+      .get(conversationId);
+    return Boolean(row);
+  }
+
+  /**
+   * Record that this conversation may be moderated. Returns true when the
+   * row was new.
+   */
+  authorizeChat(conversationId: string, at: string = new Date().toISOString()): boolean {
+    const result = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO chat_authorizations (conversation_id, authorized_at) VALUES (?, ?)",
+      )
+      .run(conversationId, at);
+    return result.changes > 0;
+  }
+
+  /**
+   * One-time copy of `chat_events:<g…>` watermarks into `chat_authorizations`.
+   * Runs before this process writes any new watermark, so a group first seen
+   * after the upgrade stays unauthorized. Later startups see the flag and
+   * do not authorize watermarks created since.
+   */
+  private grandfatherChatAuthorizations(): void {
+    if (this.getWatermark(CHAT_AUTH_GRANDFATHER_KEY)) return;
+    const now = new Date().toISOString();
+    const insert = this.db.prepare(
+      "INSERT OR IGNORE INTO chat_authorizations (conversation_id, authorized_at) VALUES (?, ?)",
+    );
+    const ids = this.listWatermarkKeys(CHAT_WATERMARK_PREFIX).filter((id) => isChatGroupId(id));
+    const write = this.db.transaction((conversationIds: string[]) => {
+      for (const id of conversationIds) insert.run(id, now);
+    });
+    write(ids);
+    this.setWatermark(CHAT_AUTH_GRANDFATHER_KEY, "1");
   }
 
   /** Suffixes of watermark keys that start with `prefix`. `_` and `%` in the prefix are escaped. */

@@ -244,7 +244,7 @@ export class ChatActivityIntake {
     if (!signal) return;
     if (!acceptsChatGroup(this.policy, signal.conversationId)) return;
     log.info(
-      `Activity ${signal.eventType} named ${signal.conversationId}. The catch-up poll will seed a watermark and will not replay history.`,
+      `Activity ${signal.eventType} named ${signal.conversationId}. The catch-up poll will seed a watermark and will not replay history. Moderation waits for !auth unless this group is already authorized.`,
     );
     this.onSeen?.(signal.conversationId, undefined);
   }

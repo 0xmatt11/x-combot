@@ -552,6 +552,7 @@ describe("Chat transport into the moderation engine", () => {
   function setup() {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(GROUP);
     const http = new FakeHttp();
     const cipher = new FakeCipher();
     cipher.events.set("b64-old", {
@@ -875,6 +876,7 @@ describe("Chat transport into the moderation engine", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(GROUP);
     const http = new FakeHttp();
     const cipher = new FakeCipher();
     cipher.events.set("b64-help", {
@@ -1354,6 +1356,7 @@ describe("Chat group discovery", () => {
       chatListenPolicy({ mode: "all" }),
       (id, eventId) => poller.observeFromActivity(id, eventId),
     );
+    store.authorizeChat("g999");
     await intake.handle({
       data: {
         event_type: "chat.received",

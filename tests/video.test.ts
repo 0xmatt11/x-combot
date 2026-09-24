@@ -426,6 +426,7 @@ describe("!video command", () => {
   }) {
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     client.failSendVideo = options?.failSendVideo ?? false;
     const video = {
@@ -473,6 +474,7 @@ describe("!video command", () => {
     });
     const store = new Store(":memory:");
     stores.push(store);
+    store.authorizeChat(chatGroupId);
     const client = new MockXClient();
     const engine = new ModerationEngine(store, client, runtime(), undefined, {
       video: createVideoClient({

@@ -151,6 +151,7 @@ import {
 } from "./games/index.js";
 import {
   isAdmin,
+  isChatAuthMessage,
   isLlmCommandName,
   llmRequestFromCommand,
   parseCommand,
@@ -308,11 +309,25 @@ export class ModerationEngine {
     };
 
     if (this.alreadyHandled(event)) {
-      this.rememberInboundAliases(event);
+      if (!event.conversationId || this.chatMayAct(event.conversationId)) {
+        this.rememberInboundAliases(event);
+      }
       return actions;
     }
 
     if (!event.conversationId || !isGroupConversation(event.conversationId)) {
+      return actions;
+    }
+
+    if (!this.chatMayAct(event.conversationId)) {
+      if (
+        event.eventType === "MessageCreate" &&
+        event.senderId === this.config.ownerId &&
+        isChatAuthMessage(event.text)
+      ) {
+        this.store.authorizeChat(event.conversationId);
+        await this.reply(event.conversationId, CHAT_AUTH_OK, actions);
+      }
       return actions;
     }
 
@@ -854,6 +869,16 @@ export class ModerationEngine {
     return undefined;
   }
 
+  /**
+   * Classic group DMs are always moderated. An encrypted Chat group stays
+   * quiet until `BOT_OWNER_ID` sends `!auth`, unless it was grandfathered
+   * from a watermark that existed before that gate.
+   */
+  private chatMayAct(conversationId: string): boolean {
+    if (!isChatGroupId(conversationId)) return true;
+    return this.store.isChatAuthorized(conversationId);
+  }
+
   private conversationConfig(conversationId: string): ResolvedConversationConfig {
     return resolveConversationConfig(
       this.config.defaults,
@@ -1217,7 +1242,9 @@ export class ModerationEngine {
    */
   async pollNoorAlerts(nowMs = Date.now()): Promise<void> {
     if (this.noorPollInFlight) return;
-    const alerts = this.store.listEnabledNoorAlerts();
+    const alerts = this.store.listEnabledNoorAlerts().filter((alert) =>
+      this.chatMayAct(alert.conversationId),
+    );
     if (alerts.length === 0) return;
     if (nowMs - this.noorLastPollMs < NOOR_ALERT_POLL_MS - 1_000) return;
     this.noorPollInFlight = true;
@@ -1971,6 +1998,16 @@ export class ModerationEngine {
       case "help":
         await this.reply(conversationId, settings.help.trim(), actions);
         return;
+      case "auth": {
+        if (senderId !== this.config.ownerId) return;
+        if (!isChatGroupId(conversationId)) {
+          await this.reply(conversationId, CHAT_AUTH_CLASSIC, actions);
+          return;
+        }
+        this.store.authorizeChat(conversationId);
+        await this.reply(conversationId, CHAT_AUTH_ALREADY, actions);
+        return;
+      }
       case "status":
         await this.reply(conversationId, this.statusReport(conversationId, settings, nowMs), actions);
         return;
@@ -3277,6 +3314,11 @@ function boobsRateLimitMessage(settings: ResolvedConversationConfig, label = "!b
   }
   return `Slow down — ${label} is limited to ${parts.join(" and ")} every ${minutes} min.`;
 }
+
+export const CHAT_AUTH_OK = "Authorized. I'll moderate this chat.";
+export const CHAT_AUTH_ALREADY = "This chat is already authorized.";
+export const CHAT_AUTH_CLASSIC =
+  "!auth is only for encrypted Chat groups. This group is already moderated.";
 
 /**
  * Same-event key when Activity and the Chat poll decrypt one membership
