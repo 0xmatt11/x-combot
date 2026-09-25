@@ -186,6 +186,19 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!cheese please")).toBeUndefined();
   });
 
+  it("parses !milady and keeps extra text off the lookup", () => {
+    expect(parseCommand("!milady")).toEqual({ name: "milady" });
+    expect(parseCommand("!MILADY")).toEqual({ name: "milady" });
+    expect(parseCommand("  /milady  ")).toEqual({ name: "milady" });
+    expect(parseCommand("!milady please")).toEqual({ name: "milady", extra: "please" });
+    expect(parseCommand("!milady background red")).toEqual({
+      name: "milady",
+      extra: "background red",
+    });
+    expect(parseUnknownBang("!milady")).toBeUndefined();
+    expect(parseUnknownBang("!milady please")).toBeUndefined();
+  });
+
   it("parses xp, level, rank, and the leaderboard aliases", () => {
     expect(parseCommand("!xp")).toEqual({ name: "xp" });
     expect(parseCommand("/level")).toEqual({ name: "xp" });
