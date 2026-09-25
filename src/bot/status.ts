@@ -113,8 +113,6 @@ export interface StatusSnapshot {
   welcome: boolean;
   /** `off`, `on` (no printable handle), or `@handle`. */
   troll: string;
-  noor: boolean;
-  noorAbs: boolean;
   linkroast: boolean;
   media?: { chest: number; booty: number; videos: number };
   version?: string;
@@ -234,8 +232,6 @@ function togglesLine(snapshot: StatusSnapshot): string {
     `This chat: welcome ${onOff(snapshot.welcome)}`,
     `troll ${snapshot.troll}`,
     `linkroast ${onOff(snapshot.linkroast)}`,
-    `noor ${onOff(snapshot.noor)}`,
-    `noorabs ${onOff(snapshot.noorAbs)}`,
   ].join(" · ");
 }
 

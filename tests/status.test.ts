@@ -76,8 +76,6 @@ function snapshot(overrides: Partial<StatusSnapshot> = {}): StatusSnapshot {
     imagine: "api, video",
     welcome: true,
     troll: "@bob",
-    noor: true,
-    noorAbs: true,
     linkroast: false,
     media: { chest: 1, booty: 1, videos: 1 },
     version: "1.2.3",
@@ -98,7 +96,7 @@ describe("formatStatusReport", () => {
         "Keys: BACKOFF 45s — GET /2/users/…/public_keys rate-limited. 3 users cached, 8 signing keys, 1 chat key. Decrypt stalls until this clears.",
         "LLM: grok grok-4.6",
         "Imagine: api, video",
-        "This chat: welcome on · troll @bob · linkroast off · noor on · noorabs on",
+        "This chat: welcome on · troll @bob · linkroast off",
         "Media: chest 1 · booty 1 · video 1",
         "Version: 1.2.3 abc1234",
       ].join("\n"),
@@ -116,8 +114,6 @@ describe("formatStatusReport", () => {
         imagine: "off",
         welcome: false,
         troll: "off",
-        noor: false,
-        noorAbs: false,
         linkroast: true,
         media: undefined,
         version: undefined,
@@ -129,7 +125,7 @@ describe("formatStatusReport", () => {
     expect(healthy).toContain("Keys: ok — 2 users cached, 2 signing keys, 0 chat keys");
     expect(healthy).toContain("LLM: off");
     expect(healthy).toContain("Imagine: off");
-    expect(healthy).toContain("This chat: welcome off · troll off · linkroast on · noor off · noorabs off");
+    expect(healthy).toContain("This chat: welcome off · troll off · linkroast on");
     expect(healthy).not.toContain("Media:");
     expect(healthy).toContain("Version: deadbee");
     expect(healthy.split("\n").length).toBeLessThanOrEqual(15);
@@ -221,8 +217,6 @@ describe("!status command", () => {
     stores.push(store);
     store.setTrollTarget(groupId, bob.id, "bob");
     store.setLinkroastEnabled(groupId, true);
-    store.enableNoorAlert(groupId, nowMs);
-    store.enableNoorAbs(groupId);
     const health = new RuntimeHealth();
     health.noteChat("degraded", "backoff 45s");
     health.markActivityEnabled();
@@ -282,7 +276,7 @@ describe("!status command", () => {
     expect(text).toContain("LLM: grok grok-4.6");
     expect(text).toContain("Imagine: browser");
     expect(text).not.toContain("Imagine: api");
-    expect(text).toContain("This chat: welcome on · troll @bob · linkroast on · noor on · noorabs on");
+    expect(text).toContain("This chat: welcome on · troll @bob · linkroast on");
     expect(text).toContain("Media: chest 1 · booty 1 · video 1");
     expect(text).toContain("Version: 1.2.3 abc1234");
     expect(text.split("\n").length).toBeLessThanOrEqual(15);

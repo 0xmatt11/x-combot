@@ -33,8 +33,6 @@ help: |
     !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
     !roast @user — one dunk from their lines in this chat and their public posts. Does not turn on !troll. Reply to them with no @user, or use a display name. /roast works too
     !linkroast on — roast people who drop X status links in this chat until !linkroast off
-    !noor on — Noor alert for @noorrietje. Relays each new post with the status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. Photo posts also attach an Imagine troll remix. !noor off stops it. Name and on/off are case-insensitive
-    !noorabs on — when a Noor alert fires, add "but look at muh pretty abs" and an Imagine close-up of skinny tanned abs. Needs !noor on. !noorabs off stops it
     !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
     !top — level leaderboard (!toplvl)
     Reply + or - to a message — give or take one level (not your own)

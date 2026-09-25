@@ -153,16 +153,6 @@ function optionalVideoAspectRatio(name: string): VideoAspectRatio | undefined {
   return ratio;
 }
 
-function optionalNoorUsername(name: string): string | undefined {
-  const value = optional(name);
-  if (!value) return undefined;
-  const handle = value.replace(/^@/, "");
-  if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-    throw new Error(`${name} must be an X username (1–15 letters, numbers, or underscores)`);
-  }
-  return handle;
-}
-
 function optionalVoiceLanguage(name: string): string | undefined {
   const value = optional(name);
   if (!value) return undefined;
@@ -372,8 +362,6 @@ export interface Env {
   videoImagineResolution?: VideoResolution;
   /** TTS language. Unset uses `en`. Personas choose the voice id. */
   voiceTtsLanguage?: string;
-  /** X handle for `!noor`. Unset uses `noorrietje`. */
-  noorUsername?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -458,6 +446,5 @@ export function loadEnv(requireOwner = true): Env {
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
     videoImagineResolution: optionalVideoResolution("VIDEO_IMAGINE_RESOLUTION"),
     voiceTtsLanguage: optionalVoiceLanguage("VOICE_TTS_LANGUAGE"),
-    noorUsername: optionalNoorUsername("NOOR_ALERT_USERNAME"),
   };
 }
