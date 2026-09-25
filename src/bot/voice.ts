@@ -7,6 +7,9 @@ import { containsBannedAgeTerm, redactSecrets } from "./adult-filter.js";
  * POST https://api.x.ai/v1/tts
  * Body: { text, voice_id, language } — language is required.
  * The response is raw audio bytes (default MP3). Do not set with_timestamps.
+ * Unary POST documents a 15,000 character maximum. This bot does not enforce a
+ * text-length cap. An API length error becomes a short chat line. Audio larger
+ * than MAX_VOICE_BYTES is still rejected before upload.
  */
 
 export const VOICE_IDS = ["eve", "ara", "rex", "sal", "leo"] as const;
@@ -65,8 +68,6 @@ export const VOICE_PERSONAS: readonly {
     deliver: (text) => `<build-intensity>${text}</build-intensity>`,
   },
 ];
-/** Spoken text cap for Chat. The API allows much more; an mp3 of this size stays small. */
-export const VOICE_MAX_CHARS = 1_500;
 /** Default MP3 is 128 kbps. Used only to fill duration_millis on the Chat attachment. */
 export const VOICE_MP3_BIT_RATE = 128_000;
 export const MAX_VOICE_BYTES = 8 * 1024 * 1024;
@@ -80,7 +81,8 @@ export const VOICE_MENU_MESSAGE = [
       `${index + 1}. ${persona.label} — !voice ${persona.menuAlias} <text>`,
   ),
 ].join("\n");
-export const VOICE_TOO_LONG_MESSAGE = `That text is too long to speak here. Keep it under ${VOICE_MAX_CHARS} characters.`;
+/** Shown when the TTS API rejects the text for length. This bot does not cap the line. */
+export const VOICE_TOO_LONG_MESSAGE = "That text is too long to speak. Try a shorter line.";
 export const VOICE_UNAVAILABLE_MESSAGE = "Voice needs XAI_API_KEY.";
 export const VOICE_FAILED_MESSAGE = "Voice synthesis failed. Try again later.";
 export const VOICE_TOO_LARGE_MESSAGE = "That audio is too large to post in chat.";
@@ -89,7 +91,7 @@ export const VOICE_CHAT_REQUIRED_MESSAGE =
 export const VOICE_ATTACH_FAILED_MESSAGE = "Couldn't post that voice note. Try again.";
 export const VOICE_MODERATED_MESSAGE = "That text was blocked by content moderation.";
 
-export type VoiceRejectReason = "menu" | "refused" | "too_long";
+export type VoiceRejectReason = "menu" | "refused";
 
 export interface SpokenAudio {
   bytes: Uint8Array;
@@ -159,7 +161,6 @@ export function parseVoiceRequest(
   }
   if (!rest) return { ok: false, reason: "menu" };
   if (containsBannedAgeTerm(rest)) return { ok: false, reason: "refused" };
-  if (rest.length > VOICE_MAX_CHARS) return { ok: false, reason: "too_long" };
   return {
     ok: true,
     personaId: persona.id,
@@ -171,7 +172,6 @@ export function parseVoiceRequest(
 
 export function voicePromptRejection(reason: VoiceRejectReason): string {
   if (reason === "menu") return VOICE_MENU_MESSAGE;
-  if (reason === "too_long") return VOICE_TOO_LONG_MESSAGE;
   return IMAGINE_REFUSED_MESSAGE;
 }
 

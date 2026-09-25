@@ -15,7 +15,6 @@ import {
   VOICE_ATTACH_FAILED_MESSAGE,
   VOICE_CHAT_REQUIRED_MESSAGE,
   VOICE_FAILED_MESSAGE,
-  VOICE_MAX_CHARS,
   VOICE_MENU_MESSAGE,
   VOICE_MODERATED_MESSAGE,
   VOICE_TOO_LARGE_MESSAGE,
@@ -146,11 +145,15 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
     expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "horny" });
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
-    expect(parseVoiceRequest(`sexy ${"a".repeat(VOICE_MAX_CHARS)}`).ok).toBe(true);
-    expect(parseVoiceRequest(`dude ${"a".repeat(VOICE_MAX_CHARS + 1)}`)).toEqual({
-      ok: false,
-      reason: "too_long",
-    });
+    const long = parseVoiceRequest(`dude ${"a".repeat(20_000)}`);
+    expect(long.ok).toBe(true);
+    if (long.ok) {
+      expect(long.personaId).toBe("dude");
+      expect(long.voiceId).toBe("rex");
+      expect(long.text).toHaveLength(20_000);
+      expect(long.spoken).toBe("a".repeat(20_000));
+    }
+    expect(VOICE_TOO_LONG_MESSAGE).not.toMatch(/1500|character/i);
   });
 
   it("estimates a 128 kbps duration of at least 1 ms", () => {
@@ -281,6 +284,20 @@ describe("voice client", () => {
     expect(message).not.toContain(spoken);
     expect(message).toContain("[text]");
     expect((error as VoiceError).userMessage).toBe(VOICE_FAILED_MESSAGE);
+  });
+
+  it("reports an API length rejection without imposing a local character cap", async () => {
+    const client = createVoiceClient({
+      apiKey: "test-key",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: "Text exceeds the maximum length." }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    await expect(client.synthesize("a".repeat(20_000), "rex")).rejects.toMatchObject({
+      userMessage: VOICE_TOO_LONG_MESSAGE,
+    });
   });
 
   it("uses a short moderation line when the API blocks the text", async () => {
@@ -420,7 +437,7 @@ describe("!voice command", () => {
     expect(actions.replies[0]).not.toContain("hello from the group");
   });
 
-  it("shows the menu when no persona is chosen, and refuses minor or oversized lines", async () => {
+  it("shows the menu when no persona is chosen, and refuses minor lines", async () => {
     const { engine, client, voice } = setup();
     await engine.processEvent(message({ id: "empty", conversationId: chatGroupId, text: "!voice" }));
     await engine.processEvent(message({ id: "blank", conversationId: chatGroupId, text: "!voice   " }));
@@ -431,15 +448,12 @@ describe("!voice command", () => {
       message({ id: "bad-voice", conversationId: chatGroupId, text: "!voice robot hello" }),
     );
     await engine.processEvent(
-      message({ id: "long", conversationId: chatGroupId, text: `!voice dude ${"b".repeat(VOICE_MAX_CHARS + 1)}` }),
-    );
-    await engine.processEvent(
       message({ id: "teen", conversationId: chatGroupId, text: "!voice sexy teen portrait" }),
     );
     expect(voice.prompts).toHaveLength(0);
     const text = client.sent.map((row) => row.text).join("\n");
     expect(text).toContain(VOICE_MENU_MESSAGE);
-    expect(text).toContain(VOICE_TOO_LONG_MESSAGE);
+    expect(text).not.toContain(VOICE_TOO_LONG_MESSAGE);
     expect(text).toContain(IMAGINE_REFUSED_MESSAGE);
     expect(text).not.toMatch(/teen/);
 
@@ -451,6 +465,17 @@ describe("!voice command", () => {
     expect(missing.client.sent[0]?.text).toMatch(/XAI_API_KEY/);
   });
 
+  it("speaks a line longer than the old 1500 character cap", async () => {
+    const { engine, client, voice } = setup();
+    const line = "b".repeat(1_501);
+    await engine.processEvent(
+      message({ id: "long", conversationId: chatGroupId, text: `!voice dude ${line}` }),
+    );
+    expect(voice.prompts).toEqual([{ text: line, voiceId: "rex" }]);
+    expect(client.audios).toHaveLength(1);
+    expect(client.sent.map((row) => row.text).join("\n")).not.toContain(VOICE_TOO_LONG_MESSAGE);
+  });
+
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!voice/);
@@ -459,6 +484,8 @@ describe("!voice command", () => {
     expect(loaded.help).toMatch(/Girl 3/);
     expect(loaded.help).toMatch(/regular dude/);
     expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
+    expect(loaded.help).not.toMatch(/1500/);
+    expect(loaded.welcome.text).not.toMatch(/1500/);
   });
 
   it("posts the client error line and does not include the API payload", async () => {
