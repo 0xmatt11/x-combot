@@ -305,6 +305,11 @@ export interface Env {
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
   boobsSearchApiKey?: string;
   /**
+   * Optional OpenSea key for `!milady`. Unset uses the public GraphQL search.
+   * A GraphQL rate limit with no key mints a free key instead.
+   */
+  openseaApiKey?: string;
+  /**
    * Still parsed (`imagine` or `search`) so an existing `.env` does not fail
    * startup. Adult commands ignore it. They use the saved imagine-public bank,
    * then search, and do not call Imagine.
@@ -428,6 +433,7 @@ export function loadEnv(requireOwner = true): Env {
     xpEnabled: optionalBool("XP_ENABLED"),
     boobsSearchProvider: optionalBoobsProvider("BOOBS_SEARCH_PROVIDER"),
     boobsSearchApiKey: optional("BOOBS_SEARCH_API_KEY"),
+    openseaApiKey: optional("OPENSEA_API_KEY"),
     boobsImageProvider: optionalAdultImageProvider("BOOBS_IMAGE_PROVIDER"),
     boobsImagineModel: optionalImagineModel("BOOBS_IMAGINE_MODEL"),
     boobsImagineAspectRatio: optionalImagineAspectRatio("BOOBS_IMAGINE_ASPECT_RATIO"),
