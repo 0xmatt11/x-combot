@@ -65,6 +65,10 @@ export type ParsedCommand =
   | { name: "troll"; off?: boolean; target?: UserRef; all?: boolean }
   | { name: "untroll"; target?: UserRef; all?: boolean }
   | { name: "roast"; target?: UserRef }
+  | { name: "darwin" }
+  | { name: "lastwords" }
+  | { name: "obituary"; target?: UserRef }
+  | { name: "finalboss" }
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "status" }
   | { name: "auth" }
@@ -150,6 +154,10 @@ const KNOWN_COMMAND_NAMES = new Set([
   "troll",
   "untroll",
   "roast",
+  "darwin",
+  "lastwords",
+  "obituary",
+  "finalboss",
   "linkroast",
   "status",
   "auth",
@@ -420,6 +428,14 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseUntroll(rest);
     case "roast":
       return parseRoast(rest);
+    case "darwin":
+      return { name: "darwin" };
+    case "lastwords":
+      return { name: "lastwords" };
+    case "obituary":
+      return parseObituary(rest);
+    case "finalboss":
+      return { name: "finalboss" };
     case "linkroast":
       return parseLinkroast(rest);
     case "status":
@@ -476,6 +492,17 @@ function parseTroll(rest: string): ParsedCommand {
 function parseRoast(rest: string): ParsedCommand {
   if (!rest) return { name: "roast" };
   return { name: "roast", target: trollTarget(rest) };
+}
+
+/**
+ * `!obituary @user` is one fake roast obituary. No on/off state.
+ * A bare command can target the replied-to sender, then the requester.
+ * Extra words that are not a handle are kept raw so the engine can match
+ * a display name, the same way `!roast` does.
+ */
+function parseObituary(rest: string): ParsedCommand {
+  if (!rest) return { name: "obituary" };
+  return { name: "obituary", target: trollTarget(rest) };
 }
 
 /**

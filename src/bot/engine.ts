@@ -191,6 +191,13 @@ import {
   type MultiplayerKind,
 } from "./games/index.js";
 import {
+  chooseObituarySubject,
+  darwinReply,
+  finalBossReply,
+  lastWordsReply,
+  obituaryReply,
+} from "./epitaph.js";
+import {
   isAdmin,
   isChatAuthMessage,
   isCommandMessage,
@@ -2155,6 +2162,89 @@ export class ModerationEngine {
     return (this.ownedWorkers ??= new LlmWorkerPool(MAX_IN_PROCESS_LLM_WORKERS));
   }
 
+  /**
+   * `!darwin` names the requester. Extra words are ignored. The line is a
+   * canned cartoon bit, not an LLM completion and not an XP spend.
+   */
+  private async handleDarwin(event: DmEvent, actions: EngineActions): Promise<void> {
+    const who = await this.epitaphRequester(event);
+    await this.reply(event.conversationId, darwinReply(who, () => this.nextRandom()), actions);
+  }
+
+  /** `!lastwords` is one canned line. It does not name a target. */
+  private async handleLastWords(event: DmEvent, actions: EngineActions): Promise<void> {
+    await this.reply(event.conversationId, lastWordsReply(() => this.nextRandom()), actions);
+  }
+
+  /**
+   * `!finalboss` names the requester as the boss. Extra words are ignored.
+   * Same canned path as `!darwin`.
+   */
+  private async handleFinalBoss(event: DmEvent, actions: EngineActions): Promise<void> {
+    const who = await this.epitaphRequester(event);
+    await this.reply(event.conversationId, finalBossReply(who, () => this.nextRandom()), actions);
+  }
+
+  /**
+   * One fake roast obituary. `@user` or a display name wins. A bare command
+   * uses the replied-to sender, unless that sender is the bot, then the
+   * requester. With nobody to name, the subject is "this chat".
+   */
+  private async handleObituary(
+    event: DmEvent,
+    command: { name: "obituary"; target?: UserRef },
+    actions: EngineActions,
+  ): Promise<void> {
+    const who = await this.obituaryWho(event, command.target, actions);
+    if (!who) return;
+    await this.reply(event.conversationId, obituaryReply(who, () => this.nextRandom()), actions);
+  }
+
+  private async epitaphRequester(event: DmEvent): Promise<string> {
+    if (!event.senderId) return "";
+    return (await this.diceRoller(event)).trim();
+  }
+
+  private async epitaphUserLabel(user: XUser, conversationId: string): Promise<string> {
+    const storedHandle =
+      user.username && !isNumericUserId(user.username)
+        ? user.username.replace(/^@/, "")
+        : undefined;
+    return this.trollLabel({ userId: user.id, username: storedHandle }, conversationId, user);
+  }
+
+  private async obituaryWho(
+    event: DmEvent,
+    target: UserRef | undefined,
+    actions: EngineActions,
+  ): Promise<string | undefined> {
+    let named: string | undefined;
+    if (target) {
+      const user = await this.resolveTrollUser(target, event, actions, "obituary");
+      if (!user?.id) return undefined;
+      if (user.id === this.config.botUserId) {
+        await this.reply(event.conversationId, "Pick someone else.", actions);
+        return undefined;
+      }
+      named = await this.epitaphUserLabel(user, event.conversationId);
+    }
+    let reply: string | undefined;
+    if (!named) {
+      const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
+      if (replyId && replyId !== this.config.botUserId) {
+        let user: XUser = { id: replyId };
+        try {
+          user = (await this.client.getUserById(replyId)) ?? user;
+        } catch (error) {
+          log.warn(`Could not resolve obituary reply target conversation=${event.conversationId}`, error);
+        }
+        reply = await this.epitaphUserLabel(user, event.conversationId);
+      }
+    }
+    const requester = event.senderId ? await this.epitaphRequester(event) : undefined;
+    return chooseObituarySubject({ named, reply, requester });
+  }
+
   private async handleRoast(
     event: DmEvent,
     command: { name: "roast"; target?: UserRef },
@@ -2430,7 +2520,7 @@ export class ModerationEngine {
     target: UserRef | undefined,
     event: DmEvent,
     actions: EngineActions,
-    purpose: "troll" | "untroll" | "roast" = "troll",
+    purpose: "troll" | "untroll" | "roast" | "obituary" = "troll",
   ): Promise<XUser | undefined> {
     if (target?.id || target?.username) {
       try {
@@ -2447,7 +2537,10 @@ export class ModerationEngine {
     }
     if (!target) {
       const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
-      if (replyId && (purpose === "troll" || purpose === "roast" || purpose === "untroll")) {
+      if (
+        replyId &&
+        (purpose === "troll" || purpose === "roast" || purpose === "untroll" || purpose === "obituary")
+      ) {
         try {
           return (await this.client.getUserById(replyId)) ?? { id: replyId };
         } catch (error) {
@@ -2461,7 +2554,9 @@ export class ModerationEngine {
           ? "Who? `!untroll @user` removes that person. Bare `!untroll` lists who is enabled."
           : purpose === "roast"
             ? "Who? `!roast @user` dunks that person once. Reply to their message or name them."
-            : "Who? `!troll @user` adds someone. Bare `!troll` lists who is enabled.",
+            : purpose === "obituary"
+              ? "Who? `!obituary @user` roasts that person. A bare !obituary uses a reply, or you."
+              : "Who? `!troll @user` adds someone. Bare `!troll` lists who is enabled.",
         actions,
       );
       return undefined;
@@ -2780,6 +2875,18 @@ export class ModerationEngine {
         return;
       case "roast":
         await this.handleRoast(event, command, actions);
+        return;
+      case "darwin":
+        await this.handleDarwin(event, actions);
+        return;
+      case "lastwords":
+        await this.handleLastWords(event, actions);
+        return;
+      case "obituary":
+        await this.handleObituary(event, command, actions);
+        return;
+      case "finalboss":
+        await this.handleFinalBoss(event, actions);
         return;
       case "linkroast":
         await this.handleLinkroast(event, command, actions);

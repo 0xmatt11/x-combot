@@ -27,6 +27,10 @@ help: |
   Fun
   !troll @user — add them to this chat's troll list. More than one can be on it. !troll all roasts anyone who talks here. !troll shows troll-all and who is enabled. !untroll @user removes them. !untroll all clears the list and troll-all (!untroll clear). A reply to the bot, @bot, or a !request answer is not roasted
   !roast @user — one dunk. Does not turn on !troll
+  !darwin — one cartoon how-they-went-out bit. Looney physics only
+  !lastwords — one dramatic or dumb last line
+  !obituary — short fake roast obituary. @user, a reply, or you
+  !finalboss — a ridiculous video-game boss goes down
   !linkroast on — two-paragraph brutal roast of any link or shared post, including Sent a post. No XP (!linkroast off). Skips links replied to the bot or aimed at the bot
   !xp — your level. !top — leaderboard. Reply + or - on a message
 

@@ -530,6 +530,41 @@ describe("parseCommand !roast", () => {
   });
 });
 
+describe("parseCommand cartoon bits", () => {
+  it("registers !darwin, !lastwords, and !finalboss and ignores extra words", () => {
+    expect(parseCommand("!darwin")).toEqual({ name: "darwin" });
+    expect(parseCommand("!DARWIN")).toEqual({ name: "darwin" });
+    expect(parseCommand("  /darwin  ")).toEqual({ name: "darwin" });
+    expect(parseCommand("!darwin please")).toEqual({ name: "darwin" });
+    expect(parseCommand("!lastwords")).toEqual({ name: "lastwords" });
+    expect(parseCommand("/LASTWORDS a speech")).toEqual({ name: "lastwords" });
+    expect(parseCommand("!finalboss")).toEqual({ name: "finalboss" });
+    expect(parseCommand("!FinalBoss phase two")).toEqual({ name: "finalboss" });
+    expect(parseUnknownBang("!darwin")).toBeUndefined();
+    expect(parseUnknownBang("!lastwords please")).toBeUndefined();
+    expect(parseUnknownBang("/finalboss")).toBeUndefined();
+  });
+
+  it("parses !obituary like a one-shot roast target", () => {
+    expect(parseCommand("!obituary")).toEqual({ name: "obituary" });
+    expect(parseCommand("!OBITUARY")).toEqual({ name: "obituary" });
+    expect(parseCommand("/obituary @bob")).toEqual({
+      name: "obituary",
+      target: { raw: "@bob", username: "bob" },
+    });
+    expect(parseCommand("!obituary Bobby Tables")).toEqual({
+      name: "obituary",
+      target: { raw: "Bobby Tables" },
+    });
+    expect(parseCommand("!obituary 1234567890")).toEqual({
+      name: "obituary",
+      target: { raw: "1234567890", id: "1234567890" },
+    });
+    expect(parseUnknownBang("!obituary")).toBeUndefined();
+    expect(parseUnknownBang("!obituary @bob")).toBeUndefined();
+  });
+});
+
 describe("parseCommand !linkroast", () => {
   it("parses on and off without caring about case", () => {
     expect(parseCommand("!linkroast on")).toEqual({ name: "linkroast", action: "on" });
