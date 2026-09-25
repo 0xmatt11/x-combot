@@ -560,7 +560,6 @@ export class ModerationEngine {
     }
 
     if (await this.continueFeatureRequest(event, actions, nowMs)) {
-      await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
     }
@@ -1335,10 +1334,12 @@ export class ModerationEngine {
   }
 
   /**
-   * Reply in this chat when someone on the troll list speaks.
-   * Each person has their own cooldown. Replays never reach here:
-   * `alreadyHandled` claims the event first. Muted, filtered, and
-   * flood-stopped messages return before this runs.
+   * Reply in this chat when someone on the troll list speaks, or when
+   * troll-all is on and anyone who is not the bot speaks. Each person has
+   * their own cooldown. Replays never reach here: `alreadyHandled` claims
+   * the event first. Muted, filtered, and flood-stopped messages return
+   * before this runs. `!troll` and `!untroll` skip this call. A reply to
+   * the bot, a line aimed at the bot, and an open `!request` answer do too.
    */
   private async trollIfTarget(
     event: DmEvent,
@@ -1347,13 +1348,38 @@ export class ModerationEngine {
     nowMs: number,
   ): Promise<void> {
     const latest = event.text?.trim() ?? "";
-    if (!latest || senderId === this.config.botUserId) return;
-    const target = this.store.getTrollTarget(event.conversationId, senderId);
-    if (!target) return;
-    if (target.lastMs > 0 && nowMs - target.lastMs < TROLL_COOLDOWN_MS) return;
+    if (!latest || !senderId || senderId === this.config.botUserId) return;
+    if (this.trollMessageIsForBot(event)) return;
+    const listed = this.store.getTrollTarget(event.conversationId, senderId);
+    if (listed) {
+      await this.postTroll(event, listed, latest, actions, nowMs, true);
+      return;
+    }
+    if (!this.store.isTrollAllEnabled(event.conversationId)) return;
+    const covered = this.store.getTrollAllState(event.conversationId, senderId) ?? {
+      userId: senderId,
+      username: trollHandleFromUser(event.sender),
+      lastMs: 0,
+      roastNext: 0 as const,
+    };
+    await this.postTroll(event, covered, latest, actions, nowMs, false);
+  }
 
+  private async postTroll(
+    event: DmEvent,
+    target: { userId: string; username?: string; lastMs: number; roastNext: 0 | 1 },
+    latest: string,
+    actions: EngineActions,
+    nowMs: number,
+    listed: boolean,
+  ): Promise<void> {
+    if (target.lastMs > 0 && nowMs - target.lastMs < TROLL_COOLDOWN_MS) return;
     const wantRoast = target.roastNext === 1;
-    const label = await this.trollLabel(target, event.conversationId);
+    const label = await this.trollLabel(
+      target,
+      event.conversationId,
+      listed ? undefined : event.sender,
+    );
     let reply: string;
     try {
       reply = await this.composeTroll(event, target.userId, label, latest, wantRoast);
@@ -1362,8 +1388,72 @@ export class ModerationEngine {
       reply = momJoke(label, () => this.nextRandom());
     }
     reply = sanitizeTrollReply(reply, label, [target.userId], () => this.nextRandom());
-    this.store.markTrollSent(event.conversationId, senderId, nowMs, wantRoast ? 0 : 1);
+    const next = wantRoast ? 0 : 1;
+    if (listed) {
+      this.store.markTrollSent(event.conversationId, target.userId, nowMs, next);
+      if (this.store.isTrollAllEnabled(event.conversationId)) {
+        this.store.markTrollAllSent(
+          event.conversationId,
+          target.userId,
+          target.username,
+          nowMs,
+          next,
+        );
+      }
+    } else {
+      this.store.markTrollAllSent(
+        event.conversationId,
+        target.userId,
+        target.username ?? trollHandleFromUser(event.sender),
+        nowMs,
+        next,
+      );
+    }
     await this.reply(event.conversationId, reply, actions);
+  }
+
+  /**
+   * Continuous troll stays quiet when the line is for the bot.
+   * A trusted reply to the bot counts. So does the same wake `!ask` uses
+   * (`@botname`, a configured prefix, or an @mention of the bot).
+   * An open `!request` answer is handled before this runs.
+   */
+  private trollMessageIsForBot(event: DmEvent): boolean {
+    if (this.repliesToBot(event)) return true;
+    return this.directedAtBot(event);
+  }
+
+  private repliesToBot(event: DmEvent): boolean {
+    const botId = this.config.botUserId;
+    if (!botId) return false;
+    if (event.replyToSenderId === botId) return true;
+    return this.resolveReplyUserId(event) === botId;
+  }
+
+  private directedAtBot(event: DmEvent): boolean {
+    const settings = this.conversationConfig(event.conversationId);
+    if (
+      parseLlmWake(event.text, {
+        botUsername: this.config.botUsername,
+        botUserId: this.config.botUserId,
+        wakePrefixes: settings.llmWakePrefixes,
+        mentions: event.mentions,
+      })
+    ) {
+      return true;
+    }
+    const command = parseCommand(event.text);
+    if (command && isLlmCommandName(command.name)) return true;
+    const handle = this.config.botUsername?.replace(/^@/, "").toLowerCase();
+    const botId = this.config.botUserId;
+    for (const mention of event.mentions) {
+      if (botId && mention.id === botId) return true;
+      const name = mention.username.replace(/^@/, "").toLowerCase();
+      if (handle && name === handle) return true;
+    }
+    if (!handle || !event.text) return false;
+    const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`@${escaped}\\b`, "i").test(event.text);
   }
 
   /**
@@ -1674,7 +1764,7 @@ export class ModerationEngine {
 
   private async handleTrollCommand(
     event: DmEvent,
-    command: { name: "troll"; off?: boolean; target?: UserRef },
+    command: { name: "troll"; off?: boolean; target?: UserRef; all?: boolean },
     actions: EngineActions,
   ): Promise<void> {
     const conversationId = event.conversationId;
@@ -1682,9 +1772,19 @@ export class ModerationEngine {
       await this.replyTrollHeld(conversationId, actions);
       return;
     }
+    if (command.all) {
+      const already = this.store.isTrollAllEnabled(conversationId);
+      if (!already) this.store.setTrollAllEnabled(conversationId, true);
+      const list = await this.trollListSentence(conversationId);
+      const lead = already
+        ? "Troll all: on. Already enabled."
+        : "Troll all: on. I'll reply when anyone talks in this chat.";
+      await this.reply(conversationId, `${lead} ${list.text}`, actions);
+      return;
+    }
     if (!command.target && !this.trollReplySenderId(event)) {
       const list = await this.trollListSentence(conversationId);
-      await this.reply(conversationId, list.text, actions);
+      await this.reply(conversationId, `Troll all: ${list.all ? "on" : "off"}. ${list.text}`, actions);
       return;
     }
     const user = await this.resolveTrollUser(command.target, event, actions);
@@ -1718,10 +1818,20 @@ export class ModerationEngine {
   }
 
   /**
-   * `!troll off` does not clear anyone. Only `!untroll` naming that person does.
+   * `!troll off` does not clear anyone and does not turn troll-all off.
+   * `!untroll` naming that person removes them from the named list.
+   * `!untroll all` (or `clear`) clears that list and turns troll-all off.
    */
   private async replyTrollHeld(conversationId: string, actions: EngineActions): Promise<void> {
     const list = await this.trollListSentence(conversationId);
+    if (list.all) {
+      await this.reply(
+        conversationId,
+        `Troll all stays on. ${list.text} !untroll all turns it off.`,
+        actions,
+      );
+      return;
+    }
     if (list.empty) {
       await this.reply(conversationId, list.text, actions);
       return;
@@ -1735,15 +1845,38 @@ export class ModerationEngine {
 
   private async handleUntroll(
     event: DmEvent,
-    command: { name: "untroll"; target?: UserRef },
+    command: { name: "untroll"; target?: UserRef; all?: boolean },
     actions: EngineActions,
   ): Promise<void> {
     const conversationId = event.conversationId;
+    if (command.all) {
+      const hadTargets = this.store.listTrollTargets(conversationId).length > 0;
+      const hadAll = this.store.isTrollAllEnabled(conversationId);
+      if (!hadTargets && !hadAll) {
+        await this.reply(conversationId, "Troll all: off. Troll list is empty.", actions);
+        return;
+      }
+      this.store.clearTrollTargets(conversationId);
+      this.store.setTrollAllEnabled(conversationId, false);
+      const list = await this.trollListSentence(conversationId);
+      const lead = hadTargets ? "Troll list cleared. " : "";
+      await this.reply(conversationId, `${lead}Troll all: off. ${list.text}`, actions);
+      return;
+    }
     if (!command.target && !this.trollReplySenderId(event)) {
       const list = await this.trollListSentence(conversationId);
+      if (list.empty) {
+        await this.reply(
+          conversationId,
+          list.all ? `Troll all: on. ${list.text}` : list.text,
+          actions,
+        );
+        return;
+      }
+      const allNote = list.all ? " Troll all: on." : "";
       await this.reply(
         conversationId,
-        list.empty ? list.text : `Still trolling. ${list.text} !untroll @user removes someone.`,
+        `Still trolling.${allNote} ${list.text} !untroll @user removes someone.`,
         actions,
       );
       return;
@@ -1763,29 +1896,37 @@ export class ModerationEngine {
     );
     if (!existing) {
       const list = await this.trollListSentence(conversationId);
-      await this.reply(
-        conversationId,
-        `${label} is not on the troll list. ${list.text}`,
-        actions,
-      );
+      const lead = list.all
+        ? `${label} is not on the named list. Troll all: on.`
+        : `${label} is not on the troll list.`;
+      await this.reply(conversationId, `${lead} ${list.text}`, actions);
       return;
     }
     this.store.removeTrollTarget(conversationId, user.id);
     const list = await this.trollListSentence(conversationId);
+    if (list.all) {
+      await this.reply(
+        conversationId,
+        `${label} is off the named list. Troll all: on, so they still get replies. ${list.text}`,
+        actions,
+      );
+      return;
+    }
     await this.reply(conversationId, `Troll mode off for ${label}. ${list.text}`, actions);
   }
 
-  /** "Enabled: @a, @b." or "Troll list is empty." */
+  /** "Enabled: @a, @b." or "Troll list is empty." `all` is the troll-all flag. */
   private async trollListSentence(
     conversationId: string,
-  ): Promise<{ empty: boolean; text: string }> {
+  ): Promise<{ empty: boolean; all: boolean; text: string }> {
+    const all = this.store.isTrollAllEnabled(conversationId);
     const targets = this.store.listTrollTargets(conversationId);
-    if (targets.length === 0) return { empty: true, text: "Troll list is empty." };
+    if (targets.length === 0) return { empty: true, all, text: "Troll list is empty." };
     const labels: string[] = [];
     for (const target of targets) {
       labels.push(await this.trollLabel(target, conversationId));
     }
-    return { empty: false, text: `Enabled: ${labels.join(", ")}.` };
+    return { empty: false, all, text: `Enabled: ${labels.join(", ")}.` };
   }
 
   /** Reply sender for a bare `!troll` / `!untroll`, when this message is a reply. */
@@ -1811,7 +1952,7 @@ export class ModerationEngine {
       llm: this.deps.llmMode ?? (this.llmClient ? "on" : "off"),
       imagine,
       welcome: settings.welcomeEnabled,
-      troll: trollStatusLabel(troll),
+      troll: trollStatusLabel(troll, this.store.isTrollAllEnabled(conversationId)),
       linkroast: this.store.isLinkroastEnabled(conversationId),
       media: statusMediaCounts(this.deps.imaginePublic),
       version: build.version,
@@ -4281,10 +4422,24 @@ function trollHandle(username: string | undefined): string {
   return "on";
 }
 
-/** `off` when nobody is enabled, otherwise each handle (or `on`) in list order. */
-function trollStatusLabel(targets: readonly { username?: string }[]): string {
-  if (targets.length === 0) return "off";
-  return targets.map((target) => trollHandle(target.username)).join(", ");
+/** `off` when nobody is named and troll-all is off. `all` leads when that flag is on. */
+function trollStatusLabel(
+  targets: readonly { username?: string }[],
+  allOn: boolean,
+): string {
+  const names = targets.map((target) => trollHandle(target.username));
+  if (!allOn) {
+    if (names.length === 0) return "off";
+    return names.join(", ");
+  }
+  if (names.length === 0) return "all";
+  return `all, ${names.join(", ")}`;
+}
+
+function trollHandleFromUser(user: { username?: string } | undefined): string | undefined {
+  const name = user?.username?.replace(/^@/, "").trim();
+  if (!name || /^\d+$/.test(name)) return undefined;
+  return name;
 }
 
 function formatFloodSetting(settings: ResolvedConversationConfig): string {

@@ -111,7 +111,7 @@ export interface StatusSnapshot {
   /** `off`, `browser`, `api`, `api, video`, or `api off`. */
   imagine: string;
   welcome: boolean;
-  /** `off`, or a comma-separated list of `@handle` and `on` (no printable handle). */
+  /** `off`, `all`, or a comma-separated list of `@handle` and `on` (no printable handle). */
   troll: string;
   linkroast: boolean;
   media?: { chest: number; booty: number; videos: number };
