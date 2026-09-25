@@ -27,6 +27,20 @@ import {
 import type { ChatMessage, LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
 import { asChatCopy } from "./user-copy.js";
+import {
+  boundedHistoryRetryMs,
+  dmEventFromLlmRetry,
+  isRecoverableChatError,
+  llmRetryDelayMs,
+  llmRetryExhausted,
+  LLM_RATE_LIMIT_ACK,
+  LLM_RATE_LIMIT_GAVE_UP,
+  LLM_RETRY_DRAIN_BATCH,
+  parseLlmRetryPayload,
+  readRetryAfterMs,
+  snapshotLlmRetry,
+  type LlmHandleOutcome,
+} from "../llm/chat-retry.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
   buildRoastMessages,
@@ -370,6 +384,11 @@ export interface EngineDeps {
    * This does not call another assistant.
    */
   llmWorkers?: LlmWorkerPool;
+  /**
+   * Wait used for one bounded Chat history retry. Tests pass a fake.
+   * Absent means `setTimeout`.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -410,10 +429,13 @@ export class ModerationEngine {
   /** People seen in each conversation, for !ship name matching. */
   private readonly chatMembers = new Map<string, Map<string, XUser>>();
   /**
-   * `!video` keeps generating after the ack so a multi-minute render does not
-   * stall moderation. Tests await this before reading the finished reply.
+   * `!video` and freeform LLM asks keep running after the handler returns so a
+   * multi-minute render or agent call does not stall the Activity read loop.
+   * Tests await this before reading the finished reply.
    */
   private readonly backgroundWork = new Set<Promise<void>>();
+  /** One drain at a time. A poll tick and the timer can overlap. */
+  private drainingLlmRetries = false;
   /** Tic-tac-toe, connect four, duel, hangman, and story. Memory only. */
   private readonly gameRoom: GameRoom;
   /** Used when no shared RuntimeHealth was passed in. */
@@ -451,11 +473,19 @@ export class ModerationEngine {
     this.gameRoom = new GameRoom(() => this.nextRandom());
   }
 
-  async processEvent(event: DmEvent, nowMs = Date.now()): Promise<EngineActions> {
-    return commandContext.run(event, () => this.handleIncoming(event, nowMs));
+  async processEvent(
+    event: DmEvent,
+    nowMs = Date.now(),
+    options?: { backgroundLlm?: boolean },
+  ): Promise<EngineActions> {
+    return commandContext.run(event, () => this.handleIncoming(event, nowMs, options));
   }
 
-  private async handleIncoming(event: DmEvent, nowMs: number): Promise<EngineActions> {
+  private async handleIncoming(
+    event: DmEvent,
+    nowMs: number,
+    options?: { backgroundLlm?: boolean },
+  ): Promise<EngineActions> {
     const actions: EngineActions = {
       replies: [],
       deletes: [],
@@ -590,15 +620,21 @@ export class ModerationEngine {
         }
         return actions;
       }
-      if (llmFromCmd) {
-        await this.runCommandCleanup(event, () =>
-          this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs),
+      const run = () =>
+        this.finishLlmWake(
+          event,
+          llmWake,
+          Boolean(llmFromCmd),
+          senderIsAdmin,
+          settings,
+          actions,
+          nowMs,
         );
-      } else {
-        await this.handleLlm(event, llmWake, senderIsAdmin, settings, actions, nowMs);
+      if (options?.backgroundLlm) {
+        this.enqueueBackground(run, "llm");
+        return actions;
       }
-      await this.trollIfTarget(event, senderId, actions, nowMs);
-      await this.linkroastIfSpam(event, senderId, actions, nowMs);
+      await run();
       return actions;
     }
 
@@ -858,6 +894,52 @@ export class ModerationEngine {
     return undefined;
   }
 
+  /**
+   * Command cleanup, the model call, then troll and link roast.
+   * Activity passes `backgroundLlm` so this does not block the stream reader.
+   * A recoverable Chat error is queued instead of thrown.
+   */
+  private async finishLlmWake(
+    event: DmEvent,
+    request: LlmWakeMatch,
+    llmFromCmd: boolean,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const senderId = event.senderId!;
+    const work = async () => {
+      const outcome = await this.handleLlm(
+        event,
+        request,
+        senderIsAdmin,
+        settings,
+        actions,
+        nowMs,
+      );
+      if (outcome.status === "blocked") {
+        await this.deferBlockedLlm(event, request, actions, nowMs, outcome);
+      }
+    };
+    try {
+      if (llmFromCmd) await this.runCommandCleanup(event, work);
+      else await work();
+    } catch (error) {
+      if (!isRecoverableChatError(error)) throw error;
+      log.warn(
+        `LLM ${request.kind} hit a recoverable Chat error conversation=${event.conversationId}`,
+        error,
+      );
+      await this.deferBlockedLlm(event, request, actions, nowMs, {
+        status: "blocked",
+        retryAfterMs: readRetryAfterMs(error),
+      });
+    }
+    await this.trollIfTarget(event, senderId, actions, nowMs);
+    await this.linkroastIfSpam(event, senderId, actions, nowMs);
+  }
+
   private async handleLlm(
     event: DmEvent,
     request: LlmWakeMatch,
@@ -865,82 +947,85 @@ export class ModerationEngine {
     settings: ResolvedConversationConfig,
     actions: EngineActions,
     nowMs: number,
-  ): Promise<void> {
+    options?: { fromRetry?: boolean; inlineHistoryRetry?: boolean; cachedAnswer?: string },
+  ): Promise<LlmHandleOutcome> {
     const conversationId = event.conversationId;
     const senderId = event.senderId!;
+    const fromRetry = options?.fromRetry === true;
 
     if (!settings.llmEnabled) {
+      if (fromRetry) return { status: "done" };
       await this.reply(
         conversationId,
         "LLM replies are disabled in this group. An admin can `!set llm_enabled on`.",
         actions,
       );
-      return;
+      return { status: "done" };
     }
 
     if (settings.llmAllow === "admins" && !senderIsAdmin) {
+      if (fromRetry) return { status: "done" };
       await this.reply(
         conversationId,
         "LLM commands are limited to configured admins in this group.",
         actions,
       );
-      return;
+      return { status: "done" };
     }
 
     if (!request.prompt && request.kind === "ask") {
+      if (fromRetry) return { status: "done" };
       await this.reply(
         conversationId,
         "Ask me with `!ask your question`, or address me with `@bot …`. `!summarize` and `!analyze` load group history (X API reads + LLM tokens).",
         actions,
       );
-      return;
+      return { status: "done" };
     }
 
     if (!this.llmClient) {
+      if (fromRetry) return { status: "done" };
       await this.reply(
         conversationId,
         "LLM replies are not configured. Set LLM_PROVIDER (openai, grok, or local) and the matching key/URL: OPENAI_API_KEY, XAI_API_KEY, or LLM_BASE_URL for a local server.",
         actions,
       );
-      return;
+      return { status: "done" };
     }
 
-    const uses = this.store.recordLlmUse(
-      conversationId,
-      senderId,
-      nowMs,
-      settings.llmRateLimitWindowMs,
-    );
-    if (uses > settings.llmRateLimitPerUser) {
-      await this.reply(
+    if (!fromRetry) {
+      const uses = this.store.recordLlmUse(
         conversationId,
-        `Slow down — LLM rate limit is ${settings.llmRateLimitPerUser} requests / ${Math.round(settings.llmRateLimitWindowMs / 1000)}s per user.`,
-        actions,
+        senderId,
+        nowMs,
+        settings.llmRateLimitWindowMs,
       );
-      return;
+      if (uses > settings.llmRateLimitPerUser) {
+        await this.reply(
+          conversationId,
+          `Slow down — LLM rate limit is ${settings.llmRateLimitPerUser} requests / ${Math.round(settings.llmRateLimitWindowMs / 1000)}s per user.`,
+          actions,
+        );
+        return { status: "done" };
+      }
     }
 
-    const mode: LlmContextMode =
-      request.kind === "ask" ? settings.llmContextMode : "full";
-    const fetchCap = isFullContextMode(mode)
-      ? settings.llmFullMaxMessages
-      : mode === "recent"
-        ? settings.llmRecentMessages
-        : settings.llmNoneRecentMessages;
-
-    let turns = [] as Awaited<ReturnType<typeof fetchConversationTurns>>["turns"];
-    let pages = 0;
-    if (fetchCap > 0) {
-      const fetched = await fetchConversationTurns(this.client, conversationId, {
-        maxMessages: fetchCap,
-        maxPages: settings.llmMaxPages,
-        excludeEventId: event.id,
-      });
-      turns = fetched.turns;
-      pages = fetched.pages;
+    if (options?.cachedAnswer) {
+      return this.sendLlmAnswer(conversationId, options.cachedAnswer, settings, actions);
     }
 
-    const assembled = selectContextTurns(turns, mode, {
+    const loaded = await this.loadLlmHistory(
+      event,
+      request,
+      settings,
+      options?.inlineHistoryRetry ?? !fromRetry,
+    );
+    if (!loaded.ok) {
+      return { status: "blocked", retryAfterMs: loaded.retryAfterMs };
+    }
+
+    const mode: LlmContextMode = request.kind === "ask" ? settings.llmContextMode : "full";
+    const assembled = selectContextTurns(loaded.turns, mode, {
       noneRecentMessages: settings.llmNoneRecentMessages,
       recentMessages: settings.llmRecentMessages,
       fullMaxMessages: settings.llmFullMaxMessages,
@@ -957,9 +1042,10 @@ export class ModerationEngine {
 
     const timelines = await this.timelinesForQuestion(event, question);
     log.info(
-      `LLM ${request.kind} conversation=${conversationId} user=${senderId} mode=${assembled.mode} turns=${assembled.turns.length} truncated=${assembled.truncated} x_pages=${pages} timelines=${timelines.length}`,
+      `LLM ${request.kind} conversation=${conversationId} user=${senderId} mode=${assembled.mode} turns=${assembled.turns.length} truncated=${assembled.truncated} degraded=${loaded.degraded} x_pages=${loaded.pages} timelines=${timelines.length}`,
     );
 
+    let answer: string | undefined;
     try {
       const messages = buildLlmMessages({
         systemPrompt: settings.llmSystemPrompt,
@@ -970,26 +1056,350 @@ export class ModerationEngine {
         extraContext: formatTimelineContext(timelines),
         toolNote: USER_CONTEXT_TOOL_NOTE,
       });
-      const answer = await runAgent({
+      answer = await runAgent({
         llm: this.llmClient,
         pool: this.llmPool(),
         messages,
         tools: this.contextTools(),
         parallelQuestion: request.kind === "ask" ? question : undefined,
       });
+      return await this.sendLlmAnswer(conversationId, answer, settings, actions);
+    } catch (error) {
+      if (isRecoverableChatError(error)) {
+        return {
+          status: "blocked",
+          retryAfterMs: readRetryAfterMs(error),
+          ...(answer ? { cachedAnswer: answer } : {}),
+        };
+      }
+      log.warn(`LLM completion failed for conversation=${conversationId}`, error);
+      try {
+        await this.reply(
+          conversationId,
+          "The language model failed to reply. Try again later.",
+          actions,
+        );
+      } catch (sendError) {
+        if (isRecoverableChatError(sendError)) {
+          return {
+            status: "blocked",
+            retryAfterMs: readRetryAfterMs(sendError),
+            ...(answer ? { cachedAnswer: answer } : {}),
+          };
+        }
+        log.warn(`LLM failure reply was not sent conversation=${conversationId}`, sendError);
+      }
+      return { status: "done" };
+    }
+  }
+
+  private async sendLlmAnswer(
+    conversationId: string,
+    answer: string,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+  ): Promise<LlmHandleOutcome> {
+    try {
       const chunks = splitReply(answer, settings.llmMaxReplyChars);
       for (const chunk of chunks) {
         await this.reply(conversationId, chunk, actions);
       }
       actions.llm = true;
+      return { status: "done" };
     } catch (error) {
-      log.warn(`LLM completion failed for conversation=${conversationId}`, error);
-      await this.reply(
-        conversationId,
-        "The language model failed to reply. Try again later.",
-        actions,
-      );
+      if (isRecoverableChatError(error)) {
+        return { status: "blocked", retryAfterMs: readRetryAfterMs(error), cachedAnswer: answer };
+      }
+      throw error;
     }
+  }
+
+  /**
+   * One bounded sleep, then a second history read. `!ask` continues with empty
+   * context when that still fails. Summarize and analyze need the history, so
+   * they come back blocked and the caller queues a retry.
+   */
+  private async loadLlmHistory(
+    event: DmEvent,
+    request: LlmWakeMatch,
+    settings: ResolvedConversationConfig,
+    inlineRetry: boolean,
+  ): Promise<
+    | {
+        ok: true;
+        turns: Awaited<ReturnType<typeof fetchConversationTurns>>["turns"];
+        pages: number;
+        degraded: boolean;
+      }
+    | { ok: false; retryAfterMs?: number }
+  > {
+    const mode: LlmContextMode = request.kind === "ask" ? settings.llmContextMode : "full";
+    const fetchCap = isFullContextMode(mode)
+      ? settings.llmFullMaxMessages
+      : mode === "recent"
+        ? settings.llmRecentMessages
+        : settings.llmNoneRecentMessages;
+    if (fetchCap <= 0) return { ok: true, turns: [], pages: 0, degraded: false };
+
+    const attempt = () =>
+      fetchConversationTurns(this.client, event.conversationId, {
+        maxMessages: fetchCap,
+        maxPages: settings.llmMaxPages,
+        excludeEventId: event.id,
+      });
+
+    try {
+      const fetched = await attempt();
+      return { ok: true, turns: fetched.turns, pages: fetched.pages, degraded: false };
+    } catch (error) {
+      if (!isRecoverableChatError(error)) throw error;
+      if (!inlineRetry) return this.historyAfterRetry(event, request, error);
+      const waitMs = boundedHistoryRetryMs(readRetryAfterMs(error));
+      log.warn(
+        waitMs > 0
+          ? `LLM history rate-limited conversation=${event.conversationId}; retrying once after ${waitMs}ms`
+          : `LLM history rate-limited conversation=${event.conversationId}; retrying once`,
+      );
+      if (waitMs > 0) await this.sleep(waitMs);
+      try {
+        const fetched = await attempt();
+        return { ok: true, turns: fetched.turns, pages: fetched.pages, degraded: false };
+      } catch (retryError) {
+        if (!isRecoverableChatError(retryError)) throw retryError;
+        return this.historyAfterRetry(event, request, retryError);
+      }
+    }
+  }
+
+  private historyAfterRetry(
+    event: DmEvent,
+    request: LlmWakeMatch,
+    error: unknown,
+  ):
+    | {
+        ok: true;
+        turns: Awaited<ReturnType<typeof fetchConversationTurns>>["turns"];
+        pages: number;
+        degraded: boolean;
+      }
+    | { ok: false; retryAfterMs?: number } {
+    if (request.kind === "ask") {
+      log.warn(
+        `LLM history unavailable conversation=${event.conversationId}; answering without chat context`,
+      );
+      return { ok: true, turns: [], pages: 0, degraded: true };
+    }
+    log.warn(
+      `LLM history unavailable conversation=${event.conversationId}; will retry ${request.kind}`,
+    );
+    return { ok: false, retryAfterMs: readRetryAfterMs(error) };
+  }
+
+  private async deferBlockedLlm(
+    event: DmEvent,
+    request: LlmWakeMatch,
+    actions: EngineActions,
+    nowMs: number,
+    outcome: Extract<LlmHandleOutcome, { status: "blocked" }>,
+  ): Promise<void> {
+    const existing = this.store.getLlmRetry(event.conversationId, event.id);
+    const previous = existing ? parseLlmRetryPayload(existing.payload) : undefined;
+    const payload = snapshotLlmRetry({
+      request,
+      event,
+      acked: previous?.acked ?? false,
+      cachedAnswer: outcome.cachedAnswer ?? previous?.cachedAnswer,
+    });
+    const attempts = existing?.attempts ?? 0;
+    const createdAtMs = existing?.createdAtMs ?? nowMs;
+    const nextAttemptMs = nowMs + llmRetryDelayMs(outcome.retryAfterMs, attempts);
+    const save = (next = payload) => {
+      this.store.upsertLlmRetry({
+        conversationId: event.conversationId,
+        eventId: event.id,
+        payload: JSON.stringify(next),
+        attempts,
+        nextAttemptMs,
+        createdAtMs,
+      });
+    };
+    save();
+    log.warn(
+      `LLM ${request.kind} held for retry conversation=${event.conversationId} event=${event.id} in ${nextAttemptMs - nowMs}ms`,
+    );
+    if (payload.acked) return;
+    try {
+      await this.reply(event.conversationId, LLM_RATE_LIMIT_ACK, actions);
+      payload.acked = true;
+      save();
+    } catch (error) {
+      log.warn(`LLM rate-limit ack failed conversation=${event.conversationId}`, error);
+    }
+  }
+
+  /**
+   * Activity's catch path. Returns true when this event is a freeform LLM ask
+   * and the error is a Chat rate limit, so the stream does not treat it as a drop.
+   */
+  async holdLlmForChatLimit(event: DmEvent, error: unknown, nowMs = Date.now()): Promise<boolean> {
+    if (!event.conversationId || !event.senderId) return false;
+    if (!isRecoverableChatError(error)) return false;
+    const settings = this.conversationConfig(event.conversationId);
+    const request = this.llmRequestForEvent(event, settings);
+    if (!request) return false;
+    const actions = emptyActions();
+    await commandContext.run(event, () =>
+      this.deferBlockedLlm(event, request, actions, nowMs, {
+        status: "blocked",
+        retryAfterMs: readRetryAfterMs(error),
+      }),
+    );
+    return true;
+  }
+
+  /**
+   * Run due `llm_retry_jobs`. A still-limited Chat API stops the batch.
+   * Returns how many jobs finished (answered or given up).
+   */
+  async drainLlmRetries(nowMs = Date.now()): Promise<number> {
+    if (this.drainingLlmRetries) return 0;
+    this.drainingLlmRetries = true;
+    let finished = 0;
+    try {
+      const due = this.store.listDueLlmRetries(nowMs, LLM_RETRY_DRAIN_BATCH);
+      for (const job of due) {
+        try {
+          const outcome = await this.settleLlmRetry(job, nowMs);
+          if (outcome === "done") finished += 1;
+          if (outcome === "stop") break;
+        } catch (error) {
+          log.warn(`LLM retry job ${job.id} failed conversation=${job.conversationId}`, error);
+          if (!isRecoverableChatError(error)) this.store.deleteLlmRetry(job.id);
+          break;
+        }
+      }
+    } finally {
+      this.drainingLlmRetries = false;
+    }
+    return finished;
+  }
+
+  private async settleLlmRetry(
+    job: {
+      id: number;
+      conversationId: string;
+      eventId: string;
+      payload: string;
+      attempts: number;
+      nextAttemptMs: number;
+      createdAtMs: number;
+    },
+    nowMs: number,
+  ): Promise<"done" | "stop" | "continue"> {
+    const payload = parseLlmRetryPayload(job.payload);
+    if (!payload) {
+      log.warn(`Dropping malformed LLM retry job ${job.id}`);
+      this.store.deleteLlmRetry(job.id);
+      return "done";
+    }
+    const event = dmEventFromLlmRetry(payload);
+    if (llmRetryExhausted(job, nowMs)) {
+      await this.giveUpLlmRetry(job.id, event);
+      return "done";
+    }
+    const settings = this.conversationConfig(event.conversationId);
+    const senderId = event.senderId ?? "";
+    const senderIsAdmin = isAdmin(
+      senderId,
+      this.config.ownerId,
+      this.config.globalAdminIds,
+      this.store.listConversationAdmins(event.conversationId),
+    );
+    if (senderId && !senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
+      this.store.deleteLlmRetry(job.id);
+      return "done";
+    }
+    const actions = emptyActions();
+    const outcome = await commandContext.run(event, () =>
+      this.handleLlm(
+        event,
+        { kind: payload.kind, prompt: payload.prompt },
+        senderIsAdmin,
+        settings,
+        actions,
+        nowMs,
+        {
+          fromRetry: true,
+          inlineHistoryRetry: false,
+          cachedAnswer: payload.cachedAnswer,
+        },
+      ),
+    );
+    if (outcome.status === "done") {
+      this.store.deleteLlmRetry(job.id);
+      return "done";
+    }
+    const attempts = job.attempts + 1;
+    if (llmRetryExhausted({ attempts, createdAtMs: job.createdAtMs }, nowMs)) {
+      await this.giveUpLlmRetry(job.id, event);
+      return "stop";
+    }
+    const nextPayload = snapshotLlmRetry({
+      request: { kind: payload.kind, prompt: payload.prompt },
+      event,
+      acked: payload.acked,
+      cachedAnswer: outcome.cachedAnswer ?? payload.cachedAnswer,
+    });
+    this.store.upsertLlmRetry({
+      conversationId: job.conversationId,
+      eventId: job.eventId,
+      payload: JSON.stringify(nextPayload),
+      attempts,
+      nextAttemptMs: nowMs + llmRetryDelayMs(outcome.retryAfterMs, attempts),
+      createdAtMs: job.createdAtMs,
+    });
+    log.warn(
+      `LLM retry still rate-limited conversation=${job.conversationId} event=${job.eventId} attempt=${attempts}`,
+    );
+    return "stop";
+  }
+
+  private async giveUpLlmRetry(id: number, event: DmEvent): Promise<void> {
+    const actions = emptyActions();
+    try {
+      await commandContext.run(event, () =>
+        this.reply(event.conversationId, LLM_RATE_LIMIT_GAVE_UP, actions),
+      );
+    } catch (error) {
+      log.warn(`LLM retry give-up was not sent conversation=${event.conversationId}`, error);
+    }
+    this.store.deleteLlmRetry(id);
+  }
+
+  private llmRequestForEvent(
+    event: DmEvent,
+    settings: ResolvedConversationConfig,
+  ): LlmWakeMatch | undefined {
+    const command = parseCommand(event.text);
+    const fromCmd =
+      command && isLlmCommandName(command.name) ? llmRequestFromCommand(command) : undefined;
+    return (
+      fromCmd ??
+      parseLlmWake(event.text, {
+        botUsername: this.config.botUsername,
+        botUserId: this.config.botUserId,
+        wakePrefixes: settings.llmWakePrefixes,
+        mentions: event.mentions,
+      })
+    );
+  }
+
+  private sleep(ms: number): Promise<void> {
+    if (this.deps.sleep) return this.deps.sleep(ms);
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref?.();
+    });
   }
 
   /**
@@ -3223,13 +3633,13 @@ export class ModerationEngine {
     }
   }
 
-  private enqueueBackground(work: () => Promise<void>): void {
+  private enqueueBackground(work: () => Promise<void>, label = "!video"): void {
     const event = commandContext.getStore();
     const job = Promise.resolve()
       .then(() => (event ? commandContext.run(event, work) : work()))
       .catch((error: unknown) => {
-        const detail = redactSecrets(error instanceof Error ? error.message : "video failed");
-        log.warn(`!video background failed: ${detail}`);
+        const detail = redactSecrets(error instanceof Error ? error.message : `${label} failed`);
+        log.warn(`${label} background failed: ${detail}`);
       });
     this.backgroundWork.add(job);
     void job.finally(() => {
@@ -4361,6 +4771,10 @@ export class ModerationEngine {
       }
     }
   }
+}
+
+function emptyActions(): EngineActions {
+  return { replies: [], deletes: [], notifies: [], muted: false, warned: false, llm: false };
 }
 
 function toolArg(args: unknown, key: string): string {

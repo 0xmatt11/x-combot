@@ -229,7 +229,15 @@ export class ChatActivityIntake {
       // conversation key is retried. Older history is still not replayed.
       this.onSeen?.(parsed.conversationId, events.length > 0 ? parsed.raw.id : undefined);
       for (const event of events) {
-        await this.engine.processEvent(event);
+        try {
+          await this.engine.processEvent(event, Date.now(), { backgroundLlm: true });
+        } catch (error) {
+          const held = await this.engine.holdLlmForChatLimit(event, error);
+          if (!held) throw error;
+          log.warn(
+            `Activity kept a rate-limited LLM ask for retry in ${parsed.conversationId}`,
+          );
+        }
       }
       if (events.length > 0) {
         log.debug(

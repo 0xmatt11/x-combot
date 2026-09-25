@@ -1,3 +1,4 @@
+import { drainEngineLlmRetries } from "./llm/chat-retry.js";
 import { log } from "./log.js";
 import { Store } from "./store.js";
 import type { DmEvent } from "./types.js";
@@ -33,6 +34,7 @@ export class Poller {
     let delayMs = this.intervalMs;
     try {
       await this.pollOnce();
+      await drainEngineLlmRetries(this.engine);
     } catch (error) {
       log.error("Poll failed", error);
       delayMs = nextPollDelayMs(this.intervalMs, error);

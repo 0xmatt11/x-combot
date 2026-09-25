@@ -1,3 +1,4 @@
+import { drainEngineLlmRetries } from "../llm/chat-retry.js";
 import { log } from "../log.js";
 import { nextPollDelayMs } from "../poller.js";
 import type { Store } from "../store.js";
@@ -118,6 +119,7 @@ export class ChatPoller {
     let reason: "backoff" | "idle" | undefined;
     try {
       const result = await this.pollOnce();
+      await drainEngineLlmRetries(this.engine);
       if (result.sawNew || result.seeded) {
         this.idleMs = this.intervalMs;
       } else {

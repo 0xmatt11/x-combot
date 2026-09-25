@@ -96,6 +96,7 @@ async function dispatchActivityLine(
   try {
     await onEvent(parsed);
   } catch (error) {
+    // Stay on the stream. Recoverable LLM asks are queued before this catch.
     log.error("Activity event handler failed", error);
   }
 }
