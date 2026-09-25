@@ -33,6 +33,9 @@ help: |
   Chat
   !rules — group rules
   !ask <question> — ask the bot
+  Timeline — an @mention or "who is …" reads recent public X posts, including an outside handle
+  Web search — the bot can search the web when a question needs newer public info
+  Workers — a complex ask runs up to 5 in-bot workers at once. Extra work waits
   !summarize — recap this chat
   !analyze — ask about this chat
   !request <idea> — file a feature (!featurerequest)

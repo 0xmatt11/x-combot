@@ -19,6 +19,7 @@ Telegram's ComBot can kick and delete anyone's messages because Telegram exposes
 - `!voice <persona> <text>` speaks that line as Girl 1, regular dude, Girl 2, or Girl 3 and posts an audio attachment in encrypted Chat. Bare `!voice` lists those four. Classic group DMs get a short note that Chat is required.
 - Encrypted groups: decrypt with [chat-xdk](https://github.com/xdevplatform/chat-xdk), reply with an encrypted payload, and (when opted in) take `chat.received` from the X Activity API.
 - With a Chat identity and no allowlist, it **tracks** every encrypted group the account is in, including groups it is added to later. A group first seen after this rule stays quiet until `BOT_OWNER_ID` sends `!auth` in that chat. Groups that already had a Chat watermark are grandfathered and keep being moderated.
+- `!ask` and `@bot` can read recent public posts for someone in the chat or an outside `@handle`, and can search the web. A complex ask runs up to five in-process LLM workers. It does not call other Grok bots. See [Public timelines, web search, and workers](#public-timelines-web-search-and-workers).
 
 ## What X will not do
 
@@ -62,7 +63,7 @@ npm test
 3. Callback URI must match `REDIRECT_URI` (default `http://127.0.0.1:3000/callback`).
 4. Scopes `npm run oauth` requests:
    - `dm.read`, `dm.write` — DM and Chat read/write, and `chat.*` Activity subscriptions
-   - `tweet.read`, `users.read` — required alongside the DM scopes. `!troll` uses those same scopes for `GET /2/users/:id/tweets` (see [Troll mode](#troll-mode))
+   - `tweet.read`, `users.read` — required alongside the DM scopes. `!troll`, `!roast`, `!linkroast`, and `!ask` use those same scopes for `GET /2/users/:id/tweets` (see [Public timelines, web search, and workers](#public-timelines-web-search-and-workers))
    - `offline.access` — refresh token
    - `media.write` — image upload for `!cheese`, `!milady`, `!boobs` / `!ass` / `!booty`, and `!imagine`, Chat video upload for `!video`, and Chat audio upload for `!voice` (classic `dm_image` and Chat `/2/chat/media/upload`). Without it, image and video commands post a link when a URL exists. `!milady` does not: a failed upload says to try again and does not post a link. `!voice` has no URL; a failed upload says to try again.
 5. Copy the OAuth 2.0 client id and client secret into `.env`.
@@ -263,7 +264,7 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | Command | |
 | --- | --- |
 | `!rules` | Group rules |
-| `!ask <question>` | Ask the bot. Also `@botname …` |
+| `!ask <question>` | Ask the bot. Also `@botname …`. Can read a public X timeline and search the web. A complex ask uses up to 5 in-bot workers. See [Public timelines, web search, and workers](#public-timelines-web-search-and-workers) |
 | `!summarize` | Recap this chat |
 | `!analyze` | Ask about this chat |
 | `!request <idea>` | File a feature (`!featurerequest`). A few questions, then it is sent on. See [Feature requests](#feature-requests) |
@@ -597,13 +598,13 @@ While someone is on the list, each eligible message from that person in this cha
 
 The list is one row per person per conversation in SQLite (`troll_targets`), so it survives a restart. A database that still has the old single-target row is migrated on open, and that person stays enabled with the same cooldown and roast turn. Activity and the catch-up poll can deliver the same Chat message twice; the existing replay dedupe runs before a troll reply, so a replay does not roast again. Each enabled person is trolled at most once every 45 seconds. Roasting one person does not pause the others. A skipped reply is silent, and that person stays on the list through the pause.
 
-**Timeline permission.** Posts come from `GET /2/users/:id/tweets` with the user token. That endpoint is covered by the scopes `npm run oauth` already requests: `tweet.read` and `users.read`. No extra scope. Some X app access tiers do not include user timelines. A 403 or other failure is logged and the roast continues from the chat lines, or from a mom joke when the LLM is off or the completion fails.
+**Timeline permission.** Posts come from `GET /2/users/:id/tweets` with the user token. That endpoint is covered by the scopes `npm run oauth` already requests: `tweet.read` and `users.read`. No extra scope. Some X app access tiers do not include user timelines. A 403 or other failure is logged and the roast continues from the chat lines, or from a mom joke when the LLM is off or the completion fails. A successful read is cached in this process for two minutes and shared with `!ask`, `!roast`, and `!linkroast`, so a second roast in that window does not read the timeline again.
 
 ## Roast
 
 `!roast @handle` posts one roast and stops. `/roast` works the same way. It does not turn on `!troll`, and `!untroll` does not apply. The target is resolved the same way as `!troll` and `!warn`: an `@handle`, a display name already on the message, or a reply with no name.
 
-The roast uses that person's recent lines in this conversation (the same history fetch `!troll` uses, one page, up to six kept lines) and up to five public posts from `GET /2/users/:id/tweets` (`tweet.read` and `users.read`, the same call as troll mode). A timeline failure is logged and the roast continues from the chat lines. Fewer than two kept lines is thin history: the roast says there is not much from them in this chat and uses whatever lines and posts it has. Lines that trip the age filter are dropped. The model reply is 1–3 sentences, adult roast tone, no minors, and no numeric API user ids. The reply tags the person who sent `!roast` and, in encrypted Chat, replies to that command. The body also names the target. With no LLM, or if the completion fails, the bot posts a mom joke instead.
+The roast uses that person's recent lines in this conversation (the same history fetch `!troll` uses, one page, up to six kept lines) and up to five public posts from `GET /2/users/:id/tweets` (`tweet.read` and `users.read`, the same call and two-minute cache as troll mode). A timeline failure is logged and the roast continues from the chat lines. Fewer than two kept lines is thin history: the roast says there is not much from them in this chat and uses whatever lines and posts it has. Lines that trip the age filter are dropped. The model reply is 1–3 sentences, adult roast tone, no minors, and no numeric API user ids. The reply tags the person who sent `!roast` and, in encrypted Chat, replies to that command. The body also names the target. With no LLM, or if the completion fails, the bot posts a mom joke instead.
 
 ## Link roast
 
@@ -617,7 +618,7 @@ A shared X post counts when the payload names it, even if the text has no URL. T
 
 The reply is a two-paragraph brutal roast of that person for dropping an unsolicited link or shared post. It is meaner and sharper than a one-line jab: degrading comedy, not a threat, with no slurs and no encouragement of self-harm. It does not mention minors, print a numeric API user id or a URL, or end with XP, points, or any score suffix.
 
-The roast uses the same LLM completion path as `!troll` (Grok when that provider is configured). The prompt asks for exactly two paragraphs and forbids an XP or points suffix. If the LLM is off or the completion fails, the bot posts a canned two-paragraph roast instead, also with no XP. The flag is one row per conversation in SQLite (`linkroast`), so it survives a restart. Each person is roasted at most once every 45 seconds in that conversation (`linkroast_cooldown`). A skipped reply is silent, and the mode stays on through that pause. The bot ignores its own messages. A replay of the same Chat message does not roast again, because the existing dedupe runs first.
+The roast uses the same LLM completion path as `!troll` (Grok when that provider is configured). The prompt asks for exactly two paragraphs and forbids an XP or points suffix. If the LLM is off or the completion fails, the bot posts a canned two-paragraph roast instead, also with no XP. When a status URL names an account (`https://x.com/name/status/123`), or a shared post's URL does, that account's recent public posts are added to the prompt if the timeline read succeeds. The same two-minute cache as `!troll` is used. `https://x.com/i/web/status/123` has no account name, so it does not trigger a lookup. A timeline failure is logged and the roast continues from the chat line. The flag is one row per conversation in SQLite (`linkroast`), so it survives a restart. Each person is roasted at most once every 45 seconds in that conversation (`linkroast_cooldown`). A skipped reply is silent, and the mode stays on through that pause. The bot ignores its own messages. A replay of the same Chat message does not roast again, because the existing dedupe runs first.
 
 ## Status
 
@@ -651,6 +652,25 @@ The file and the POST use the same body:
 | `timestamp` | ISO time |
 
 A copy of the same JSON is also stored in SQLite `feature_requests`. Chief of Staff polls the pending folder, not that table. An unfinished Q&A is kept in memory; a restart drops it, and the requester can send `!request` again. Filed files and SQLite rows stay.
+
+## Public timelines, web search, and workers
+
+`!ask`, `@bot`, `!summarize`, and `!analyze` can use two tools: `lookup_user_timeline` and `web_search`. The same timeline cache feeds `!troll`, `!roast`, and `!linkroast`. This does not call api.x.ai image or video generation, and it does not open grok.com/imagine.
+
+**Who gets a timeline.** Before the model answers, the bot loads recent public posts when the question needs them:
+
+- An `@handle` in the question or on the message, including a handle that is not in the group.
+- "Who is \<name\>" when that display name or username is already known in this chat.
+- "Who is \<handle\>" for a single outside handle (`who is naval`).
+- "Who is this?" (also "that" / "them") when the message is a reply. The replied-to account is the one that is read.
+
+Up to three accounts are loaded up front. The model can call `lookup_user_timeline` for another `@handle`. Posts come from `GET /2/users/:id/tweets` with the user token (`tweet.read`, `users.read`), excluding retweets and replies, up to five posts. A numeric id is never put in the prompt or the reply.
+
+**Cache and limits.** A successful read is reused for two minutes. A miss or a failure is reused for 30 seconds, or for the API's retry window on HTTP 429 or 402 (capped at 10 minutes). This process also stops at 20 timeline lookups a minute. Lookups for the same account that overlap share one request. A failure is logged. The model is given a short line: `Couldn't read that public timeline just now.` An unknown handle gets `No public X account matched that handle.` The chat reply still goes out from whatever context is left.
+
+**Web search.** `web_search` is a keyless DuckDuckGo HTML lookup. Results are cached for two minutes. It does not use an X AI key. If the request fails, the tool result is `Web search is unavailable right now.`
+
+**Workers.** A complex `!ask` can run more than one LLM call. Several questions on their own lines, or "who is A and who is B", each become a worker. At most five workers run at once. Further calls wait in this process. Each worker may call the two tools. The bot then posts one combined reply. These workers are functions in this bot. They are not other Grok bots or assistants. `!summarize` and `!analyze` stay one call, and they can still use the tools. One `!ask` still counts as one request against the per-user LLM rate limit.
 
 ## LLM replies
 
@@ -766,6 +786,12 @@ scripts/imagine-browser.ts # one-shot check of the same Chrome worker (`npm run 
 src/bot/voice.ts        # xAI text-to-speech client and !voice checks
 src/bot/troll.ts        # !troll and !roast copy, roast prompts, and reply cleanup
 src/bot/linkroast.ts    # !linkroast copy, link detection, and reply cleanup
+src/bot/timeline.ts     # public timeline cache for !ask, !troll, !roast, and !linkroast
+src/bot/user-context.ts # which account a question or @mention is about
+src/bot/web-search.ts   # keyless DuckDuckGo HTML search for the web_search tool
+src/llm/tools.ts        # lookup_user_timeline and web_search tool schemas
+src/llm/workers.ts      # in-process LLM worker pool (max 5, queue the rest)
+src/llm/agent.ts        # tool loop and parallel asks; does not call other assistants
 src/bot/recent-images.ts # last 8 posted URLs and hashes, in memory
 src/bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
 src/chat/listen.ts      # CHAT_LISTEN all | allowlist | off
