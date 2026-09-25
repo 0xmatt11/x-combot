@@ -1181,9 +1181,7 @@ describe("!boobs engine", () => {
     expect(loaded.help).toMatch(/!ass/);
     expect(loaded.help).toMatch(/!booty/);
     expect(loaded.help).toMatch(/saved imagine-public bank/);
-    expect(loaded.help).toMatch(/does not open grok\.com\/imagine/);
-    expect(loaded.help).toMatch(/Tags you and replies to your command/);
-    expect(loaded.help).toMatch(/Every reply tags you/);
+    expect(loaded.help).toMatch(/does not open grok\.com\/imagine/i);
     expect(loaded.help).toMatch(/!imagine/);
     expect(loaded.boobs?.enabled).toBe(false);
     expect(loaded.boobs?.rate_limit_per_user).toBe(0);

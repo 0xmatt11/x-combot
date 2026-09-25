@@ -18,7 +18,7 @@ export type ParsedCommand =
   | { name: "get"; key: string }
   | { name: "set"; key: string; value: string }
   | { name: "settings" }
-  | { name: "admin"; action: "add" | "remove"; target?: UserRef }
+  | { name: "admin"; action?: "add" | "remove"; target?: UserRef }
   | { name: "admins" }
   | { name: "ask"; prompt: string }
   | { name: "summarize"; prompt?: string }
@@ -61,8 +61,6 @@ export type ParsedCommand =
   | { name: "untroll"; target?: UserRef }
   | { name: "roast"; target?: UserRef }
   | { name: "linkroast"; action?: "on" | "off" }
-  | { name: "noor"; mode?: "on" | "off" }
-  | { name: "noorabs"; mode?: "on" | "off" }
   | { name: "status" }
   | { name: "auth" };
 
@@ -142,8 +140,6 @@ const KNOWN_COMMAND_NAMES = new Set([
   "untroll",
   "roast",
   "linkroast",
-  "noor",
-  "noorabs",
   "status",
   "auth",
 ]);
@@ -268,8 +264,9 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "set", key: head, value: tail };
     }
     case "admin": {
+      if (!rest) return { name: "admin" };
       const { head, tail } = splitHead(rest);
-      if (head !== "add" && head !== "remove") return undefined;
+      if (head !== "add" && head !== "remove") return { name: "admin" };
       if (!tail) return { name: "admin", action: head };
       const { target } = splitTarget(tail);
       if (!target) return undefined;
@@ -368,10 +365,6 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseRoast(rest);
     case "linkroast":
       return parseLinkroast(rest);
-    case "noor":
-      return parseNoor(rest);
-    case "noorabs":
-      return parseNoorAbs(rest);
     case "status":
       return { name: "status" };
     case "auth":
@@ -433,28 +426,6 @@ function parseLinkroast(rest: string): ParsedCommand {
   if (/^on$/i.test(rest)) return { name: "linkroast", action: "on" };
   if (/^off$/i.test(rest)) return { name: "linkroast", action: "off" };
   return { name: "linkroast" };
-}
-
-/**
- * `!noor on` / `!noor off`. The command name is already lowercased in
- * `matchBang` (same as `!troll`). The on/off word uses that same folding.
- * Anything else is a usage reply, not an unknown bang.
- */
-function parseNoor(rest: string): ParsedCommand {
-  const mode = rest.toLowerCase();
-  if (mode === "on" || mode === "off") return { name: "noor", mode };
-  return { name: "noor" };
-}
-
-/**
- * `!noorabs on` / `!noorabs off`. Same folding as `!noor`: the command token
- * is lowercased in `matchBang`, and on/off uses `rest.toLowerCase()`.
- * `!noor abs` is not this command.
- */
-function parseNoorAbs(rest: string): ParsedCommand {
-  const mode = rest.toLowerCase();
-  if (mode === "on" || mode === "off") return { name: "noorabs", mode };
-  return { name: "noorabs" };
 }
 
 function trollTarget(rest: string): UserRef {

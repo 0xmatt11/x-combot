@@ -2,8 +2,6 @@ import fs from "node:fs";
 import { loadDefaults, normalizeBoobsConfig, normalizeXpConfig } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
-import { NoorAlertPoller } from "./bot/noor-poller.js";
-import { normalizeNoorUsername } from "./bot/noor.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
@@ -229,7 +227,6 @@ async function main(): Promise<void> {
       ownerId: env.botOwnerId,
       globalAdminIds: env.adminIds,
       defaults,
-      noorUsername: env.noorUsername,
     },
     llmClient,
     {
@@ -303,10 +300,6 @@ async function main(): Promise<void> {
     : undefined;
   if (chatPoller) health.markChatRunning();
   chatPoller?.start();
-  const noorHandle = normalizeNoorUsername(env.noorUsername);
-  log.info(`Noor alert watches @${noorHandle} when a chat sends !noor on.`);
-  const noorPoller = new NoorAlertPoller(engine);
-  noorPoller.start();
 
   const activityRuntime = chatService
     ? await startActivityRuntime({
@@ -337,7 +330,6 @@ async function main(): Promise<void> {
     log.info("Shutting down");
     poller.stop();
     chatPoller?.stop();
-    noorPoller.stop();
     activityRuntime?.stop();
     void activityRuntime?.webhook?.close();
     void closeImagineBrowser();

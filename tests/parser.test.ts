@@ -72,6 +72,10 @@ describe("parseCommand", () => {
     expect(parseCommand("!unwarn")).toEqual({ name: "unwarn" });
     expect(parseCommand("!mute")).toEqual({ name: "mute" });
     expect(parseCommand("/unmute")).toEqual({ name: "unmute" });
+    expect(parseCommand("!admin")).toEqual({ name: "admin" });
+    expect(parseCommand("/ADMIN")).toEqual({ name: "admin" });
+    expect(parseCommand("!admin help")).toEqual({ name: "admin" });
+    expect(parseUnknownBang("!admin")).toBeUndefined();
     expect(parseCommand("!admin add")).toEqual({ name: "admin", action: "add" });
     expect(parseCommand("!admin remove")).toEqual({ name: "admin", action: "remove" });
     expect(parseCommand("!warn !!!")).toBeUndefined();
@@ -449,39 +453,6 @@ describe("parseCommand !linkroast", () => {
     expect(parseUnknownBang("!linkroast on")).toBeUndefined();
     expect(parseUnknownBang("!LINKROAST OFF")).toBeUndefined();
     expect(parseUnknownBang("!linkroast")).toBeUndefined();
-  });
-});
-
-describe("parseCommand !noor", () => {
-  it("parses on and off with the same case folding as other bang commands", () => {
-    for (const text of ["!noor on", "!Noor on", "!NOOR ON", "!nOoR On", "/noor ON"]) {
-      expect(parseCommand(text), text).toEqual({ name: "noor", mode: "on" });
-      expect(parseUnknownBang(text), text).toBeUndefined();
-    }
-    for (const text of ["!noor off", "!Noor off", "!NOOR OFF", "!nOoR oFf"]) {
-      expect(parseCommand(text), text).toEqual({ name: "noor", mode: "off" });
-      expect(parseUnknownBang(text), text).toBeUndefined();
-    }
-    expect(parseCommand("!noor")).toEqual({ name: "noor" });
-    expect(parseCommand("!noor later")).toEqual({ name: "noor" });
-    expect(parseCommand("!unnoor")).toBeUndefined();
-    expect(parseUnknownBang("!unnoor")).toEqual({ token: "!unnoor", args: "" });
-    expect(parseCommand("!noor abs")).toEqual({ name: "noor" });
-  });
-});
-
-describe("parseCommand !noorabs", () => {
-  it("folds the command name and on/off the same way as !noor", () => {
-    for (const text of ["!noorabs on", "!NoorAbs on", "!NOORABS ON", "!nOoRaBs On", "/noorabs ON"]) {
-      expect(parseCommand(text), text).toEqual({ name: "noorabs", mode: "on" });
-      expect(parseUnknownBang(text), text).toBeUndefined();
-    }
-    for (const text of ["!noorabs off", "!NoorAbs off", "!NOORABS OFF", "!nOoRaBs oFf"]) {
-      expect(parseCommand(text), text).toEqual({ name: "noorabs", mode: "off" });
-      expect(parseUnknownBang(text), text).toBeUndefined();
-    }
-    expect(parseCommand("!noorabs")).toEqual({ name: "noorabs" });
-    expect(parseCommand("!noorabs later")).toEqual({ name: "noorabs" });
   });
 });
 

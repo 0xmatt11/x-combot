@@ -9,8 +9,8 @@ Telegram's ComBot can kick and delete anyone's messages because Telegram exposes
 ## What it actually does
 
 - Welcomes joins and announces leaves (`@{username} has left`). A voluntary leave and a remove look the same to the API.
-- Public commands: `!help`, `!rules`, `!dice`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack` / `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!games`, `!xp` / `!top`, reply `+` / `-`, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll` / `!untroll`, `!roast`, `!linkroast`, `!noor on` / `!noor off`, `!noorabs on` / `!noorabs off`, and a short LLM joke for an unknown `!name`.
-- Admin commands: warn, kick (soft-mute only), mute, delete, notes, per-group settings, admin allowlist. `!auth` and `!status` are owner-only (`BOT_OWNER_ID`). Admins cannot run them. `!auth` unlocks a new encrypted Chat group; until that account sends it, the group stays silent. `!status` is the health snapshot.
+- Public `!help` is a short menu: fun, chat, media, and games. One line per idea, not a writeup of every alias. Admin commands are `!admin` only.
+- Admin commands: warn, kick (soft-mute only), mute, delete, notes, per-group settings, admin allowlist. They are listed by `!admin`, not by `!help`. `!auth` and `!status` are owner-only (`BOT_OWNER_ID`). Admins cannot run them. `!auth` unlocks a new encrypted Chat group; until that account sends it, the group stays silent. `!status` is the health snapshot.
 - Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. They use the saved imagine-public bank (`BOOBS_IMAGINE_APP` and the `BOOBS_IMAGINE_PUBLIC_*` URL lists), including each command's mp4 bank. `!ass` / `!booty` stills rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. If that bank is empty or exhausted, image search runs. They do not open grok.com/imagine and they do not call api.x.ai image generation. `!imagine` and `!video` still use the Chrome session.
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
 - `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one).
@@ -153,7 +153,7 @@ The first sight of a group **seeds a watermark and does not replay history**. Re
 
 ### Authorizing a new encrypted group
 
-Seeing a group is not the same as moderating it. On a new encrypted Chat group the bot still seeds `chat_events:<id>` so older messages are not replayed, and Activity push plus the catch-up poll keep running. It does not welcome, announce leaves, run bang commands, call the LLM, post media banks, apply filters or flood mutes, award XP, or send Noor alerts in that chat until the owner authorizes it. Other people's messages, and the owner's messages other than `!auth`, get no reply.
+Seeing a group is not the same as moderating it. On a new encrypted Chat group the bot still seeds `chat_events:<id>` so older messages are not replayed, and Activity push plus the catch-up poll keep running. It does not welcome, announce leaves, run bang commands, call the LLM, post media banks, apply filters or flood mutes, or award XP in that chat until the owner authorizes it. Other people's messages, and the owner's messages other than `!auth`, get no reply.
 
 Send `!auth` from the account whose numeric id is `BOT_OWNER_ID` (Matt). The text is case-insensitive and may have surrounding whitespace (`!AUTH`, `  !auth  `). `!auth please` and `/auth` do not count. `ADMIN_IDS` and users added with `!admin add` cannot authorize a group, and the bot does not answer them. After a successful `!auth`, the bot confirms in that chat and moderates it like any other group. The id is stored in SQLite `chat_authorizations` and survives restarts. The `!auth` bang is deleted after 15 minutes when the API allows. The confirmation stays in the chat. The SQLite row is the audit that the group was authorized.
 
@@ -239,66 +239,63 @@ Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2
 
 ## Commands
 
-`/` is an alias for `!`. Every in-chat reply to a command tags the sender (`@handle` when that account has one, otherwise their display name) and, in encrypted Chat, is an `encryptReply` under that command message. The handle is a mention entity. Classic group DMs have no reply field, so the same `@handle` is only the start of the text. Media from `!imagine`, `!video`, `!voice`, and the adult commands uses that label as the only caption. Scheduled Noor relays are not replies to a command, and admin warn DMs go to the admin's inbox, so those stay unthreaded. Welcome and leave lines already name the member and are not command replies, so they stay as written.
+`/` is an alias for `!`. Every in-chat reply to a command tags the sender (`@handle` when that account has one, otherwise their display name) and, in encrypted Chat, is an `encryptReply` under that command message. The handle is a mention entity. Classic group DMs have no reply field, so the same `@handle` is only the start of the text. Media from `!imagine`, `!video`, `!voice`, and the adult commands uses that label as the only caption. Admin warn DMs go to the admin's inbox, so those stay unthreaded. Welcome and leave lines already name the member and are not command replies, so they stay as written.
 
-User command messages auto-delete after 15 minutes when the API allows. Bot replies stay. That is every public command on the `!help` list, including `!help` itself, `!rules`, the games, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, `!linkroast`, `!noor`, `!xp`, `!top`, and `!boobs` / `!ass` / `!booty`. `/` forms are the same commands. The bang line is what gets removed. The delivered content stays: help text, pictures, video, voice notes, game posts, `!ask` answers, roasts (`!roast`, `!troll` replies, `!linkroast`), and `!status`. Admin bangs such as `!warn` drop the same way; the confirmation stays, and the warn, mute, note, and `!auth` rows in SQLite stay. A restart drops timers that have not fired, so that bang stays in the chat. Classic group DMs can delete only events this account sent (`DELETE /2/dm_events/:id`), so the member's command is left in place and the skip is logged. Those DMs also have no reply field, so there is no parent thread to orphan.
+User command messages auto-delete after 15 minutes when the API allows. Bot replies stay. That is every public command on the `!help` list, including `!help` itself, `!rules`, the games, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, `!linkroast`, `!xp`, `!top`, and `!boobs` / `!ass` / `!booty`. `/` forms are the same commands. The bang line is what gets removed. The delivered content stays: help text, pictures, video, voice notes, game posts, `!ask` answers, roasts (`!roast`, `!troll` replies, `!linkroast`), and `!status`. Admin bangs such as `!warn` drop the same way; the confirmation stays, and the warn, mute, note, and `!auth` rows in SQLite stay. A restart drops timers that have not fired, so that bang stays in the chat. Classic group DMs can delete only events this account sent (`DELETE /2/dm_events/:id`), so the member's command is left in place and the skip is logged. Those DMs also have no reply field, so there is no parent thread to orphan.
 
 Encrypted Chat still posts the bot reply immediately as an `encryptReply` under the command, with the `@handle` mention. Fifteen minutes later the cleanup calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all` and only that command's `sequence_id`. The body does not include the reply's sequence id and does not send `media_hash_keys`. Chat delete removes the listed sequences only. The reply is its own message: `encryptReply` copies a `replying_to_preview` into the reply when it is sent, and the reply keeps its own text, mention entity, and media. Deleting the command does not delete or hide that reply. After the parent sequence is gone, the quote strip on the reply can show the command as deleted. The reply bubble stays in the chat with its text, pictures, and `@mention`. A command with no sequence id is skipped and logged. The `!auth` bang is deleted on that timer. The confirmation stays in the chat. The `chat_authorizations` row is what keeps the group unlocked.
 
-Public:
+In chat, `!help` is the short menu below. Later sections are the full behavior. `!set help` replaces that public text only.
 
-| Command | Behavior |
+**Fun**
+
+| Command | |
 | --- | --- |
-| `!help` | The `help` text from YAML, or the per-group override |
-| `!rules` | Group rules |
-| `!dice [NdM]` | Roll. Default 1d6. See [Games](#games) |
-| `!rps rock\|paper\|scissors` | Rock-paper-scissors against the bot. `r`, `p`, and `s` work |
-| `!coinflip [heads\|tails]` | Flip a coin. A call is optional. `!flip` is the same command |
-| `!8ball <question>` | Magic 8-ball. The question is required. `!eightball` is the same command |
-| `!minesweeper [easy\|medium]` | Text minesweeper on a 5×5 or 7×7 board. Reveal with `r B3`, flag with `f B3`. See [Games](#games). Full catalog: `!games` |
-| `!wordle [word]` | Daily 5-letter puzzle for this chat, then a practice round. Marks are correct, present, or absent |
-| `!anagram [word]` | Unscramble a longer word. Score starts at 10 per letter and drops 5 per miss |
-| `!scramble [word]` | Short-word letter round. A solve builds a streak; a miss resets it |
-| `!guess [n]` | The bot picks the range. Guesses get higher or lower |
-| `!higherlower [higher\|lower]` | Card streak. A tie keeps it; a miss ends it |
-| `!wouldyourather [A\|B]` | Vote on two options. The tally stays in this chat until the round expires |
-| `!truthordare [truth\|dare]` | PG-13 prompt. Refuses anything about minors |
-| `!tictactoe [@user]` | Tic-tac-toe. Reply to someone or `@user` to challenge. See [Games](#games) |
-| `!connect4 [@user]` | Connect four. Same challenge. Columns 1–7 |
-| `!duel [@user]` | Turn-based HP duel. Attack or defend |
-| `!hangman [start\|@user]` | Solo hangman, or a challenge. Guess a letter or the word |
-| `!story start\|stop\|status` | One-sentence-each story in this conversation |
-| `!slots [bet]` | Three-reel slots. Default bet is 10 fun chips. `!slots xp 10` wagers XP. See [Games](#games) |
-| `!blackjack [bet]` | Hit/stand vs the dealer. `!bj`, `!hit`, and `!stand` too |
-| `!poker [bet]` | 5-card draw vs the bot. One draw, then showdown |
-| `!roulette <red\|black\|number> [bet]` | European wheel. Color pays 1:1, a number pays 35:1 |
-| `!crash [bet]` | Climbing multiplier. `!crash out` cashes out. `!crash auto 2.5` settles immediately |
-| `!trivia` | Multiple choice. `!trivia a` answers. `!trivia score` shows this chat |
-| `!games` | Grouped catalog of every playable game: instant, board, word/solo, multiplayer, and XP/casino |
-| `!xp` | Your level, XP, and rank. `!level` and `!rank` are the same. `!xp @user` looks up someone else |
-| `!top` | Leaderboard. `!toplvl` and `!leaderboard` too. Default 10 rows |
-| Reply `+` or `-` | Give or take one level. See [XP](#xp-and-levels) |
-| `!ask <question>` | LLM reply. Also `@botname …` and the wake prefixes in YAML |
-| `!summarize [focus]` | Load history and summarize |
-| `!analyze [prompt]` | Load history and answer about the thread |
-| `!boobs` | One chest / cleavage photo or clip from the saved imagine-public bank. Off unless enabled. Tags the requester and replies to their command. Does not open grok.com/imagine. No extra arguments. See [Adult photos](#adult-photos) |
-| `!ass` / `!booty` / `!booties` | One butt photo or clip from that same saved bank. Same switch, rate limit, mention, and reply as `!boobs`. No other caption |
-| `!imagine <prompt>` | One image from that prompt on grok.com/imagine (Chrome session). Stays on when `!boobs` is off. See [Imagine](#imagine) |
-| `!video <prompt>` | One short video from that prompt on grok.com/imagine. Takes a few minutes. See [Video](#video) |
-| `!voice` | Menu of four personas. `!voice girl1 <text>` (or `1`, `dude` / `2`, `girl2` / `3`, `girl3` / `4`) speaks that line. See [Voice](#voice) |
-| `!troll @user` | Roast that person in this chat until `!untroll @user` names the same person. A second `!troll @user` does not turn it off. See [Troll mode](#troll-mode) |
-| `!roast @user` | One dunk. Uses their recent lines in this chat and up to five public posts (`GET /2/users/:id/tweets`). Does not turn on `!troll`. `@handle`, a known display name, or a reply with no name. `/roast` is the same. See [Roast](#roast) |
-| `!linkroast on` | Roast people who paste an X/Twitter status link in this chat until `!linkroast off`. One roast per person about every 45 seconds. See [Link roast](#link-roast) |
-| `!noor on` / `!noor off` | Noor alert for @noorrietje. Relays each new post with her status link, her text, and her photos, labeled as the original, then a separate sarcastic translation. A photo post also attaches an Imagine troll remix. `!Noor ON` matches. See [Noor alert](#noor-alert) |
-| `!noorabs on` / `!noorabs off` | When a Noor alert fires, append `but look at muh pretty abs` and an Imagine close-up of a skinny adult woman's tanned abs. Needs `!noor on`. See [Noor alert](#noor-alert) |
-| `!<made-up>` | One- or two-sentence witty LLM line when the LLM is allowed. Silent when it is off, unconfigured, admin-only, rate-limited, or the completion fails. `!status`, `!auth`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!noor`, `!noorabs`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!games`, `!slots`, `!blackjack`, `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, and `!trivia` are real commands and do not take this path |
+| `!troll @user` | Roast them until `!untroll @user`. See [Troll mode](#troll-mode) |
+| `!roast @user` | One dunk. Does not turn on `!troll`. See [Roast](#roast) |
+| `!linkroast on` | Roast X status links (`!linkroast off`). See [Link roast](#link-roast) |
+| `!xp` / `!top` | Your level, or the leaderboard. Reply `+` or `-` on a message. See [XP](#xp-and-levels) |
 
-Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself. `!auth` and `!status` are not admin commands: only `BOT_OWNER_ID` can send them. Anyone else, including `ADMIN_IDS` and per-group admins, is ignored.
+**Chat**
+
+| Command | |
+| --- | --- |
+| `!rules` | Group rules |
+| `!ask <question>` | Ask the bot. Also `@botname …` |
+| `!summarize` | Recap this chat |
+| `!analyze` | Ask about this chat |
+| `!<made-up>` | Short LLM joke when the model is on. Real commands, including `!admin`, do not take this path |
+
+**Media**
+
+| Command | |
+| --- | --- |
+| `!imagine <prompt>` | Image on grok.com/imagine. See [Imagine](#imagine) |
+| `!video <prompt>` | Short video on grok.com/imagine. See [Video](#video) |
+| `!voice` | Speak a line: Girl 1, regular dude, Girl 2, Girl 3. See [Voice](#voice) |
+| `!boobs` | Chest photo from the saved bank (off until enabled). Does not open grok.com/imagine. See [Adult photos](#adult-photos) |
+| `!ass` / `!booty` | Butt photo, same switch (`!booties`) |
+
+**Games** — `!games` prints how to play. Aliases such as `!flip`, `!eightball`, and `!bj` stay live and are not repeated here.
+
+| Command | |
+| --- | --- |
+| `!dice` | Roll (1d6, or `2d20`). See [Games](#games) |
+| `!rps` / `!coinflip` / `!8ball` | Rock-paper-scissors, a coin, a magic 8-ball |
+| `!minesweeper` | 5×5 or 7×7 |
+| `!wordle` / `!anagram` / `!scramble` / `!guess` | Word and number rounds |
+| `!higherlower` / `!wouldyourather` / `!truthordare` | Cards, a vote, a prompt |
+| `!tictactoe` / `!connect4` / `!duel` / `!hangman` / `!story` | Play with someone |
+| `!slots` / `!blackjack` / `!poker` / `!roulette` / `!crash` / `!trivia` | Casino and quiz |
+
+`!admin` is the admin list for the owner, `ADMIN_IDS`, and per-group admins. Anyone else gets the same deny as other mod commands. `/admin` is the same. `!admin add` and `!admin remove` still change the allowlist.
+
+Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself. `!help` does not list the commands below. Bare `!admin` shows a short list to an admin or the owner. Anyone else gets `That command is limited to configured admins.` This table is the full reference. `!auth` and `!status` are owner-only: only `BOT_OWNER_ID` can send them. Anyone else, including `ADMIN_IDS` and per-group admins, is ignored.
 
 | Command | Behavior |
 | --- | --- |
 | `!auth` | Owner only (`BOT_OWNER_ID`). Exact `!auth` (any case, optional surrounding spaces) authorizes a new encrypted Chat group and confirms in chat. Anyone else is ignored, including `ADMIN_IDS`. Groups that already had a Chat watermark are already authorized. Classic group DMs do not need it. See [Authorizing a new encrypted group](#authorizing-a-new-encrypted-group) |
-| `!status` | Owner only (`BOT_OWNER_ID`), same gate as `!auth`. `ADMIN_IDS` and per-group admins are ignored and get no snapshot. Health snapshot for this process: uptime, Chat and Activity, public_keys backoff, LLM, Imagine (`browser` or `api`), and this chat's welcome / troll / linkroast / noor switches. No secrets. See [Status](#status) |
+| `!status` | Owner only (`BOT_OWNER_ID`), same gate as `!auth`. `ADMIN_IDS` and per-group admins are ignored and get no snapshot. Health snapshot for this process: uptime, Chat and Activity, public_keys backoff, LLM, Imagine (`browser` or `api`), and this chat's welcome / troll / linkroast switches. No secrets. See [Status](#status) |
 | `!warn @user [reason]` | Count a warning. At the limit: soft-mute and notify admins |
 | `!warns @user` | Show the count |
 | `!unwarn @user` | Remove one warning |
@@ -578,19 +575,11 @@ While it is on, a message that contains a link to an X or Twitter status gets a 
 
 The roast uses the same LLM completion path as `!troll` (Grok when that provider is configured). If the LLM is off or the completion fails, the bot posts a short canned line instead. The flag is one row per conversation in SQLite (`linkroast`), so it survives a restart. Each person is roasted at most once every 45 seconds in that conversation (`linkroast_cooldown`). A skipped reply is silent, and the mode stays on through that pause. The bot ignores its own messages. A replay of the same Chat message does not roast again, because the existing dedupe runs first.
 
-## Noor alert
-
-`!noor on` turns the alert on for this conversation. `!noor off` turns it off. `/noor` works the same way. The command name and the on/off word use the same case folding as other bang commands, so `!Noor on`, `!NOOR ON`, and `!nOoR On` are the same command. A second `!noor on` leaves the watermark where it is. There is no `!unnoor`.
-
-`!noor on` and `!noor off` themselves tag the sender and reply to that command. The relay posts do not: they are not a reply to a chat message, so they stay top-level and untagged. While it is on, the bot polls `GET /2/users/:id/tweets` about once a minute (the same user-token scopes as troll mode: `tweet.read` and `users.read`). The account defaults to @noorrietje. `NOOR_ALERT_USERNAME` overrides it. The first enable sets the watermark to that moment, so older posts are not dumped into the chat. Each new post is two labeled messages, not one unlabeled block. The first is `📌 @handle original`, her status URL (`https://x.com/<handle>/status/<id>`), and her text. Her photos are attached after that with the same `sendImage` path as `!imagine`. The second message is `🪞 What she really means to say is:` and the sarcastic rewrite in quotes, so the roast is never posted as if it were her words. That rewrite uses the same LLM path as `!troll`. If the model is off or the call fails, a fixed template is used instead. When the post has a photo, Grok vision describes it for the rewrite, and Grok Imagine attaches one parody after the translation. A text-only post does not call Imagine for a parody. If an upload is refused, the bot posts the image URL the same way other photo commands do. One row per conversation in SQLite (`noor_alerts`) stores the enabled flag, the abs flag, and the watermark. A timeline failure is logged and that cycle relays nothing, so the same post can be tried again on the next poll.
-
-`!noorabs on` adds a coda after that normal relay. It does not turn Noor on by itself: without `!noor on` the bot says to turn `!noor` on first. `/noorabs` uses the same case folding as `!noor`. `!noor off` stops relays and clears the abs flag, so the next `!noor on` does not resume the coda until `!noorabs on` again. `!noorabs off` clears only the coda. When the coda is on, every relay (photo or text) ends with the exact line `but look at muh pretty abs` and then one new Grok Imagine still: a close-up of a skinny adult woman's tanned abs, fitness and beach, midriff crop, no face. Each relay calls the xAI Imagine API again, with a new framing token. There is no static file and no reused cache. If that call fails or returns no bytes, the bot logs it, skips the image, and still posts the text line. Desktop or browser Imagine is not part of the live path.
-
 ## Status
 
 `!status` is owner-only, the same gate as `!auth`: only `BOT_OWNER_ID` gets a reply. `ADMIN_IDS` and per-group admins are ignored, and so is everyone else. The bot stays quiet and does not post the snapshot. `/status` is the same command. The name is case-insensitive, and extra words are ignored. When the owner sends it, the reply is in the same chat and tags them.
 
-The snapshot is whatever this process already knows. It does not call X, the LLM, or Imagine to build the reply. It names the bot handle when one is known, how long this process has been up, and whether the Chat poller and Activity push are ok, still starting, off, or degraded. The keys line is the one to read when bangs go quiet: `BACKOFF` means `GET /2/users/…/public_keys` returned 429 or 402 and signing-key loads are waiting that window out. Cached user and signing-key counts stay on that line so you can see what decrypt already holds. A clear cache says `Keys: ok`. LLM is the configured provider and model, or `off`. Imagine is `browser` when `IMAGINE_BACKEND` is browser (the default: grok.com/imagine in the signed-in Chrome session) or `api` when it is `api`, with `video` when that API client is on. `api off` means the API backend is selected but no xAI key is configured. This chat's welcome, troll, linkroast, noor, and noorabs flags are included. Public media-bank counts are included only when those URL lists are already loaded. The package version and a short git sha are added when the files can be read. Tokens, API keys, and environment dumps are not included.
+The snapshot is whatever this process already knows. It does not call X, the LLM, or Imagine to build the reply. It names the bot handle when one is known, how long this process has been up, and whether the Chat poller and Activity push are ok, still starting, off, or degraded. The keys line is the one to read when bangs go quiet: `BACKOFF` means `GET /2/users/…/public_keys` returned 429 or 402 and signing-key loads are waiting that window out. Cached user and signing-key counts stay on that line so you can see what decrypt already holds. A clear cache says `Keys: ok`. LLM is the configured provider and model, or `off`. Imagine is `browser` when `IMAGINE_BACKEND` is browser (the default: grok.com/imagine in the signed-in Chrome session) or `api` when it is `api`, with `video` when that API client is on. `api off` means the API backend is selected but no xAI key is configured. This chat's welcome, troll, and linkroast flags are included. Public media-bank counts are included only when those URL lists are already loaded. The package version and a short git sha are added when the files can be read. Tokens, API keys, and environment dumps are not included.
 
 ## LLM replies
 
@@ -607,7 +596,7 @@ Independent of the X API tier. The bot calls OpenAI-compatible **Chat Completion
 
 **Grok.** `Authorization: Bearer $XAI_API_KEY` against `https://api.x.ai/v1/chat/completions`. Create a key at [console.x.ai](https://console.x.ai). xAI also documents a Responses API; this bot stays on Chat Completions so every provider shares one client. Default model is `grok-4.6`. `LLM_PROVIDER=grok` or `openai` without a key exits at startup. Leaving the provider unset and omitting keys still starts the bot; `!ask` then explains how to configure it. Local providers do not require a cloud key. `127.0.0.1` only works when the bot process can open that port.
 
-Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!status`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!noor`, `!noorabs`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!hit`, `!stand`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
+Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!hit`, `!stand`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
 
 | `llm.context_mode` | What is sent | Reads |
 | --- | --- | --- |
@@ -675,15 +664,14 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `VIDEO_IMAGINE_ASPECT_RATIO` | Default `16:9` |
 | `VIDEO_IMAGINE_RESOLUTION` | Default `720p`. Also `480p` or `1080p` |
 | `VOICE_TTS_LANGUAGE` | Default `en` for `!voice`. A BCP-47 tag or `auto`. Personas choose the voice |
-| `NOOR_ALERT_USERNAME` | Default `noorrietje` for `!noor`. An X username, with or without `@` |
 | `BOOBS_SEARCH_PROVIDER`, `BOOBS_SEARCH_API_KEY` | Search fallback. The key is only for `serpapi` and Azure `bing` |
 | `CONFIG_PATH` | Default `config/default.yaml` |
 | `DATABASE_PATH` | Default `data/bot.sqlite` |
 | `TOKEN_PATH` | Default `data/tokens.json` |
 
-`config/default.yaml` holds welcome and leave text (leave is on), rules, help (including `!status`, `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, `!linkroast`, `!noor`, and `!noorabs`), flood (off by default: `max_messages: 0` disables it; `window_ms` stays 8000 and `mute_ms` stays 300000 so a group can turn it back on with `!set flood_max_messages` above 0), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine backend, Chrome profile, CDP URL, model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, `BOOBS_IMAGINE_APP`, the public CDN URLs (including `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS` and the three per-command video URL lists), the video model, duration, aspect ratio, and resolution, and the voice language are env-only. `!voice` personas are fixed in the bot. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits, reaction removals, and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
+`config/default.yaml` holds welcome and leave text (leave is on), rules, public help (including `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, and `!linkroast`; admin commands are `admin_help`, shown by `!admin`), flood (off by default: `max_messages: 0` disables it; `window_ms` stays 8000 and `mute_ms` stays 300000 so a group can turn it back on with `!set flood_max_messages` above 0), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine backend, Chrome profile, CDP URL, model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, `BOOBS_IMAGINE_APP`, the public CDN URLs (including `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS` and the three per-command video URL lists), the video model, duration, aspect ratio, and resolution, and the voice language are env-only. `!voice` personas are fixed in the bot. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits, reaction removals, and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
 
-SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` target, the per-conversation `!linkroast` flag and per-user roast times, the per-conversation `!noor` flag, abs flag, and tweet watermark, and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
+SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` target, the per-conversation `!linkroast` flag and per-user roast times, and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
 
 ## Layout
 
@@ -704,8 +692,6 @@ scripts/imagine-browser.ts # one-shot check of the same Chrome worker (`npm run 
 src/bot/voice.ts        # xAI text-to-speech client and !voice checks
 src/bot/troll.ts        # !troll and !roast copy, roast prompts, and reply cleanup
 src/bot/linkroast.ts    # !linkroast copy, status-link detection, and reply cleanup
-src/bot/noor.ts         # !noor and !noorabs relay text, watermark, roast, and abs prompt
-src/bot/noor-poller.ts  # ~60s timeline poll for Noor alert
 src/bot/recent-images.ts # last 8 posted URLs and hashes, in memory
 src/bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
 src/chat/listen.ts      # CHAT_LISTEN all | allowlist | off

@@ -76,8 +76,6 @@ function snapshot(overrides: Partial<StatusSnapshot> = {}): StatusSnapshot {
     imagine: "api, video",
     welcome: true,
     troll: "@bob",
-    noor: true,
-    noorAbs: true,
     linkroast: false,
     media: { chest: 1, booty: 1, videos: 1 },
     version: "1.2.3",
@@ -98,7 +96,7 @@ describe("formatStatusReport", () => {
         "Keys: BACKOFF 45s — GET /2/users/…/public_keys rate-limited. 3 users cached, 8 signing keys, 1 chat key. Decrypt stalls until this clears.",
         "LLM: grok grok-4.6",
         "Imagine: api, video",
-        "This chat: welcome on · troll @bob · linkroast off · noor on · noorabs on",
+        "This chat: welcome on · troll @bob · linkroast off",
         "Media: chest 1 · booty 1 · video 1",
         "Version: 1.2.3 abc1234",
       ].join("\n"),
@@ -116,8 +114,6 @@ describe("formatStatusReport", () => {
         imagine: "off",
         welcome: false,
         troll: "off",
-        noor: false,
-        noorAbs: false,
         linkroast: true,
         media: undefined,
         version: undefined,
@@ -129,7 +125,7 @@ describe("formatStatusReport", () => {
     expect(healthy).toContain("Keys: ok — 2 users cached, 2 signing keys, 0 chat keys");
     expect(healthy).toContain("LLM: off");
     expect(healthy).toContain("Imagine: off");
-    expect(healthy).toContain("This chat: welcome off · troll off · linkroast on · noor off · noorabs off");
+    expect(healthy).toContain("This chat: welcome off · troll off · linkroast on");
     expect(healthy).not.toContain("Media:");
     expect(healthy).toContain("Version: deadbee");
     expect(healthy.split("\n").length).toBeLessThanOrEqual(15);
@@ -221,8 +217,6 @@ describe("!status command", () => {
     stores.push(store);
     store.setTrollTarget(groupId, bob.id, "bob");
     store.setLinkroastEnabled(groupId, true);
-    store.enableNoorAlert(groupId, nowMs);
-    store.enableNoorAbs(groupId);
     const health = new RuntimeHealth();
     health.noteChat("degraded", "backoff 45s");
     health.markActivityEnabled();
@@ -282,7 +276,7 @@ describe("!status command", () => {
     expect(text).toContain("LLM: grok grok-4.6");
     expect(text).toContain("Imagine: browser");
     expect(text).not.toContain("Imagine: api");
-    expect(text).toContain("This chat: welcome on · troll @bob · linkroast on · noor on · noorabs on");
+    expect(text).toContain("This chat: welcome on · troll @bob · linkroast on");
     expect(text).toContain("Media: chest 1 · booty 1 · video 1");
     expect(text).toContain("Version: 1.2.3 abc1234");
     expect(text.split("\n").length).toBeLessThanOrEqual(15);
@@ -376,24 +370,40 @@ describe("!status command", () => {
     expect(client.sent[0]?.text).toContain("@0xMatt66");
   });
 
-  it("lists !status as owner-only in the default !help reply", async () => {
+  it("keeps !status on !admin and out of public !help", async () => {
     const loaded = loadDefaults("config/default.yaml");
-    expect(loaded.help).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
-    expect(loaded.help).toMatch(/same gate as !auth/);
-    expect(loaded.help).toMatch(/ADMIN_IDS and per-group admins are ignored/);
-    expect(loaded.help).toMatch(/public_keys/);
-    expect(loaded.help).toMatch(/browser or api/);
+    expect(loaded.help).not.toMatch(/!status — owner only/);
+    expect(loaded.help).not.toMatch(/!warn @user/);
+    expect(loaded.help).not.toMatch(/!auth — owner only/);
+    expect(loaded.help).toMatch(/Admin commands: !admin/);
     expect(loaded.help).toMatch(/!linkroast/);
+    expect(loaded.admin_help).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
+    expect(loaded.admin_help).toMatch(/same gate as !auth/);
+    expect(loaded.admin_help).toMatch(/ADMIN_IDS and per-group admins are ignored/);
+    expect(loaded.admin_help).toMatch(/public_keys/);
+    expect(loaded.admin_help).toMatch(/browser or api/);
     const store = new Store(":memory:");
     stores.push(store);
     const client = new MockXClient();
     client.addUser(alice);
+    client.addUser(owner);
     const engine = new ModerationEngine(store, client, { ...runtime(), defaults: loaded });
     await engine.processEvent(message({ id: "help", text: "!HELP" }), nowMs);
-    expect(client.sent.at(-1)?.text).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
-    expect(client.sent.at(-1)?.text).toMatch(/public_keys backoff/);
-    expect(client.sent.at(-1)?.text).toMatch(/browser or api/);
-    expect(client.sent.at(-1)?.text).toMatch(/grok.com\/imagine/);
+    const help = client.sent.at(-1)?.text ?? "";
+    expect(help).not.toMatch(/!status — owner only/);
+    expect(help).not.toMatch(/!warn @user/);
+    expect(help).toMatch(/Admin commands: !admin/);
+    expect(help).toMatch(/grok.com\/imagine/);
+    await engine.processEvent(message({ id: "denied", senderId: alice.id, text: "!admin" }), nowMs);
+    expect(client.sent.at(-1)?.text).toMatch(/limited to configured admins/);
+    await engine.processEvent(
+      message({ id: "menu", senderId: owner.id, sender: owner, text: "!admin" }),
+      nowMs,
+    );
+    const menu = client.sent.at(-1)?.text ?? "";
+    expect(menu).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
+    expect(menu).toMatch(/public_keys backoff/);
+    expect(menu).toMatch(/browser or api/);
   });
 });
 
