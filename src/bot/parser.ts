@@ -14,6 +14,7 @@ export type ParsedCommand =
   | { name: "mute"; target?: UserRef; minutes?: number }
   | { name: "unmute"; target?: UserRef }
   | { name: "del"; eventId?: string }
+  | { name: "purge"; count?: number; capped?: boolean }
   | { name: "note"; key?: string; value?: string }
   | { name: "get"; key: string }
   | { name: "set"; key: string; value: string }
@@ -89,6 +90,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "mute",
   "del",
   "delete",
+  "purge",
   "note",
   "get",
   "set",
@@ -162,6 +164,23 @@ const KNOWN_COMMAND_NAMES = new Set([
 const COMMAND_RE = /^([!/])([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)(?:\s+([\s\S]*))?$/;
 const USERNAME_RE = /^@?([A-Za-z0-9_]{1,15})$/;
 const SNOWFLAKE_RE = /^[0-9]{1,19}$/;
+
+/**
+ * Most messages one `!purge` will try to delete.
+ * Each attempt is a delete call, so this stays at one history page of 100.
+ */
+export const PURGE_MAX = 100;
+
+/** A positive integer with no leading zero. Longer digit strings still cap. */
+const PURGE_COUNT_RE = /^[1-9][0-9]*$/;
+
+function parsePurgeCount(rest: string): { count: number; capped: boolean } | undefined {
+  if (!PURGE_COUNT_RE.test(rest)) return undefined;
+  const value = Number.parseInt(rest.length > 15 ? rest.slice(0, 15) : rest, 10);
+  if (!Number.isFinite(value) || value < 1) return undefined;
+  if (value > PURGE_MAX) return { count: PURGE_MAX, capped: true };
+  return { count: value, capped: false };
+}
 
 interface BangMatch {
   prefix: "!" | "/";
@@ -268,6 +287,14 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       if (!rest) return { name: "del" };
       if (!SNOWFLAKE_RE.test(rest)) return undefined;
       return { name: "del", eventId: rest };
+    }
+    case "purge": {
+      if (!rest) return { name: "purge" };
+      const parsed = parsePurgeCount(rest);
+      if (!parsed) return { name: "purge" };
+      return parsed.capped
+        ? { name: "purge", count: parsed.count, capped: true }
+        : { name: "purge", count: parsed.count };
     }
     case "note": {
       if (!rest) return { name: "note" };

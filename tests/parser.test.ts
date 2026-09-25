@@ -52,6 +52,25 @@ describe("parseCommand", () => {
     expect(parseCommand("!del not-an-id")).toBeUndefined();
   });
 
+  it("parses !purge counts and caps them", () => {
+    expect(parseCommand("!purge 25")).toEqual({ name: "purge", count: 25 });
+    expect(parseCommand("!purge 50")).toEqual({ name: "purge", count: 50 });
+    expect(parseCommand("!purge 100")).toEqual({ name: "purge", count: 100 });
+    expect(parseCommand("!PURGE 7")).toEqual({ name: "purge", count: 7 });
+    expect(parseCommand("/purge 25")).toEqual({ name: "purge", count: 25 });
+    expect(parseCommand("!purge 101")).toEqual({ name: "purge", count: 100, capped: true });
+    expect(parseCommand("!purge 200")).toEqual({ name: "purge", count: 100, capped: true });
+    expect(parseCommand("!purge 999999")).toEqual({ name: "purge", count: 100, capped: true });
+    expect(parseCommand("!purge")).toEqual({ name: "purge" });
+    expect(parseCommand("!purge 0")).toEqual({ name: "purge" });
+    expect(parseCommand("!purge -5")).toEqual({ name: "purge" });
+    expect(parseCommand("!purge abc")).toEqual({ name: "purge" });
+    expect(parseCommand("!purge 25 please")).toEqual({ name: "purge" });
+    expect(parseUnknownBang("!purge")).toBeUndefined();
+    expect(parseUnknownBang("!purge 25")).toBeUndefined();
+    expect(parseUnknownBang("!purge nope")).toBeUndefined();
+  });
+
   it("parses notes and get", () => {
     expect(parseCommand("!note")).toEqual({ name: "note" });
     expect(parseCommand("!note topic")).toEqual({ name: "note", key: "topic" });
@@ -382,6 +401,7 @@ describe("parseUnknownBang", () => {
     expect(parseUnknownBang("!delete 12")).toBeUndefined();
     expect(parseUnknownBang("!warn")).toBeUndefined();
     expect(parseUnknownBang("!del not-an-id")).toBeUndefined();
+    expect(parseUnknownBang("!purge 12")).toBeUndefined();
     expect(parseUnknownBang("!unknown-cmd")).toBeUndefined();
     expect(parseCommand("!diediesillygoat")).toBeUndefined();
   });
