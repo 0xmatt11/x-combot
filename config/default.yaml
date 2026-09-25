@@ -25,7 +25,7 @@ help: |
   Commands. / works like !. Your command deletes after 15 minutes; the reply stays. Admin commands: !admin.
 
   Fun
-  !troll @user — add them to this chat's troll list. More than one can be on it. !troll shows who is enabled. !untroll @user removes them
+  !troll @user — add them to this chat's troll list. More than one can be on it. !troll shows who is enabled. !untroll @user removes them. !untroll all clears the list (!untroll clear)
   !roast @user — one dunk. Does not turn on !troll
   !linkroast on — two-paragraph brutal roast of any link or shared post, including Sent a post. No XP (!linkroast off)
   !xp — your level. !top — leaderboard. Reply + or - on a message

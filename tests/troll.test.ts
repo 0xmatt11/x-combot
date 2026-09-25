@@ -368,6 +368,8 @@ describe("troll mode", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!troll @user/);
     expect(loaded.help).toMatch(/!untroll @user/);
+    expect(loaded.help).toMatch(/!untroll all/);
+    expect(loaded.help).toMatch(/!untroll clear/);
     expect(loaded.help).toMatch(/who is enabled/);
     expect(loaded.help).not.toMatch(/!troll off/);
   });
@@ -421,6 +423,65 @@ describe("troll mode", () => {
     expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
     await engine.processEvent(message({ id: "empty-untroll", senderId: alice.id, text: "!untroll" }));
     expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
+  });
+
+  it("clears every target in this conversation with !untroll all and !untroll clear", async () => {
+    const { engine, client, store } = setup();
+    store.addTrollTarget("other-chat", bob.id, "bob");
+    await engine.processEvent(message({ id: "on-bob", senderId: alice.id, text: "!troll @bob" }));
+    await engine.processEvent(message({ id: "on-alice", senderId: alice.id, text: "!troll @alice" }));
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id, alice.id]);
+
+    await engine.processEvent(message({ id: "clear", senderId: alice.id, text: "!untroll all" }));
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll list cleared. Troll list is empty.");
+
+    const start = 8_000_000;
+    await engine.processEvent(message({ id: "b1", senderId: bob.id, text: "no roast" }), start);
+    await engine.processEvent(
+      message({ id: "a1", senderId: alice.id, text: "no roast either" }),
+      start + 1_000,
+    );
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll list cleared. Troll list is empty.");
+
+    await engine.processEvent(message({ id: "empty-all", senderId: alice.id, text: "!UNTROLL ALL" }));
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
+
+    await engine.processEvent(message({ id: "on-bob-2", senderId: alice.id, text: "!troll @bob" }));
+    await engine.processEvent(message({ id: "on-alice-2", senderId: owner.id, text: "!troll @alice" }));
+    await engine.processEvent(
+      message({
+        id: "clear-alias",
+        senderId: owner.id,
+        text: "/untroll CLEAR",
+        replyToSenderId: bob.id,
+      }),
+    );
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.getTrollTarget(groupId, bob.id)).toBeUndefined();
+    expect(store.getTrollTarget(groupId, alice.id)).toBeUndefined();
+    expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
+    expect(client.sent.at(-1)?.text).toBe("@owner Troll list cleared. Troll list is empty.");
+
+    await engine.processEvent(message({ id: "on-bob-3", senderId: alice.id, text: "!troll @bob" }));
+    await engine.processEvent(message({ id: "on-alice-3", senderId: alice.id, text: "!troll @alice" }));
+    await engine.processEvent(message({ id: "bare", senderId: alice.id, text: "!untroll" }));
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice Still trolling. Enabled: @bob, @alice. !untroll @user removes someone.",
+    );
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id, alice.id]);
+    await engine.processEvent(message({ id: "one", senderId: alice.id, text: "!untroll @bob" }));
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([alice.id]);
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll mode off for @bob. Enabled: @alice.");
+
+    store.clearTrollTargets(groupId);
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
+    store.clearTrollTargets(groupId);
+    expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
   });
 
   it("keeps a migrated single-target row and still accepts another person", () => {

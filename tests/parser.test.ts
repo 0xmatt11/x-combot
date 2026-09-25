@@ -441,12 +441,26 @@ describe("parseCommand !troll", () => {
       name: "untroll",
       target: { raw: "@x", username: "x" },
     });
+    expect(parseCommand("!untroll all")).toEqual({ name: "untroll", all: true });
+    expect(parseCommand("!UNTROLL ALL")).toEqual({ name: "untroll", all: true });
+    expect(parseCommand("!untroll clear")).toEqual({ name: "untroll", all: true });
+    expect(parseCommand("/untroll Clear")).toEqual({ name: "untroll", all: true });
+    expect(parseCommand("!untroll allison")).toEqual({
+      name: "untroll",
+      target: { raw: "allison", username: "allison" },
+    });
+    expect(parseCommand("!untroll @all")).toEqual({
+      name: "untroll",
+      target: { raw: "@all", username: "all" },
+    });
     expect(parseCommand("!troll Bobby Tables")).toEqual({
       name: "troll",
       target: { raw: "Bobby Tables" },
     });
     expect(parseUnknownBang("!troll @x")).toBeUndefined();
     expect(parseUnknownBang("!untroll @x")).toBeUndefined();
+    expect(parseUnknownBang("!untroll all")).toBeUndefined();
+    expect(parseUnknownBang("!untroll clear")).toBeUndefined();
     expect(parseUnknownBang("!troll off")).toBeUndefined();
   });
 });

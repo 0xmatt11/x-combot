@@ -912,6 +912,11 @@ export class Store {
       .run(conversationId, userId);
   }
 
+  /** Remove every person on this conversation's list. Other conversations stay. */
+  clearTrollTargets(conversationId: string): void {
+    this.db.prepare("DELETE FROM troll_targets WHERE conversation_id = ?").run(conversationId);
+  }
+
   /** Record a posted troll and which style comes next (0 mom joke, 1 roast). */
   markTrollSent(conversationId: string, userId: string, nowMs: number, roastNext: 0 | 1): void {
     this.db

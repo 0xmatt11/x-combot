@@ -61,7 +61,7 @@ export type ParsedCommand =
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
-  | { name: "untroll"; target?: UserRef }
+  | { name: "untroll"; target?: UserRef; all?: boolean }
   | { name: "roast"; target?: UserRef }
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "status" }
@@ -444,9 +444,13 @@ function parseRoast(rest: string): ParsedCommand {
   return { name: "roast", target: trollTarget(rest) };
 }
 
-/** `!untroll @user` removes that person. A bare `!untroll` lists who is enabled. */
+/**
+ * `!untroll @user` removes that person. `!untroll all` and `!untroll clear`
+ * drop everyone in this conversation. A bare `!untroll` lists who is enabled.
+ */
 function parseUntroll(rest: string): ParsedCommand {
   if (!rest) return { name: "untroll" };
+  if (/^(all|clear)$/i.test(rest)) return { name: "untroll", all: true };
   return { name: "untroll", target: trollTarget(rest) };
 }
 

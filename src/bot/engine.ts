@@ -1718,7 +1718,8 @@ export class ModerationEngine {
   }
 
   /**
-   * `!troll off` does not clear anyone. Only `!untroll` naming that person does.
+   * `!troll off` does not clear anyone. `!untroll` naming that person removes
+   * them. `!untroll all` (or `clear`) removes everyone in this conversation.
    */
   private async replyTrollHeld(conversationId: string, actions: EngineActions): Promise<void> {
     const list = await this.trollListSentence(conversationId);
@@ -1735,10 +1736,21 @@ export class ModerationEngine {
 
   private async handleUntroll(
     event: DmEvent,
-    command: { name: "untroll"; target?: UserRef },
+    command: { name: "untroll"; target?: UserRef; all?: boolean },
     actions: EngineActions,
   ): Promise<void> {
     const conversationId = event.conversationId;
+    if (command.all) {
+      const before = this.store.listTrollTargets(conversationId);
+      if (before.length === 0) {
+        await this.reply(conversationId, "Troll list is empty.", actions);
+        return;
+      }
+      this.store.clearTrollTargets(conversationId);
+      const list = await this.trollListSentence(conversationId);
+      await this.reply(conversationId, `Troll list cleared. ${list.text}`, actions);
+      return;
+    }
     if (!command.target && !this.trollReplySenderId(event)) {
       const list = await this.trollListSentence(conversationId);
       await this.reply(
