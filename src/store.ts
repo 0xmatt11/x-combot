@@ -146,11 +146,12 @@ CREATE TABLE IF NOT EXISTS message_authors (
 );
 
 CREATE TABLE IF NOT EXISTS troll_targets (
-  conversation_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   username TEXT,
   last_ms INTEGER NOT NULL DEFAULT 0,
-  roast_next INTEGER NOT NULL DEFAULT 0
+  roast_next INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (conversation_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS linkroast (
@@ -190,6 +191,7 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
     this.dropRemovedAlertTable();
+    this.migrateTrollTargets();
     this.grandfatherChatAuthorizations();
   }
 
@@ -199,6 +201,46 @@ export class Store {
    */
   private dropRemovedAlertTable(): void {
     this.db.exec("DROP TABLE IF EXISTS noor_alerts");
+  }
+
+  /**
+   * Older databases stored one `troll_targets` row per conversation
+   * (`conversation_id` primary key). Rebuild that table so each person is
+   * their own row, and keep the existing target, cooldown, and roast turn.
+   */
+  private migrateTrollTargets(): void {
+    const cols = this.db.prepare("PRAGMA table_info(troll_targets)").all() as {
+      name: string;
+      pk: number;
+    }[];
+    const pk = cols.filter((col) => col.pk > 0).sort((a, b) => a.pk - b.pk);
+    const composite =
+      pk.length === 2 && pk[0]?.name === "conversation_id" && pk[1]?.name === "user_id";
+    if (composite || cols.length === 0) return;
+    const single =
+      pk.length === 1 &&
+      pk[0]?.name === "conversation_id" &&
+      cols.some((col) => col.name === "user_id");
+    if (!single) return;
+    const migrate = this.db.transaction(() => {
+      this.db.exec(`
+        DROP TABLE IF EXISTS troll_targets_next;
+        CREATE TABLE troll_targets_next (
+          conversation_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          username TEXT,
+          last_ms INTEGER NOT NULL DEFAULT 0,
+          roast_next INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (conversation_id, user_id)
+        );
+        INSERT INTO troll_targets_next (conversation_id, user_id, username, last_ms, roast_next)
+          SELECT conversation_id, user_id, username, last_ms, roast_next
+          FROM troll_targets;
+        DROP TABLE troll_targets;
+        ALTER TABLE troll_targets_next RENAME TO troll_targets;
+      `);
+    });
+    migrate();
   }
 
   close(): void {
@@ -805,16 +847,36 @@ export class Store {
   }
 
   /**
-   * Who `!troll` is aimed at in this conversation. `lastMs` is the previous
-   * roast. `roastNext` is 1 when the next reply should be a timeline roast.
+   * Everyone `!troll` is aimed at in this conversation, oldest first.
+   * `lastMs` is that person's previous roast. `roastNext` is 1 when their
+   * next reply should be a timeline roast.
    */
-  getTrollTarget(conversationId: string): TrollTarget | undefined {
+  listTrollTargets(conversationId: string): TrollTarget[] {
+    const rows = this.db
+      .prepare(
+        `SELECT user_id, username, last_ms, roast_next
+         FROM troll_targets
+         WHERE conversation_id = ?
+         ORDER BY rowid ASC`,
+      )
+      .all(conversationId) as {
+      user_id: string;
+      username: string | null;
+      last_ms: number;
+      roast_next: number;
+    }[];
+    return rows.map((row) => this.trollTargetFromRow(row));
+  }
+
+  /** One enabled person in this conversation, if they are on the list. */
+  getTrollTarget(conversationId: string, userId: string): TrollTarget | undefined {
     const row = this.db
       .prepare(
         `SELECT user_id, username, last_ms, roast_next
-         FROM troll_targets WHERE conversation_id = ?`,
+         FROM troll_targets
+         WHERE conversation_id = ? AND user_id = ?`,
       )
-      .get(conversationId) as
+      .get(conversationId, userId) as
       | {
           user_id: string;
           username: string | null;
@@ -823,42 +885,55 @@ export class Store {
         }
       | undefined;
     if (!row) return undefined;
-    return {
-      userId: row.user_id,
-      username: row.username ?? undefined,
-      lastMs: row.last_ms,
-      roastNext: row.roast_next === 1 ? 1 : 0,
-    };
+    return this.trollTargetFromRow(row);
   }
 
-  /** Replace the conversation target and reset the cooldown and rotation. */
-  setTrollTarget(conversationId: string, userId: string, username?: string): void {
+  /**
+   * Add someone to this conversation's list. A person already on it keeps
+   * their cooldown and roast turn. Other people on the list stay.
+   */
+  addTrollTarget(conversationId: string, userId: string, username?: string): void {
     const handle = username?.replace(/^@/, "").trim();
     const safe = handle && !/^\d+$/.test(handle) ? handle : null;
     this.db
       .prepare(
         `INSERT INTO troll_targets (conversation_id, user_id, username, last_ms, roast_next)
          VALUES (?, ?, ?, 0, 0)
-         ON CONFLICT(conversation_id) DO UPDATE SET
-           user_id = excluded.user_id,
-           username = excluded.username,
-           last_ms = 0,
-           roast_next = 0`,
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+           username = COALESCE(excluded.username, troll_targets.username)`,
       )
       .run(conversationId, userId, safe);
   }
 
-  clearTrollTarget(conversationId: string): void {
-    this.db.prepare("DELETE FROM troll_targets WHERE conversation_id = ?").run(conversationId);
+  /** Remove one person. Everyone else in the conversation stays enabled. */
+  removeTrollTarget(conversationId: string, userId: string): void {
+    this.db
+      .prepare("DELETE FROM troll_targets WHERE conversation_id = ? AND user_id = ?")
+      .run(conversationId, userId);
   }
 
   /** Record a posted troll and which style comes next (0 mom joke, 1 roast). */
-  markTrollSent(conversationId: string, nowMs: number, roastNext: 0 | 1): void {
+  markTrollSent(conversationId: string, userId: string, nowMs: number, roastNext: 0 | 1): void {
     this.db
       .prepare(
-        `UPDATE troll_targets SET last_ms = ?, roast_next = ? WHERE conversation_id = ?`,
+        `UPDATE troll_targets SET last_ms = ?, roast_next = ?
+         WHERE conversation_id = ? AND user_id = ?`,
       )
-      .run(nowMs, roastNext, conversationId);
+      .run(nowMs, roastNext, conversationId, userId);
+  }
+
+  private trollTargetFromRow(row: {
+    user_id: string;
+    username: string | null;
+    last_ms: number;
+    roast_next: number;
+  }): TrollTarget {
+    return {
+      userId: row.user_id,
+      username: row.username ?? undefined,
+      lastMs: row.last_ms,
+      roastNext: row.roast_next === 1 ? 1 : 0,
+    };
   }
 
   /** Whether `!linkroast` is on for this conversation. */

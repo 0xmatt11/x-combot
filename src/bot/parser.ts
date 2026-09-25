@@ -424,9 +424,10 @@ export function parseUserRef(raw: string): UserRef | undefined {
 }
 
 /**
- * `!troll @user` turns on. `off` is recognized so it is not a username,
- * but it does not stop troll mode. A display name that is not a single
- * @handle is kept raw so the engine can match a known name.
+ * `!troll @user` adds that person. `off` is recognized so it is not a
+ * username, but it does not stop troll mode. A bare `!troll` lists who is
+ * enabled. A display name that is not a single @handle is kept raw so the
+ * engine can match a known name.
  */
 function parseTroll(rest: string): ParsedCommand {
   if (!rest) return { name: "troll" };
@@ -443,7 +444,7 @@ function parseRoast(rest: string): ParsedCommand {
   return { name: "roast", target: trollTarget(rest) };
 }
 
-/** `!untroll @user` stops troll mode only when that user is the current target. */
+/** `!untroll @user` removes that person. A bare `!untroll` lists who is enabled. */
 function parseUntroll(rest: string): ParsedCommand {
   if (!rest) return { name: "untroll" };
   return { name: "untroll", target: trollTarget(rest) };

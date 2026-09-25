@@ -215,7 +215,7 @@ describe("!status command", () => {
   it("replies with mocked health and does not call Imagine", async () => {
     const store = new Store(":memory:");
     stores.push(store);
-    store.setTrollTarget(groupId, bob.id, "bob");
+    store.addTrollTarget(groupId, bob.id, "bob");
     store.setLinkroastEnabled(groupId, true);
     const health = new RuntimeHealth();
     health.noteChat("degraded", "backoff 45s");

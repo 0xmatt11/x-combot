@@ -6,7 +6,7 @@
 import { containsBannedAgeTerm } from "./adult-filter.js";
 import type { ChatMessage } from "../llm/client.js";
 
-/** At most one troll reply per conversation inside this window. */
+/** At most one troll reply per enabled person inside this window. */
 export const TROLL_COOLDOWN_MS = 45_000;
 
 const SNOWFLAKE_RE = /\d{15,20}/g;

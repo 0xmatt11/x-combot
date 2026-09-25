@@ -109,7 +109,7 @@ describe("!roast", () => {
       }),
     );
 
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
+    expect(store.listTrollTargets(groupId)).toEqual([]);
     expect(client.sent).toHaveLength(1);
     expect(client.sent[0]).toMatchObject({
       text: "@alice @bob that pineapple loyalty is a cry for help.",
@@ -178,7 +178,7 @@ describe("!roast", () => {
         replyToSenderId: bob.id,
       }),
     );
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
+    expect(store.listTrollTargets(groupId)).toEqual([]);
     expect(client.sent.at(-1)?.text).toContain("@bob still just one roast.");
 
     await engine.processEvent(
@@ -189,7 +189,7 @@ describe("!roast", () => {
         participants: [{ id: bob.id, name: "Bobby Tables" }],
       }),
     );
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
+    expect(store.listTrollTargets(groupId)).toEqual([]);
     expect(client.sent).toHaveLength(2);
     expect(llm.calls).toHaveLength(2);
   });
