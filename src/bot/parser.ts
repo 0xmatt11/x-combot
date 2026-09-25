@@ -166,8 +166,9 @@ const USERNAME_RE = /^@?([A-Za-z0-9_]{1,15})$/;
 const SNOWFLAKE_RE = /^[0-9]{1,19}$/;
 
 /**
- * Most messages one `!purge` will try to delete.
- * Each attempt is a delete call, so this stays at one history page of 100.
+ * Hard cap on how many messages one `!purge <n>` deletes.
+ * `n` is that count (any positive integer). Values above this become this cap.
+ * Each message is one delete call.
  */
 export const PURGE_MAX = 100;
 

@@ -4867,7 +4867,7 @@ const PURGE_PAGE_SIZE = 100;
 const PURGE_MAX_PAGES = 5;
 
 function purgeUsage(): string {
-  return `Usage: !purge <n>. n is a positive integer up to ${PURGE_MAX}. I try to delete that many recent messages in this chat, newest first. The !purge line is not included. X only deletes events this account can remove.`;
+  return `Usage: !purge <n>. n is how many of the last messages to delete: any positive integer, hard cap ${PURGE_MAX}. Newest first. The !purge line is not included. X only deletes events this account can remove.`;
 }
 
 function formatPurgeReply(input: {

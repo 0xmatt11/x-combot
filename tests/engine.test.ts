@@ -530,6 +530,41 @@ describe("ModerationEngine", () => {
     expect(client.sent.at(-1)?.text).not.toMatch(/Capped at/);
   });
 
+  it("deletes exactly the last N messages for a count that is not 25, 50, or 100", async () => {
+    const { engine, client } = setup();
+    const total = 20;
+    const count = 17;
+    client.events.push(
+      message({
+        id: "purge-cmd",
+        senderId: owner.id,
+        text: `!purge ${count}`,
+        createdAt: new Date(Date.UTC(2024, 3, 1) + total * 1000).toISOString(),
+      }),
+    );
+    for (let i = 0; i < total; i += 1) {
+      client.events.push(
+        message({
+          id: `bot-n-${i}`,
+          senderId: "bot-1",
+          text: `m${i}`,
+          createdAt: new Date(Date.UTC(2024, 3, 1) + i * 1000).toISOString(),
+        }),
+      );
+    }
+
+    await engine.processEvent(
+      message({ id: "purge-cmd", senderId: owner.id, text: `!purge ${count}` }),
+    );
+
+    const expected = Array.from({ length: count }, (_, index) => `bot-n-${total - 1 - index}`);
+    expect(client.deleted).toEqual(expected);
+    expect(client.deleted).not.toContain("bot-n-2");
+    expect(client.deleted).not.toContain("purge-cmd");
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 17 of 17\./);
+    expect(client.sent.at(-1)?.text).not.toMatch(/Capped at/);
+  });
+
   it("purges encrypted Chat with sequence ids and states the delete-for-all limit", async () => {
     const { engine, client, store } = setup();
     const chatId = "g2029561975647150382";
@@ -649,7 +684,8 @@ describe("ModerationEngine", () => {
     await engine.processEvent(message({ id: "purge-usage", senderId: owner.id, text: "!purge" }));
     await engine.processEvent(message({ id: "purge-bad", senderId: owner.id, text: "!purge nope" }));
     expect(client.sent[0]?.text).toMatch(/Usage: !purge <n>/);
-    expect(client.sent[1]?.text).toMatch(/up to 100/);
+    expect(client.sent[1]?.text).toMatch(/hard cap 100/);
+    expect(client.sent[1]?.text).toMatch(/how many of the last messages to delete/);
     expect(client.deleted).toEqual([]);
     expect(client.conversationListCalls).toHaveLength(0);
   });
@@ -658,7 +694,9 @@ describe("ModerationEngine", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).not.toMatch(/!purge/);
     expect(loaded.admin_help).toMatch(/!purge <n>/);
-    expect(loaded.admin_help).toMatch(/max 100/);
+    expect(loaded.admin_help).toMatch(/hard cap 100/);
+    expect(loaded.admin_help).toMatch(/the last n messages/);
+    expect(loaded.admin_help).toMatch(/not a fixed size/);
     expect(loaded.admin_help).toMatch(/this account's events only/);
   });
 

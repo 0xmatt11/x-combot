@@ -52,7 +52,7 @@ describe("parseCommand", () => {
     expect(parseCommand("!del not-an-id")).toBeUndefined();
   });
 
-  it("parses !purge counts and caps them", () => {
+  it("parses any !purge count, not only 25, 50, and 100", () => {
     expect(parseCommand("!purge 25")).toEqual({ name: "purge", count: 25 });
     expect(parseCommand("!purge 50")).toEqual({ name: "purge", count: 50 });
     expect(parseCommand("!purge 100")).toEqual({ name: "purge", count: 100 });
