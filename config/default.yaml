@@ -27,7 +27,7 @@ help: |
   Fun
   !troll @user — add them to this chat's troll list. More than one can be on it. !troll shows who is enabled. !untroll @user removes them
   !roast @user — one dunk. Does not turn on !troll
-  !linkroast on — two-paragraph brutal roast of any link or shared post, including Sent a post. No XP (!linkroast off)
+  !linkroast on — two-paragraph brutal roast of any link or shared post, including Sent a post. No XP (!linkroast off). Skips links replied to the bot or aimed at the bot
   !xp — your level. !top — leaderboard. Reply + or - on a message
 
   Chat

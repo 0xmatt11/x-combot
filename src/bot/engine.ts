@@ -43,6 +43,7 @@ import {
   linkroastFallback,
   messageHasRoastableLink,
   sanitizeLinkroastReply,
+  skipsLinkroastForBotContext,
   statusAuthorHandles,
 } from "./linkroast.js";
 import {
@@ -1370,6 +1371,7 @@ export class ModerationEngine {
    * Roast an unsolicited link while `!linkroast` is on in this conversation.
    * One reply per sender per cooldown. The bot's own messages never reach here.
    * A `!` or `/` command line is left to the command, even when it contains a URL.
+   * A reply to the bot, or a message aimed at the bot, is context and is not roasted.
    */
   private async linkroastIfSpam(
     event: DmEvent,
@@ -1382,6 +1384,18 @@ export class ModerationEngine {
     const text = event.text ?? "";
     if (!messageHasRoastableLink(event)) return;
     if (!this.store.isLinkroastEnabled(event.conversationId)) return;
+    if (
+      skipsLinkroastForBotContext({
+        text,
+        botUserId: this.config.botUserId,
+        botUsername: this.config.botUsername,
+        replySenderId: event.replyToSenderId ?? this.resolveReplyUserId(event),
+        mentions: event.mentions,
+        wakePrefixes: this.conversationConfig(event.conversationId).llmWakePrefixes,
+      })
+    ) {
+      return;
+    }
     const last = this.store.getLinkroastLastMs(event.conversationId, senderId);
     if (last !== undefined && nowMs - last < LINKROAST_COOLDOWN_MS) return;
 

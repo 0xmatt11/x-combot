@@ -256,7 +256,7 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | --- | --- |
 | `!troll @user` | Add them to this chat's troll list. `!troll` shows who is enabled. `!untroll @user` removes them. See [Troll mode](#troll-mode) |
 | `!roast @user` | One dunk. Does not turn on `!troll`. See [Roast](#roast) |
-| `!linkroast on` | Two-paragraph brutal roast of any link or shared post, no XP (`!linkroast off`). See [Link roast](#link-roast) |
+| `!linkroast on` | Two-paragraph brutal roast of any link or shared post, no XP (`!linkroast off`). Skips links replied to the bot or aimed at the bot. See [Link roast](#link-roast) |
 | `!xp` / `!top` | Your level, or the leaderboard. Reply `+` or `-` on a message. See [XP](#xp-and-levels) |
 
 **Chat**
@@ -615,6 +615,8 @@ While it is on, a message that contains any link gets a reply in the same chat. 
 A `!` or `/` command line is not roasted. `!ask https://example.com/...` and `!rules` stay commands. The roast is for an unsolicited link, not for a bang that happens to include one.
 
 A shared X post counts when the payload names it, even if the text has no URL. That is the chat "Sent a post" card: the push line is `Name: Sent a post`, the message text is empty, and the client draws the tweet preview itself. chat-xdk decrypts that as a text message with a post attachment. The post lives in two places, and either one is enough: `content.attachments` is `{ post: { restId, postUrl } }`, and the event's `attachments` list is `{ attachmentType: "post", restId, postUrl }`. `restId` alone counts. The preview is hydrated on the receiving client, so the ciphertext often has no `http` URL at all. A `url` card (`attachmentType: "url"`) counts the same way. A url entity that carries its own URL is included too. Classic `GET /2/dm_events` puts the same idea on `entities.urls` (`url`, `expanded_url`, `display_url`) and `referenced_tweets[].id`. A photo, video, GIF, or other media attachment is not a link. Activity only delivers the encrypted event, so the words "Sent a post" are not in the payload. A native share that arrives with no URL, no post id, and no url or post card is not visible to the bot, so that message stays quiet.
+
+Link roast skips links replied to the bot or aimed at the bot. A reply to a bot message is skipped, including a "Sent a post" share whose parent is the bot. So is a message that mentions the bot's @handle, or is addressed the same way `!ask` and `@bot` are. A link that is neither a reply to the bot nor aimed at the bot is still roasted. Cooldown, on/off, and the two-paragraph roast stay as they are.
 
 The reply is a two-paragraph brutal roast of that person for dropping an unsolicited link or shared post. It is meaner and sharper than a one-line jab: degrading comedy, not a threat, with no slurs and no encouragement of self-harm. It does not mention minors, print a numeric API user id or a URL, or end with XP, points, or any score suffix.
 

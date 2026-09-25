@@ -18,7 +18,9 @@
 import type { ChatMessage } from "../llm/client.js";
 import type { LinkSignals } from "../types.js";
 import { containsBannedAgeTerm } from "./adult-filter.js";
+import { parseLlmWake } from "./parser.js";
 import { stripApiIds } from "./troll.js";
+import { handlesInText } from "./user-context.js";
 
 /** At most one link roast per user per conversation inside this window. */
 export const LINKROAST_COOLDOWN_MS = 45_000;
@@ -99,6 +101,66 @@ export function messageHasRoastableLink(event: {
     if (isStatusId(id)) return true;
   }
   return false;
+}
+
+/**
+ * A link or shared post is context for the bot, not an unsolicited promo.
+ * True when the message replies to the bot account, or when it is aimed at
+ * the bot the same way `!ask` / `@bot` are: a wake prefix, or a mention of
+ * the bot's @handle (or an `@` wake such as `@bot`) anywhere in the text.
+ */
+export function skipsLinkroastForBotContext(input: {
+  text?: string | null;
+  botUserId?: string;
+  botUsername?: string;
+  replySenderId?: string;
+  mentions?: readonly { username: string; id?: string }[];
+  wakePrefixes?: readonly string[];
+}): boolean {
+  const botId = input.botUserId?.trim();
+  const replyId = input.replySenderId?.trim();
+  if (botId && replyId === botId) return true;
+
+  const wakePrefixes = [...(input.wakePrefixes ?? [])];
+  const mentions = input.mentions?.map((mention) => ({
+    username: mention.username,
+    id: mention.id,
+  }));
+  if (
+    parseLlmWake(input.text, {
+      botUsername: input.botUsername,
+      botUserId: input.botUserId,
+      wakePrefixes,
+      mentions,
+    })
+  ) {
+    return true;
+  }
+
+  const addressed = botAddressHandles(input.botUsername, wakePrefixes);
+  if (addressed.size === 0 && !botId) return false;
+  for (const mention of mentions ?? []) {
+    if (botId && mention.id === botId) return true;
+    const name = mention.username.replace(/^@/, "").toLowerCase();
+    if (name && addressed.has(name)) return true;
+  }
+  for (const handle of handlesInText(input.text ?? undefined)) {
+    if (addressed.has(handle.toLowerCase())) return true;
+  }
+  return false;
+}
+
+function botAddressHandles(botUsername: string | undefined, wakePrefixes: readonly string[]): Set<string> {
+  const handles = new Set<string>();
+  const username = botUsername?.trim().replace(/^@/, "").toLowerCase();
+  if (username) handles.add(username);
+  for (const prefix of wakePrefixes) {
+    const trimmed = prefix.trim();
+    if (!trimmed.startsWith("@")) continue;
+    const handle = trimmed.slice(1).trim().toLowerCase();
+    if (handle) handles.add(handle);
+  }
+  return handles;
 }
 
 export function linkroastFallback(label: string, rng: () => number): string {
