@@ -593,24 +593,18 @@ When the clip is ready, encrypted Chat uploads the mp4 the same way as a photo (
 
 ## Voice
 
-`!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice girl1 hello there` or `!voice 10 hello there`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text. Old names such as `dude`, `guy`, and `regular` show that menu too.
+`!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice girl1 hello there` or `!voice 10 hello there`. A number from 1 to 10 selects the same voice as `girl1` through `girl10`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text.
 
-Girl 1 is a mild whisper. Each later girl adds breath, pitch, pace, or intensity. Girl 10 is the peak: gasping breaths around a loud, fast, high, building delivery. The tags wrap the line. They do not add words.
-
-| # | Persona | Aliases | Built-in `voice_id` | Delivery |
-| --- | --- | --- | --- | --- |
-| 1 | Girl 1 | `girl1`, `1` | `ara` (warm and friendly) | `<whisper>` |
-| 2 | Girl 2 | `girl2`, `2` | `eve` (energetic and upbeat) | `[breath]` plus `<whisper>` and `<higher-pitch>` |
-| 3 | Girl 3 | `girl3`, `3` | `ara` | `[sigh]` `[breath]` plus `<whisper>`, `<slow>`, and `<higher-pitch>` |
-| 4 | Girl 4 | `girl4`, `4` | `eve` | `[inhale]` `[sigh]` `[breath]` plus `<whisper>`, `<slow>`, and `<higher-pitch>` |
-| 5 | Girl 5 | `girl5`, `5` | `ara` | Girl 4's tags plus `<emphasis>` |
-| 6 | Girl 6 | `girl6`, `6` | `eve` | `[inhale]` `[sigh]` `[breath]` plus `<whisper>`, `<higher-pitch>`, and `<build-intensity>` |
-| 7 | Girl 7 | `girl7`, `7` | `ara` | those breaths plus `[exhale]`, `<higher-pitch>`, `<fast>`, and `<build-intensity>` |
-| 8 | Girl 8 | `girl8`, `8` | `eve` | Girl 7's tags plus `<loud>` |
-| 9 | Girl 9 | `girl9`, `9` | `ara` | an extra `[breath]`, then `<loud>`, `<higher-pitch>`, `<fast>`, and `<build-intensity>` |
-| 10 | Girl 10 | `girl10`, `10` | `eve` | two breath cycles, then `<loud>`, `<fast>`, `<higher-pitch>`, `<build-intensity>`, and `<emphasis>` |
-
-Those tags are xAI speech tags. They change delivery and do not add words to the line. The docs have no moan tag, so the heavier girls use breath, sigh, inhale, and exhale. Girls share `ara` and `eve`. `rex`, `sal`, and `leo` are not used. Older names still work: `sexy` and `sexygirl` are Girl 1, `scared` and `scaredgirl` are Girl 2, and `horny` and `hornygirl` are Girl 6. `2` is Girl 2.
+1. Girl 1 — `!voice girl1 <text>`
+2. Girl 2 — `!voice girl2 <text>`
+3. Girl 3 — `!voice girl3 <text>`
+4. Girl 4 — `!voice girl4 <text>`
+5. Girl 5 — `!voice girl5 <text>`
+6. Girl 6 — `!voice girl6 <text>`
+7. Girl 7 — `!voice girl7 <text>`
+8. Girl 8 — `!voice girl8 <text>`
+9. Girl 9 — `!voice girl9 <text>`
+10. Girl 10 — `!voice girl10 <text>`
 
 The bot waits for the clip and posts it in one reply that tags the requester and, in encrypted Chat, replies to the command. The audio caption is only that `@handle`. Synthesis is usually a few seconds, so there is no separate "Speaking…" line. It uses an xAI key (`XAI_API_KEY`, or the grok LLM key stack). With no key the bot says voice needs `XAI_API_KEY`. Browser Imagine does not move `!voice` off that API. It does not use image search, the adult-command switch, or the adult rate limit, and it stays available when `!boobs` is off.
 

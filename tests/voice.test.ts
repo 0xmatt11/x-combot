@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { IMAGINE_REFUSED_MESSAGE } from "../src/bot/imagine.js";
@@ -84,12 +85,15 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("robot hello")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("sexy")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("teen portrait")).toEqual({ ok: false, reason: "refused" });
-    expect(VOICE_MENU_MESSAGE).toMatch(/Pick a voice, then your line:/);
-    for (let n = 1; n <= 10; n += 1) {
-      expect(VOICE_MENU_MESSAGE).toMatch(new RegExp(`${n}\\. Girl ${n} — !voice girl${n} <text>`));
-    }
-    expect(VOICE_MENU_MESSAGE).not.toMatch(/11\.|regular dude|!voice dude/);
-    expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared|\bdude\b|\bguy\b|\brex\b/i);
+    expect(VOICE_MENU_MESSAGE).toBe(
+      [
+        "Pick a voice, then your line:",
+        ...Array.from({ length: 10 }, (_, index) => {
+          const n = index + 1;
+          return `${n}. Girl ${n} — !voice girl${n} <text>`;
+        }),
+      ].join("\n"),
+    );
     expect(DEFAULT_VOICE_LANGUAGE).toBe("en");
   });
 
@@ -521,9 +525,18 @@ describe("!voice command", () => {
     expect(loaded.help).toMatch(/!voice/);
     expect(loaded.help).toMatch(/Girl 1 through Girl 10/);
     expect(loaded.help).not.toMatch(/regular dude|\bdude\b|\bguy\b|\brex\b/i);
-    expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
+    expect(loaded.help).not.toMatch(/horny|sexy|scared|orgasm|moan|whisper|intensity|breath/i);
     expect(loaded.help).not.toMatch(/1500/);
     expect(loaded.welcome.text).not.toMatch(/1500/);
+
+    const readme = fs.readFileSync("README.md", "utf8");
+    const voice = readme.split("## Voice")[1]?.split("## Troll")[0] ?? "";
+    expect(voice.length).toBeGreaterThan(0);
+    for (let n = 1; n <= 10; n += 1) {
+      expect(voice).toContain(`${n}. Girl ${n} —`);
+      expect(voice).toContain(`!voice girl${n} <text>`);
+    }
+    expect(voice).not.toMatch(/horny|sexy|scared|orgasm|moan|whisper|intensity|breath|sigh|dude|guy|\brex\b/i);
   });
 
   it("posts the client error line and does not include the API payload", async () => {
