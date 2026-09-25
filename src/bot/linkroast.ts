@@ -19,6 +19,7 @@ import type { ChatMessage } from "../llm/client.js";
 import { CHAT_COPY_RULE } from "./user-copy.js";
 import type { LinkSignals } from "../types.js";
 import { containsBannedAgeTerm } from "./adult-filter.js";
+import { parseLlmWake } from "./parser.js";
 import { stripApiIds } from "./troll.js";
 
 /** At most one link roast per user per conversation inside this window. */
@@ -101,6 +102,52 @@ export function messageHasRoastableLink(event: {
     if (isStatusId(id)) return true;
   }
   return false;
+}
+
+/**
+ * Link-roast only. A link or shared post is context for the bot, not an
+ * unsolicited promo.
+ *
+ * A trusted reply to the bot account counts. So does a message directed at
+ * the bot: it starts with the same wake `!ask` uses (`@botname`, `@bot`,
+ * `!ask`), or it @mentions the bot's handle.
+ */
+export function skipsLinkroastForBotContext(input: {
+  text?: string | null;
+  botUserId?: string;
+  botUsername?: string;
+  replySenderId?: string;
+  mentions?: readonly { username: string; id?: string }[];
+  wakePrefixes?: readonly string[];
+}): boolean {
+  const botId = input.botUserId?.trim();
+  const replyId = input.replySenderId?.trim();
+  if (botId && replyId === botId) return true;
+
+  const mentions = input.mentions?.map((mention) => ({
+    username: mention.username,
+    id: mention.id,
+  }));
+  if (
+    parseLlmWake(input.text, {
+      botUsername: input.botUsername,
+      botUserId: input.botUserId,
+      wakePrefixes: [...(input.wakePrefixes ?? [])],
+      mentions,
+    })
+  ) {
+    return true;
+  }
+
+  const handle = input.botUsername?.trim().replace(/^@/, "").toLowerCase();
+  for (const mention of mentions ?? []) {
+    if (botId && mention.id === botId) return true;
+    const name = mention.username.replace(/^@/, "").toLowerCase();
+    if (handle && name === handle) return true;
+  }
+  if (!handle || !input.text) return false;
+  const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`@${escaped}\\b`, "i").test(input.text);
 }
 
 export function linkroastFallback(label: string, rng: () => number): string {

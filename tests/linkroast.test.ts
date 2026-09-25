@@ -659,6 +659,105 @@ describe("link roast mode", () => {
     expect(client.sent.at(-1)?.text).toBe(FIRST_FALLBACK);
   });
 
+  it("does not roast a link or Sent a post replied to the bot", async () => {
+    const llm = new MockLlmClient(asTwoParagraphs("@alice should not be used"));
+    const { engine, client, store } = setup(llm);
+    await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
+    const start = 11_000_000;
+
+    await engine.processEvent(
+      message({
+        id: "reply-url",
+        senderId: alice.id,
+        text: "following up https://x.com/alice/status/11",
+        replyToSenderId: "bot-1",
+      }),
+      start,
+    );
+    await engine.processEvent(
+      message({
+        id: "reply-share",
+        senderId: alice.id,
+        text: "",
+        replyToSenderId: "bot-1",
+        linkSignals: { urls: [], statusIds: [snowflake] },
+      }),
+      start + 1_000,
+    );
+    await engine.processEvent(
+      message({
+        id: "reply-preview",
+        senderId: bob.id,
+        text: "https://example.com/from-preview",
+        replyTo: { senderId: "bot-1", verified: true },
+      }),
+      start + 1_000,
+    );
+
+    expect(llm.calls).toHaveLength(0);
+    expect(store.getLinkroastLastMs(groupId, alice.id)).toBeUndefined();
+    expect(store.getLinkroastLastMs(groupId, bob.id)).toBeUndefined();
+    expect(client.sent).toHaveLength(1);
+    expect(client.sent[0]?.text).toBe(`@alice ${LINKROAST_ON_ACK}`);
+  });
+
+  it("does not roast a link aimed at the bot", async () => {
+    const llm = new MockLlmClient("This is the ask answer.");
+    const { engine, client, store } = setup(llm);
+    await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
+    const start = 12_000_000;
+    const roastCalls = () =>
+      llm.calls.filter((call) =>
+        call.some((row) => row.content.includes("You write a brutal roast")),
+      );
+
+    await engine.processEvent(
+      message({
+        id: "at-bot",
+        senderId: alice.id,
+        text: "@bot what is this https://example.com/story",
+      }),
+      start,
+    );
+    await engine.processEvent(
+      message({
+        id: "at-handle",
+        senderId: bob.id,
+        text: "look at this https://news.example.com/a @modbot",
+        mentions: [{ username: "modbot" }],
+      }),
+      start,
+    );
+
+    expect(roastCalls()).toHaveLength(0);
+    expect(store.getLinkroastLastMs(groupId, alice.id)).toBeUndefined();
+    expect(store.getLinkroastLastMs(groupId, bob.id)).toBeUndefined();
+    expect(client.sent.some((row) => row.text.includes("This is the ask answer."))).toBe(true);
+    expect(client.sent.some((row) => row.text === FIRST_FALLBACK)).toBe(false);
+    expect(client.sent.some((row) => row.text.includes(snowflake))).toBe(false);
+  });
+
+  it("still roasts a plain link from a user", async () => {
+    const roast = asTwoParagraphs("@alice plain link stays.");
+    const llm = new MockLlmClient(roast);
+    const { engine, client } = setup(llm);
+    await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
+    await engine.processEvent(
+      message({
+        id: "plain",
+        senderId: alice.id,
+        text: "https://example.com/unsolicited",
+      }),
+      13_000_000,
+    );
+    expect(client.sent.map((row) => row.text)).toEqual([
+      `@alice ${LINKROAST_ON_ACK}`,
+      roast,
+    ]);
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0]?.[0]?.content).toContain("You write a brutal roast");
+  });
+
   it("is listed in the default help text and the readme command table", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!linkroast on/);
@@ -666,6 +765,7 @@ describe("link roast mode", () => {
     expect(loaded.help).toMatch(/Sent a post/);
     expect(loaded.help).toMatch(/two-paragraph brutal roast/);
     expect(loaded.help).toMatch(/No XP/);
+    expect(loaded.help).toMatch(/Skips links replied to the bot or aimed at the bot/);
     const readme = fs.readFileSync("README.md", "utf8");
     expect(readme).toMatch(
       /\| `!linkroast on` \| Two-paragraph brutal roast of any link or shared post, no XP/,
@@ -674,6 +774,7 @@ describe("link roast mode", () => {
     expect(readme).toMatch(/no XP/);
     expect(readme).toMatch(/canned two-paragraph roast instead, also with no XP/);
     expect(readme).toMatch(/Sent a post/);
+    expect(readme).toMatch(/skips links replied to the bot or aimed at the bot/i);
     expect(readme).toMatch(/t\.co/);
     expect(readme).toMatch(/referenced_tweets/);
   });
