@@ -108,6 +108,10 @@ class FakeCipher implements ChatCipher {
     return plaintext;
   }
 
+  decryptStream(ciphertext: Uint8Array, _conversationKey: Uint8Array): Uint8Array {
+    return ciphertext;
+  }
+
   prepareMessageDelete(_conversationId: string, sequenceIds: string[]) {
     this.deleted.push(sequenceIds);
     return {
@@ -220,6 +224,10 @@ class FakeHttp implements ChatHttp {
 
   async uploadChatMedia(_conversationId: string, ciphertext: Uint8Array) {
     return `media-hash-${ciphertext.byteLength}`;
+  }
+
+  async downloadChatMedia(_conversationId: string, _mediaHashKey: string): Promise<Uint8Array> {
+    return new Uint8Array();
   }
 }
 
@@ -1254,6 +1262,33 @@ describe("ChatService.sendImage", () => {
     expect(attachment.width).toBe(1);
     expect(attachment.height).toBe(1);
     expect(result).toEqual({ dmEventId: "mid-aud", dmConversationId: "g1" });
+  });
+
+  it("decrypts an inbound photo with the message key, and fails closed on a later key", async () => {
+    const cipher = new FakeCipher();
+    const key3 = new Uint8Array(32).fill(3);
+    const key7 = new Uint8Array(32).fill(7);
+    cipher.conversationKeys = { keys: { "3": key3, "7": key7 }, latestVersion: "7" };
+    cipher.events.set("blob", { type: "message", id: "e1", content: { text: "hi" } });
+    const seen: number[] = [];
+    cipher.decryptStream = (ciphertext, key) => {
+      seen.push(key[0] ?? -1);
+      if (key[0] !== 3) throw new Error("wrong key");
+      return ciphertext;
+    };
+    const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0x00, 0x11]);
+    const http = new FakeHttp();
+    http.pages.push(page("blob"));
+    http.downloadChatMedia = async () => jpeg;
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    await service.listHistory({ conversationId: GROUP });
+    const opened = await service.openInboundImage(GROUP, "hash-1", "3");
+    const fallback = await service.openInboundImage(GROUP, "hash-1", "9");
+    store.close();
+    expect(opened).toEqual({ bytes: jpeg, mimeType: "image/jpeg" });
+    expect(fallback).toBeUndefined();
+    expect(seen).toEqual([3, 7]);
   });
 });
 

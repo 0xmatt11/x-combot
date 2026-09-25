@@ -100,6 +100,15 @@ CREATE TABLE IF NOT EXISTS boobs_rate (
 CREATE INDEX IF NOT EXISTS idx_boobs_rate
   ON boobs_rate (conversation_id, user_id, ts_ms);
 
+CREATE TABLE IF NOT EXISTS image_vision_rate (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_vision_rate
+  ON image_vision_rate (conversation_id, user_id, ts_ms);
+
 CREATE TABLE IF NOT EXISTS chat_message_index (
   event_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
@@ -630,6 +639,43 @@ export class Store {
       )
       .get(conversationId, since) as { count: number };
     return { userUses: userRow.count, conversationUses: convoRow.count };
+  }
+
+  /** Uses already recorded inside the window. Does not insert. */
+  imageVisionUses(
+    conversationId: string,
+    userId: string,
+    sinceMs: number,
+  ): { userUses: number; conversationUses: number } {
+    const userRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM image_vision_rate
+         WHERE conversation_id = ? AND user_id = ? AND ts_ms >= ?`,
+      )
+      .get(conversationId, userId, sinceMs) as { count: number };
+    const convoRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM image_vision_rate
+         WHERE conversation_id = ? AND ts_ms >= ?`,
+      )
+      .get(conversationId, sinceMs) as { count: number };
+    return { userUses: userRow.count, conversationUses: convoRow.count };
+  }
+
+  recordImageVisionUse(
+    conversationId: string,
+    userId: string,
+    tsMs: number,
+    windowMs: number,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO image_vision_rate (conversation_id, user_id, ts_ms) VALUES (?, ?, ?)",
+      )
+      .run(conversationId, userId, tsMs);
+    this.db
+      .prepare("DELETE FROM image_vision_rate WHERE ts_ms < ?")
+      .run(tsMs - windowMs);
   }
 
   rememberMessageAuthor(conversationId: string, messageKey: string, senderId: string): void {

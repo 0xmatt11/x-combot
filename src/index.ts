@@ -1,5 +1,10 @@
 import fs from "node:fs";
-import { loadDefaults, normalizeBoobsConfig, normalizeXpConfig } from "./config.js";
+import {
+  loadDefaults,
+  normalizeBoobsConfig,
+  normalizeImageVisionConfig,
+  normalizeXpConfig,
+} from "./config.js";
 import { loadEnv, type Env } from "./env.js";
 import { log } from "./log.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
@@ -87,6 +92,26 @@ async function main(): Promise<void> {
   }
   if (env.xpEnabled !== undefined) {
     defaults.xp = normalizeXpConfig({ ...defaults.xp, enabled: env.xpEnabled });
+  }
+  if (
+    env.imageVisionEnabled !== undefined ||
+    env.imageVisionRateLimitPerUser !== undefined ||
+    env.imageVisionRateLimitPerConversation !== undefined ||
+    env.imageVisionRateLimitWindowMs !== undefined
+  ) {
+    defaults.image_vision = normalizeImageVisionConfig({
+      ...defaults.image_vision,
+      ...(env.imageVisionEnabled !== undefined ? { enabled: env.imageVisionEnabled } : {}),
+      ...(env.imageVisionRateLimitPerUser !== undefined
+        ? { rate_limit_per_user: env.imageVisionRateLimitPerUser }
+        : {}),
+      ...(env.imageVisionRateLimitPerConversation !== undefined
+        ? { rate_limit_per_conversation: env.imageVisionRateLimitPerConversation }
+        : {}),
+      ...(env.imageVisionRateLimitWindowMs !== undefined
+        ? { rate_limit_window_ms: env.imageVisionRateLimitWindowMs }
+        : {}),
+    });
   }
   const searchProvider = env.boobsSearchProvider ?? "duckduckgo";
   const imagineKey = resolveImagineApiKey(env);
@@ -204,6 +229,16 @@ async function main(): Promise<void> {
       "BOOBS_VISION is on but no vision-capable LLM is configured. !boobs, !ass, and !booty will ask the user to retry until one is set.",
     );
   }
+  const imageVision = normalizeImageVisionConfig(defaults.image_vision);
+  if (defaults.llm?.enabled && imageVision.enabled) {
+    if (llmClient?.completeVision) {
+      log.info(
+        `Photo posts get a vision reply (${imageVision.rate_limit_per_user}/user, ${imageVision.rate_limit_per_conversation}/conversation, ${imageVision.rate_limit_window_ms}ms). Understand only; no image or video generation.`,
+      );
+    } else {
+      log.info("Photo vision is configured but no vision-capable LLM is set. Photo posts stay quiet.");
+    }
+  }
   const botUserId = env.botUserId ?? me.id;
   const identityPresent = Boolean(env.chatPin) || fs.existsSync(env.chatKeysPath);
   let listen = resolveChatListen({
@@ -245,6 +280,17 @@ async function main(): Promise<void> {
             completeVision: (prompt, image) => llmClient.completeVision!(prompt, image),
           })
         : undefined,
+      fetchInboundImage: async (image, context) => {
+        if (image.mediaHashKey && chatService) {
+          return chatService.openInboundImage(
+            context.conversationId,
+            image.mediaHashKey,
+            context.keyVersion,
+          );
+        }
+        if (image.url) return client.downloadImageUrl(image.url);
+        return undefined;
+      },
       health,
       publicKeys: chatService,
       llmMode: llm.mode,

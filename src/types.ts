@@ -55,6 +55,23 @@ export interface XpConfig {
   leaderboard_size: number;
 }
 
+export interface ImageVisionConfig {
+  /**
+   * When true, a photo posted in an authorized chat gets a short vision reply
+   * if the LLM is also on. `IMAGE_VISION_ENABLED` overrides this at startup.
+   */
+  enabled: boolean;
+  /** Uses allowed per user inside the window. `0` means unlimited. */
+  rate_limit_per_user: number;
+  /** Uses allowed per conversation inside the window. `0` means unlimited. */
+  rate_limit_per_conversation: number;
+  /**
+   * Window for the limits above. `0` means no window, so a positive count
+   * is not enforced.
+   */
+  rate_limit_window_ms: number;
+}
+
 export interface BoobsConfig {
   /** Off unless set. `BOOBS_ENABLED` overrides this at startup. */
   enabled: boolean;
@@ -124,6 +141,8 @@ export interface DefaultsConfig {
   activity?: ActivityConfig;
   boobs?: BoobsConfig;
   xp?: XpConfig;
+  /** Photo posts. Off when the LLM is off, even if this block is enabled. */
+  image_vision?: ImageVisionConfig;
 }
 
 export type ActivityTransport = "stream" | "webhook" | "both";
@@ -205,6 +224,10 @@ export interface ResolvedConversationConfig {
   xpLevelGrantEnabled: boolean;
   xpLevelGrantCooldownMs: number;
   xpLeaderboardSize: number;
+  imageVisionEnabled: boolean;
+  imageVisionRateLimitPerUser: number;
+  imageVisionRateLimitPerConversation: number;
+  imageVisionRateLimitWindowMs: number;
 }
 
 export interface BotRuntimeConfig {
@@ -283,6 +306,31 @@ export interface DmEvent {
    * `processed_events` records these so a later catch-up does not run the command again.
    */
   aliasIds?: string[];
+  /**
+   * Photo or GIF the sender attached. Video and audio are omitted.
+   * Bytes are filled by tests or a loader. A Chat hash or classic URL is fetched later.
+   */
+  images?: InboundImage[];
+  /**
+   * Conversation-key version for this Chat message.
+   * `decryptStream` uses it for an attached photo.
+   */
+  keyVersion?: string;
+}
+
+/**
+ * One inbound photo or GIF the bot can try to understand.
+ * Do not log `url` (CDN links can carry signatures) or `bytes`.
+ */
+export interface InboundImage {
+  kind: "photo" | "gif";
+  /** Classic DM https URL from the media expansion. */
+  url?: string;
+  /** Encrypted Chat media hash. Download ciphertext, then `decryptStream`. */
+  mediaHashKey?: string;
+  /** Plaintext already in hand (tests, or a loader). */
+  bytes?: Uint8Array;
+  mimeType?: string;
 }
 
 /** Extra context for delete. Classic DM ignores it; Chat uses the sequence id. */

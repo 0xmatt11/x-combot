@@ -26,6 +26,14 @@ export interface DecryptedEvent {
    */
   replyPreviewValidation?: string;
   reply_preview_validation?: string;
+  /**
+   * Conversation-key version this message was encrypted under.
+   * Media decrypt picks this version, not "whatever key we sent with last".
+   */
+  keyVersion?: string | number | null;
+  key_version?: string | number | null;
+  /** Decrypted attachment list. Some builds put photos here instead of `content`. */
+  attachments?: unknown;
   content?: {
     contentType?: string;
     /** WASM decrypt uses snake_case for this discriminator. */
@@ -38,6 +46,8 @@ export interface DecryptedEvent {
     replyingToPreview?: unknown;
     /** WASM decrypt uses snake_case for the preview object. */
     replying_to_preview?: unknown;
+    /** Inline photos. `media_type` omitted means an image. */
+    attachments?: unknown;
   };
   changeType?: string;
   memberIds?: string[];
@@ -158,6 +168,11 @@ export interface ChatCipher {
   encryptReply(conversationId: string, text: string, options?: EncryptReplyOptions): SendPayload;
   /** Streaming encrypt for Chat media (`encryptStream` / secretstream). */
   encryptStream(plaintext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
+  /**
+   * Inverse of `encryptStream`. Inbound Chat photos are ciphertext until this runs.
+   * Optional so a cipher that only sends media still typechecks.
+   */
+  decryptStream?(ciphertext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
   prepareMessageDelete(
     conversationId: string,
     sequenceIds: string[],

@@ -35,6 +35,7 @@ help: |
   !ask <question> — ask the bot
   !summarize — recap this chat
   !analyze — ask about this chat
+  Photos — a short look when the chat model is on
 
   Media
   !imagine <prompt> — image on grok.com/imagine
@@ -200,4 +201,18 @@ llm:
     Be concise and practical. You cannot kick or ban people on X — the public
     API has no remove-participant endpoint. Do not invent X API capabilities.
     When using conversation context, stick to what appears in the thread.
+
+# Photo posts in an authorized chat. On when the LLM is on. A picture (with or
+# without a caption that is not a bang command) gets a short vision reply.
+# The reply @mentions the poster and, in encrypted Chat, replies to their message.
+# This is the same Chat Completions vision call the adult-image check uses.
+# It does not call api.x.ai image or video generation. The bot does not describe
+# its own pictures. Bang commands, including games, keep their own path.
+# Caps: 0 is unlimited. A positive count applies only when the window is also
+# positive. IMAGE_VISION_ENABLED and IMAGE_VISION_RATE_LIMIT_* override these.
+image_vision:
+  enabled: true
+  rate_limit_per_user: 4
+  rate_limit_per_conversation: 12
+  rate_limit_window_ms: 600000
 

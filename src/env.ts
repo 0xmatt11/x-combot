@@ -56,6 +56,15 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
+function optionalNonNegativeInt(name: string): number | undefined {
+  const value = optionalNumber(name);
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
 function optionalAdultImageProvider(name: string): AdultImageProviderName | undefined {
   const value = optional(name);
   if (!value) return undefined;
@@ -300,6 +309,14 @@ export interface Env {
   boobsVision?: boolean;
   /** Overrides `xp.enabled` in YAML when set. */
   xpEnabled?: boolean;
+  /** Overrides `image_vision.enabled`. Photo replies also require the LLM. */
+  imageVisionEnabled?: boolean;
+  /** Overrides `image_vision.rate_limit_per_user`. `0` is unlimited. */
+  imageVisionRateLimitPerUser?: number;
+  /** Overrides `image_vision.rate_limit_per_conversation`. `0` is unlimited. */
+  imageVisionRateLimitPerConversation?: number;
+  /** Overrides `image_vision.rate_limit_window_ms`. `0` disables the caps. */
+  imageVisionRateLimitWindowMs?: number;
   /** `duckduckgo` (default, no key; aliases `ddg` / `ddgs`), `reddit`, `serpapi`, or `bing`. */
   boobsSearchProvider?: "duckduckgo" | "reddit" | "serpapi" | "bing";
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
@@ -416,6 +433,12 @@ export function loadEnv(requireOwner = true): Env {
     boobsEnabled: optionalBool("BOOBS_ENABLED"),
     boobsVision: optionalBool("BOOBS_VISION"),
     xpEnabled: optionalBool("XP_ENABLED"),
+    imageVisionEnabled: optionalBool("IMAGE_VISION_ENABLED"),
+    imageVisionRateLimitPerUser: optionalNonNegativeInt("IMAGE_VISION_RATE_LIMIT_PER_USER"),
+    imageVisionRateLimitPerConversation: optionalNonNegativeInt(
+      "IMAGE_VISION_RATE_LIMIT_PER_CONVERSATION",
+    ),
+    imageVisionRateLimitWindowMs: optionalNonNegativeInt("IMAGE_VISION_RATE_LIMIT_WINDOW_MS"),
     boobsSearchProvider: optionalBoobsProvider("BOOBS_SEARCH_PROVIDER"),
     boobsSearchApiKey: optional("BOOBS_SEARCH_API_KEY"),
     boobsImageProvider: optionalAdultImageProvider("BOOBS_IMAGE_PROVIDER"),

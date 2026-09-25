@@ -7,6 +7,7 @@ import type {
   BoobsConfig,
   ConversationSettings,
   DefaultsConfig,
+  ImageVisionConfig,
   LeaveConfig,
   LlmAllow,
   LlmConfig,
@@ -36,6 +37,13 @@ export const DEFAULT_XP_CONFIG: XpConfig = {
   level_grant_enabled: true,
   level_grant_cooldown_ms: 3_600_000,
   leaderboard_size: 10,
+};
+
+export const DEFAULT_IMAGE_VISION_CONFIG: ImageVisionConfig = {
+  enabled: true,
+  rate_limit_per_user: 4,
+  rate_limit_per_conversation: 12,
+  rate_limit_window_ms: 600_000,
 };
 
 export const DEFAULT_BOOBS_CONFIG: BoobsConfig = {
@@ -89,6 +97,7 @@ export function loadDefaults(configPath: string): DefaultsConfig {
     : DEFAULT_LLM_CONFIG.wake_prefixes;
   parsed.boobs = normalizeBoobsConfig(parsed.boobs);
   parsed.xp = normalizeXpConfig(parsed.xp);
+  parsed.image_vision = normalizeImageVisionConfig(parsed.image_vision);
   return parsed;
 }
 
@@ -100,6 +109,7 @@ export function resolveConversationConfig(
   const boobs = normalizeBoobsConfig(defaults.boobs);
   const leave = normalizeLeaveConfig(defaults.leave);
   const xp = normalizeXpConfig(defaults.xp);
+  const imageVision = normalizeImageVisionConfig(defaults.image_vision);
   return {
     welcomeEnabled: override?.welcome_enabled ?? defaults.welcome.enabled,
     welcomeText: override?.welcome_text ?? defaults.welcome.text,
@@ -146,6 +156,10 @@ export function resolveConversationConfig(
     xpLevelGrantEnabled: xp.level_grant_enabled,
     xpLevelGrantCooldownMs: xp.level_grant_cooldown_ms,
     xpLeaderboardSize: xp.leaderboard_size,
+    imageVisionEnabled: imageVision.enabled,
+    imageVisionRateLimitPerUser: imageVision.rate_limit_per_user,
+    imageVisionRateLimitPerConversation: imageVision.rate_limit_per_conversation,
+    imageVisionRateLimitWindowMs: imageVision.rate_limit_window_ms,
   };
 }
 
@@ -184,6 +198,26 @@ export function normalizeLeaveConfig(raw: Partial<LeaveConfig> | undefined): Lea
     enabled: raw?.enabled ?? DEFAULT_LEAVE_CONFIG.enabled,
     text: text ? raw?.text ?? DEFAULT_LEAVE_CONFIG.text : DEFAULT_LEAVE_CONFIG.text,
   };
+}
+
+export function normalizeImageVisionConfig(
+  raw: Partial<ImageVisionConfig> | undefined,
+): ImageVisionConfig {
+  const merged: ImageVisionConfig = { ...DEFAULT_IMAGE_VISION_CONFIG, ...raw };
+  merged.enabled = merged.enabled !== false;
+  merged.rate_limit_per_user = nonNegativeLimit(
+    merged.rate_limit_per_user,
+    DEFAULT_IMAGE_VISION_CONFIG.rate_limit_per_user,
+  );
+  merged.rate_limit_per_conversation = nonNegativeLimit(
+    merged.rate_limit_per_conversation,
+    DEFAULT_IMAGE_VISION_CONFIG.rate_limit_per_conversation,
+  );
+  merged.rate_limit_window_ms = nonNegativeLimit(
+    merged.rate_limit_window_ms,
+    DEFAULT_IMAGE_VISION_CONFIG.rate_limit_window_ms,
+  );
+  return merged;
 }
 
 export function normalizeBoobsConfig(raw: Partial<BoobsConfig> | undefined): BoobsConfig {

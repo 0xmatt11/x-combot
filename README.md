@@ -15,6 +15,7 @@ Telegram's ComBot can kick and delete anyone's messages because Telegram exposes
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
 - `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one).
 - `!voice <persona> <text>` speaks that line as Girl 1, regular dude, Girl 2, or Girl 3 and posts an audio attachment in encrypted Chat. Bare `!voice` lists those four. Classic group DMs get a short note that Chat is required.
+- A photo in an authorized chat gets a short vision reply when the chat model is on. A caption is part of that reply. Bang commands keep their own path. This does not call image or video generation.
 - Encrypted groups: decrypt with [chat-xdk](https://github.com/xdevplatform/chat-xdk), reply with an encrypted payload, and (when opted in) take `chat.received` from the X Activity API.
 - With a Chat identity and no allowlist, it **tracks** every encrypted group the account is in, including groups it is added to later. A group first seen after this rule stays quiet until `BOT_OWNER_ID` sends `!auth` in that chat. Groups that already had a Chat watermark are grandfathered and keep being moderated.
 
@@ -265,6 +266,9 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | `!summarize` | Recap this chat |
 | `!analyze` | Ask about this chat |
 | `!<made-up>` | Short LLM joke when the model is on. Real commands, including `!admin`, do not take this path |
+| Photos | A picture you post gets a short vision reply when the chat model is on. Not a bang command |
+
+A photo in an authorized group (encrypted Chat or a classic group DM), with or without a caption, gets that reply when `llm.enabled` and `image_vision.enabled` are on. The bot @mentions the poster and, in encrypted Chat, replies to their message. A caption is answered when it asks about the picture. `!imagine`, games, and other bang commands keep their own path. The bot does not describe its own pictures and does not call `api.x.ai` image or video generation. Caps live under `image_vision` in `config/default.yaml`. `IMAGE_VISION_ENABLED` and `IMAGE_VISION_RATE_LIMIT_*` override them. `0` on a count is unlimited. A positive count applies only when the window is also positive. Off when the LLM is off or the model has no vision method.
 
 **Media**
 
@@ -611,7 +615,9 @@ Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. Th
 
 Classic history is `GET /2/dm_conversations/:id/dm_events` (~30 days). `g…` groups decrypt `GET /2/chat/conversations/:id/events`. `!summarize` and `!analyze` always use the full fetch, still truncated by those caps. Truncation drops oldest messages by default. Prompts are not stored. Rate-limit timestamps are.
 
-`llm.allow: admins` gates `!ask`, summarize, analyze, and unknown-bang jokes to the owner, `ADMIN_IDS`, and per-group admins. The system prompt is `llm.system_prompt` in `config/default.yaml`. It tells the model it cannot kick users on X.
+`llm.allow: admins` gates `!ask`, summarize, analyze, unknown-bang jokes, and photo vision replies to the owner, `ADMIN_IDS`, and per-group admins. The system prompt is `llm.system_prompt` in `config/default.yaml`. It tells the model it cannot kick users on X.
+
+Photo replies use the same Chat Completions vision call (`completeVision`, an `image_url` data URI). That is understand-only. It is not `POST /v1/images/generations` or `/v1/videos`. Encrypted Chat downloads the ciphertext (`GET /2/chat/media/...`) and `decryptStream`s it with the message's conversation key. Classic group DMs use the photo URL from `attachments.media_keys`.
 
 Full history and summarize/analyze are extra pay-per-use reads on top of the poll loop.
 
@@ -643,6 +649,8 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `ACTIVITY_BEARER_TOKEN` | App-only bearer for list, stream, and `POST /2/webhooks` |
 | `ACTIVITY_WEBHOOK_PORT`, `ACTIVITY_WEBHOOK_PATH`, `ACTIVITY_WEBHOOK_URL` | Local listener and the public HTTPS URL |
 | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY` | Provider selection. See [LLM replies](#llm-replies) |
+| `IMAGE_VISION_ENABLED` | Photo replies. Overrides `image_vision.enabled`. Still off when the LLM is off |
+| `IMAGE_VISION_RATE_LIMIT_PER_USER`, `IMAGE_VISION_RATE_LIMIT_PER_CONVERSATION`, `IMAGE_VISION_RATE_LIMIT_WINDOW_MS` | Caps for photo vision. `0` on a count is unlimited |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI, and the last-resort key for Grok |
 | `XAI_API_KEY` | Preferred Grok key. TTS, LLM, and Imagine only when `IMAGINE_BACKEND=api` |
 | `IMAGINE_BACKEND` | `browser` (default) or `api`. Browser does not call image or video generation routes |
@@ -698,6 +706,7 @@ src/bot/voice.ts        # xAI text-to-speech client and !voice checks
 src/bot/troll.ts        # !troll and !roast copy, roast prompts, and reply cleanup
 src/bot/linkroast.ts    # !linkroast copy, status-link detection, and reply cleanup
 src/bot/recent-images.ts # last 8 posted URLs and hashes, in memory
+src/bot/image-vision.ts # photo posts: short vision reply, not image generation
 src/bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
 src/chat/listen.ts      # CHAT_LISTEN all | allowlist | off
 src/chat/poller.ts      # catch-up poll, inbox discovery, watermarks

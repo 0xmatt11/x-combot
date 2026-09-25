@@ -67,7 +67,9 @@ export const DM_EVENT_FIELDS = [
   "entities",
 ].join(",");
 
-export const DM_EXPANSIONS = "sender_id,participant_ids";
+export const DM_EXPANSIONS = "sender_id,participant_ids,attachments.media_keys";
+/** Photo URL for an inbound DM attachment. Videos are not requested for vision. */
+export const DM_MEDIA_FIELDS = "media_key,type,url,preview_image_url";
 export const USER_FIELDS = "id,name,username";
 export const EVENT_TYPES = "MessageCreate,ParticipantsJoin,ParticipantsLeave";
 

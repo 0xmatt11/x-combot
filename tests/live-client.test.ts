@@ -95,6 +95,92 @@ describe("classic DM events", () => {
     expect(event.senderId).toBe("u-owner");
     expect(event.replyToSenderId).toBeUndefined();
   });
+
+  it("keeps https photos and gif previews and skips video", () => {
+    const media = new Map([
+      ["p", { media_key: "p", type: "photo", url: "https://cdn.example/p.jpg" }],
+      ["g", { media_key: "g", type: "animated_gif", preview_image_url: "https://cdn.example/g.jpg" }],
+      ["v", { media_key: "v", type: "video", url: "https://cdn.example/v.mp4" }],
+      ["h", { media_key: "h", type: "photo", url: "http://cdn.example/insecure.jpg" }],
+    ]);
+    const event = normalizeClassicDmEvent(
+      {
+        id: "dm-2",
+        event_type: "MessageCreate",
+        dm_conversation_id: "1578398451921985538",
+        sender_id: "u-alice",
+        text: "look",
+        attachments: { media_keys: ["p", "g", "v", "h", "missing"] },
+      },
+      new Map(),
+      media,
+    );
+    expect(event.images).toEqual([
+      { kind: "photo", url: "https://cdn.example/p.jpg" },
+      { kind: "gif", url: "https://cdn.example/g.jpg" },
+    ]);
+  });
+});
+
+describe("inbound DM and Chat media", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("requests the media expansion and downloads Chat ciphertext", async () => {
+    const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0x00, 0x11]);
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.includes("/2/dm_events")) {
+          return new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: "dm-photo",
+                  event_type: "MessageCreate",
+                  dm_conversation_id: "1578398451921985538",
+                  sender_id: "u-alice",
+                  text: "",
+                  attachments: { media_keys: ["3_photo", "3_vid"] },
+                },
+              ],
+              includes: {
+                media: [
+                  { media_key: "3_photo", type: "photo", url: "https://ton.example/a.jpg" },
+                  { media_key: "3_vid", type: "video", url: "https://video.example/a.mp4" },
+                ],
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(jpeg, {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        });
+      }),
+    );
+
+    const listed = await client().listDmEvents({});
+    expect(urls[0]).toContain("attachments.media_keys");
+    expect(urls[0]).toContain("preview_image_url");
+    expect(listed.events[0]?.images).toEqual([{ kind: "photo", url: "https://ton.example/a.jpg" }]);
+
+    const bytes = await client().downloadChatMedia("1:2", "hash/key");
+    expect(Array.from(bytes)).toEqual(Array.from(jpeg));
+    const download = new URL(urls.at(-1)!);
+    expect(decodeURIComponent(download.pathname)).toBe("/2/chat/media/1-2/hash/key");
+  });
 });
 
 describe("LiveXClient 429 and 402", () => {

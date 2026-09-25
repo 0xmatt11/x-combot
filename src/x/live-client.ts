@@ -3,10 +3,12 @@ import path from "node:path";
 import { log } from "../log.js";
 import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
 import type { RawChatConversationsPage, RawChatEventsPage } from "../chat/http.js";
+import { inboundImageBytes, INBOUND_CHAT_MEDIA_MAX_BYTES } from "../bot/image-sniff.js";
 import type {
   DeleteHint,
   DeleteResult,
   DmEvent,
+  InboundImage,
   Mention,
   OutboundAudio,
   OutboundImage,
@@ -18,6 +20,7 @@ import type {
 import {
   DM_EVENT_FIELDS,
   DM_EXPANSIONS,
+  DM_MEDIA_FIELDS,
   EVENT_TYPES,
   USER_FIELDS,
   type XClient,
@@ -168,6 +171,7 @@ export class LiveXClient implements XClient {
       event_types: EVENT_TYPES,
       "dm_event.fields": DM_EVENT_FIELDS,
       expansions: DM_EXPANSIONS,
+      "media.fields": DM_MEDIA_FIELDS,
       "user.fields": USER_FIELDS,
     };
     if (params.paginationToken) {
@@ -176,7 +180,8 @@ export class LiveXClient implements XClient {
 
     const payload = await this.request<RawEventsResponse>(pathname, { search });
     const users = indexUsers(payload.includes?.users ?? []);
-    const events = (payload.data ?? []).map((raw) => normalizeClassicDmEvent(raw, users));
+    const media = indexMedia(payload.includes?.media);
+    const events = (payload.data ?? []).map((raw) => normalizeClassicDmEvent(raw, users, media));
     return {
       events,
       nextToken: payload.meta?.next_token,
@@ -469,6 +474,36 @@ export class LiveXClient implements XClient {
     return mediaHashKey;
   }
 
+  /**
+   * Ciphertext for an inbound Chat photo.
+   * `GET /2/chat/media/:id/:media_hash_key`. Callers decrypt with `decryptStream`.
+   */
+  async downloadChatMedia(conversationId: string, mediaHashKey: string): Promise<Uint8Array> {
+    const hash = mediaHashKey.trim();
+    if (!hash) throw new Error("Chat media download needs a media hash key.");
+    const id = conversationId.replaceAll(":", "-");
+    const path = `/2/chat/media/${encodeURIComponent(id)}/${encodeURIComponent(hash)}`;
+    const { bytes } = await this.downloadBytes(path, INBOUND_CHAT_MEDIA_MAX_BYTES);
+    return bytes;
+  }
+
+  /**
+   * Classic DM photo bytes. The user token is sent because DM media is often private.
+   * Returns undefined when the body is not a small image. Does not log the URL.
+   */
+  async downloadImageUrl(
+    url: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string } | undefined> {
+    try {
+      const downloaded = await this.downloadBytes(url, DM_IMAGE_MAX_BYTES);
+      return inboundImageBytes(downloaded.bytes, downloaded.mimeType);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "error";
+      log.warn(`Inbound image download failed (${detail})`);
+      return undefined;
+    }
+  }
+
   async sendChatMessage(
     conversationId: string,
     body: Record<string, string>,
@@ -574,6 +609,46 @@ export class LiveXClient implements XClient {
       throw error;
     }
     return body as T;
+  }
+
+  /**
+   * Bytes from an API path or an https media URL. Does not parse JSON and does not log the URL.
+   */
+  private async downloadBytes(
+    target: string,
+    maxBytes: number,
+    retryAuth = true,
+  ): Promise<{ bytes: Uint8Array; mimeType: string }> {
+    await this.ensureFreshToken();
+    const url = /^https:\/\//i.test(target) ? new URL(target) : new URL(target, API_BASE);
+    if (url.protocol !== "https:") {
+      throw new Error("download requires https");
+    }
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.tokens.accessToken}` },
+    });
+    if (response.status === 401 && retryAuth) {
+      await this.refreshAccessToken();
+      return this.downloadBytes(target, maxBytes, false);
+    }
+    if (response.status === 429 || response.status === 402) {
+      const error = new Error("rate limit") as ApiError;
+      error.status = response.status;
+      applyRateLimit(error, response);
+      throw error;
+    }
+    if (!response.ok) {
+      throw new Error(`download ${response.status} host=${url.host}`);
+    }
+    const advertised = Number(response.headers.get("content-length") ?? "0");
+    if (Number.isFinite(advertised) && advertised > maxBytes) {
+      throw new Error("download too large");
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > maxBytes) {
+      throw new Error("download too large");
+    }
+    return { bytes, mimeType: response.headers.get("content-type") ?? "" };
   }
 
   private async ensureFreshToken(): Promise<void> {
@@ -693,8 +768,15 @@ export function headerBackoffMs(headers: Headers, now = Date.now()): number | un
 
 interface RawEventsResponse {
   data?: RawDmEvent[];
-  includes?: { users?: XUser[] };
+  includes?: { users?: XUser[]; media?: RawDmMedia[] };
   meta?: { next_token?: string };
+}
+
+interface RawDmMedia {
+  media_key?: string;
+  type?: string;
+  url?: string;
+  preview_image_url?: string;
 }
 
 interface RawDmEvent {
@@ -713,6 +795,7 @@ interface RawDmEvent {
    * Present so callers can see the field and still leave `replyToSenderId` unset.
    */
   referenced_tweets?: { id?: string }[];
+  attachments?: { media_keys?: string[] };
 }
 
 function indexUsers(users: XUser[]): Map<string, XUser> {
@@ -732,12 +815,17 @@ function indexUsers(users: XUser[]): Map<string, XUser> {
  * DM this event quotes. Reply-target moderation is filled in by
  * `chatEventToDm` for encrypted X Chat only.
  */
-export function normalizeClassicDmEvent(raw: RawDmEvent, users: Map<string, XUser>): DmEvent {
+export function normalizeClassicDmEvent(
+  raw: RawDmEvent,
+  users: Map<string, XUser>,
+  media: Map<string, RawDmMedia> = new Map(),
+): DmEvent {
   const participantIds = raw.participant_ids ?? [];
   const mentions: Mention[] = (raw.entities?.mentions ?? []).map((mention) => ({
     username: mention.username,
     id: mention.id,
   }));
+  const images = classicInboundImages(raw, media);
   return {
     id: raw.id,
     eventType: raw.event_type,
@@ -751,7 +839,42 @@ export function normalizeClassicDmEvent(raw: RawDmEvent, users: Map<string, XUse
       .filter((user): user is XUser => Boolean(user)),
     text: raw.text,
     mentions,
+    ...(images.length > 0 ? { images } : {}),
   };
+}
+
+function indexMedia(media: RawDmMedia[] | undefined): Map<string, RawDmMedia> {
+  const map = new Map<string, RawDmMedia>();
+  for (const item of media ?? []) {
+    if (item.media_key) map.set(item.media_key, item);
+  }
+  return map;
+}
+
+/** Photos and GIFs only. A video attachment is not sent to vision. */
+function classicInboundImages(raw: RawDmEvent, media: Map<string, RawDmMedia>): InboundImage[] {
+  const images: InboundImage[] = [];
+  for (const key of raw.attachments?.media_keys ?? []) {
+    const item = media.get(key);
+    if (!item) continue;
+    const type = (item.type ?? "photo").trim().toLowerCase();
+    if (type !== "photo" && type !== "animated_gif") continue;
+    const url = httpsUrl(item.url) ?? (type === "animated_gif" ? httpsUrl(item.preview_image_url) : undefined);
+    if (!url) continue;
+    images.push({ kind: type === "animated_gif" ? "gif" : "photo", url });
+  }
+  return images;
+}
+
+function httpsUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:") return undefined;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 export function loadTokensFromDisk(tokenPath: string): TokenSet | undefined {

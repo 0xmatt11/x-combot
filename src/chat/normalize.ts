@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { DmEvent, Mention, ReplyTarget } from "../types.js";
 import type { DecryptedEvent } from "./cipher.js";
 import type { RawChatEvent } from "./http.js";
+import { readChatInboundImages, readKeyVersion } from "./inbound-image.js";
 
 /**
  * Stable id for one ciphertext. Activity delivery ids and the Chat events-list
@@ -58,10 +59,12 @@ export function chatEventToDm(
         ...aliases,
       };
     }
-    const text = messageText(decrypted);
+    const images = readChatInboundImages(decrypted);
+    const text = messageText(decrypted, images.length > 0);
     if (text === undefined) return undefined;
     const replyToSenderId = trustedReplySenderId(decrypted);
     const replyTo = readReply(decrypted);
+    const keyVersion = readKeyVersion(decrypted);
     return {
       id,
       eventType: "MessageCreate",
@@ -76,6 +79,8 @@ export function chatEventToDm(
       ...(raw.encoded_event ? { encodedEvent: raw.encoded_event } : {}),
       ...(replyToSenderId ? { replyToSenderId } : {}),
       ...(replyTo ? { replyTo } : {}),
+      ...(images.length > 0 ? { images } : {}),
+      ...(keyVersion ? { keyVersion } : {}),
       ...aliases,
     };
   }
@@ -210,12 +215,24 @@ function readRecord(value: object, ...keys: string[]): object | undefined {
   return undefined;
 }
 
-function messageText(event: DecryptedEvent): string | undefined {
+function messageText(event: DecryptedEvent, hasImage: boolean): string | undefined {
   const content = event.content;
-  if (!content || typeof content.text !== "string") return undefined;
-  const kind = content.contentType ?? content.content_type;
-  if (kind && kind !== "text") return undefined;
-  return content.text;
+  const kind = `${content?.contentType ?? content?.content_type ?? ""}`;
+  if (
+    kind === "reaction" ||
+    kind === "reactionRemoved" ||
+    kind === "reaction_removed" ||
+    kind === "edit" ||
+    kind === "markRead" ||
+    kind === "markUnread" ||
+    kind === "unknown"
+  ) {
+    return undefined;
+  }
+  if (kind && kind !== "text" && kind !== "media" && !hasImage) return undefined;
+  if (content && typeof content.text === "string") return content.text;
+  if (hasImage) return "";
+  return undefined;
 }
 
 function readChangeType(event: DecryptedEvent): string | undefined {

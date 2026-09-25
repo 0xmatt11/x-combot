@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { Buffer } from "node:buffer";
 import {
   DEFAULT_LEAVE_TEXT,
   isFullContextMode,
@@ -12,6 +13,7 @@ import type {
   BotRuntimeConfig,
   ConversationSettings,
   DmEvent,
+  InboundImage,
   LlmContextMode,
   MediaCaption,
   ResolvedConversationConfig,
@@ -43,6 +45,14 @@ import {
   linkroastFallback,
   sanitizeLinkroastReply,
 } from "./linkroast.js";
+import { inboundImageBytes } from "./image-sniff.js";
+import {
+  acceptVisionReply,
+  firstInboundPhoto,
+  hasInboundPhoto,
+  IMAGE_VISION_MAX_CHARS,
+  imageVisionPrompt,
+} from "./image-vision.js";
 import {
   ADULT_IMAGE_RETRY_MESSAGE,
   ADULT_VISION_UNAVAILABLE_MESSAGE,
@@ -230,6 +240,15 @@ export interface EngineDeps {
   fetchVideo?: (url: string) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
   /** xAI text-to-speech for `!voice`. Same key as `imagine`. */
   voice?: VoiceGenerator;
+  /**
+   * Plaintext for an inbound photo that arrived as a URL or Chat media hash.
+   * Chat downloads ciphertext and `decryptStream`s it. Classic DMs GET the media URL.
+   * Do not log the URL or the bytes. Absent in tests that pass `images[].bytes`.
+   */
+  fetchInboundImage?: (
+    image: InboundImage,
+    context: { conversationId: string; keyVersion?: string },
+  ) => Promise<{ bytes: Uint8Array; mimeType: string } | undefined>;
   /**
    * Saved imagine-public stills and mp4s for `!boobs`, `!ass`, and `!booty`.
    * Tried first. An empty or exhausted bank falls through to search.
@@ -438,7 +457,9 @@ export class ModerationEngine {
       return actions;
     }
 
-    if (llmWake) {
+    const describePhoto =
+      !llmFromCmd && this.imageVisionReady(event, senderIsAdmin, settings, nowMs);
+    if (llmWake && !describePhoto) {
       if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
         actions.muted = true;
         if (settings.attemptDeleteOnMute) {
@@ -566,6 +587,7 @@ export class ModerationEngine {
 
     await this.trollIfTarget(event, senderId, actions, nowMs);
     await this.linkroastIfSpam(event, senderId, actions, nowMs);
+    await this.maybeDescribeImage(event, senderId, senderIsAdmin, settings, actions, nowMs);
 
     if (!command) {
       this.store.setLastUserMessage(
@@ -577,6 +599,109 @@ export class ModerationEngine {
     }
 
     return actions;
+  }
+
+  /**
+   * A photo (and an optional caption that is not a bang command) gets one vision reply.
+   * Games and other bangs return earlier. The bot's own messages never reach this.
+   */
+  private imageVisionReady(
+    event: DmEvent,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    nowMs: number,
+  ): boolean {
+    if (!hasInboundPhoto(event.images)) return false;
+    if (!settings.llmEnabled || !settings.imageVisionEnabled) return false;
+    if (settings.llmAllow === "admins" && !senderIsAdmin) return false;
+    if (!this.llmClient?.completeVision) return false;
+    if (containsBannedAgeTerm(event.text)) return false;
+    const senderId = event.senderId;
+    if (!senderId) return false;
+    if (this.imageVisionOverLimit(event.conversationId, senderId, settings, nowMs)) return false;
+    return true;
+  }
+
+  private imageVisionOverLimit(
+    conversationId: string,
+    userId: string,
+    settings: ResolvedConversationConfig,
+    nowMs: number,
+  ): boolean {
+    if (!imageVisionLimitActive(settings)) return false;
+    const counts = this.store.imageVisionUses(
+      conversationId,
+      userId,
+      nowMs - settings.imageVisionRateLimitWindowMs,
+    );
+    const userOver =
+      settings.imageVisionRateLimitPerUser > 0 &&
+      counts.userUses >= settings.imageVisionRateLimitPerUser;
+    const conversationOver =
+      settings.imageVisionRateLimitPerConversation > 0 &&
+      counts.conversationUses >= settings.imageVisionRateLimitPerConversation;
+    return userOver || conversationOver;
+  }
+
+  private async maybeDescribeImage(
+    event: DmEvent,
+    senderId: string,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (!this.imageVisionReady(event, senderIsAdmin, settings, nowMs)) return;
+    const image = firstInboundPhoto(event.images);
+    const client = this.llmClient;
+    if (!image || !client?.completeVision) return;
+    const loaded = await this.loadInboundPhoto(event, image);
+    if (!loaded) return;
+    if (imageVisionLimitActive(settings)) {
+      this.store.recordImageVisionUse(
+        event.conversationId,
+        senderId,
+        nowMs,
+        settings.imageVisionRateLimitWindowMs,
+      );
+    }
+    const caption = event.text?.trim() ?? "";
+    let raw: string;
+    try {
+      raw = await client.completeVision(imageVisionPrompt(caption), {
+        mimeType: loaded.mimeType,
+        base64: Buffer.from(loaded.bytes).toString("base64"),
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "error";
+      log.warn(`Image vision failed conversation=${event.conversationId} (${detail})`);
+      return;
+    }
+    const text = acceptVisionReply(raw, Math.min(settings.llmMaxReplyChars, IMAGE_VISION_MAX_CHARS));
+    if (!text) return;
+    actions.llm = true;
+    await this.reply(event.conversationId, text, actions);
+  }
+
+  private async loadInboundPhoto(
+    event: DmEvent,
+    image: InboundImage,
+  ): Promise<{ bytes: Uint8Array; mimeType: string } | undefined> {
+    if (image.bytes && image.bytes.byteLength > 0) {
+      return inboundImageBytes(image.bytes, image.mimeType);
+    }
+    if (!this.deps.fetchInboundImage) return undefined;
+    try {
+      const fetched = await this.deps.fetchInboundImage(image, {
+        conversationId: event.conversationId,
+        keyVersion: event.keyVersion,
+      });
+      if (!fetched) return undefined;
+      return inboundImageBytes(fetched.bytes, fetched.mimeType);
+    } catch {
+      log.warn(`Inbound image load failed conversation=${event.conversationId}`);
+      return undefined;
+    }
   }
 
   private async handleReaction(
@@ -3316,6 +3441,12 @@ function handleMention(text: string): MediaCaption["mention"] | undefined {
   return { username, start: 0, end: new TextEncoder().encode(text).byteLength };
 }
 
+function imageVisionLimitActive(settings: ResolvedConversationConfig): boolean {
+  const hasCap =
+    settings.imageVisionRateLimitPerUser > 0 || settings.imageVisionRateLimitPerConversation > 0;
+  return hasCap && settings.imageVisionRateLimitWindowMs > 0;
+}
+
 function boobsRateLimitActive(settings: ResolvedConversationConfig): boolean {
   const hasCap = settings.boobsRateLimitPerUser > 0 || settings.boobsRateLimitPerConversation > 0;
   return hasCap && settings.boobsRateLimitWindowMs > 0;
@@ -3491,5 +3622,11 @@ function formatSettings(settings: ResolvedConversationConfig): string {
     `boobs_enabled: ${settings.boobsEnabled}`,
     `boobs_vision: ${settings.boobsVision}`,
     `xp_enabled: ${settings.xpEnabled}`,
+    `image_vision: ${imageVisionSetting(settings)}`,
   ].join("\n");
+}
+
+function imageVisionSetting(settings: ResolvedConversationConfig): string {
+  if (!settings.llmEnabled || !settings.imageVisionEnabled) return "off";
+  return `on (${settings.imageVisionRateLimitPerUser}/user, ${settings.imageVisionRateLimitPerConversation}/chat, ${settings.imageVisionRateLimitWindowMs}ms)`;
 }

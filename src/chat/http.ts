@@ -60,6 +60,11 @@ export interface ChatHttp {
    */
   uploadChatMedia(conversationId: string, ciphertext: Uint8Array): Promise<string>;
   /**
+   * Download encrypted Chat media (`GET /2/chat/media/:conversation_id/:media_hash_key`).
+   * Callers `decryptStream` the bytes with the conversation key. Absent on fakes that never read inbound photos.
+   */
+  downloadChatMedia?(conversationId: string, mediaHashKey: string): Promise<Uint8Array>;
+  /**
    * Inbox list (`GET /2/chat/conversations`). Absent on fakes that do not discover groups.
    * Callers must keep only `g…` ids and must not treat a failure as fatal.
    */

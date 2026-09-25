@@ -62,6 +62,7 @@ export interface XdkLike {
     encodedEventSignature?: string;
   };
   encryptStream(plaintext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
+  decryptStream?(ciphertext: Uint8Array, conversationKey: Uint8Array): Uint8Array;
   prepareMessageDelete(params: {
     conversationId: string;
     sequenceIds: string[];
@@ -183,6 +184,12 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
     },
     encryptStream(plaintext, conversationKey) {
       return inner.encryptStream(plaintext, conversationKey);
+    },
+    decryptStream(ciphertext, conversationKey) {
+      if (!inner.decryptStream) {
+        throw new Error("This chat-xdk build does not expose decryptStream.");
+      }
+      return inner.decryptStream(ciphertext, conversationKey);
     },
     prepareMessageDelete(conversationId, sequenceIds, deleteForAll) {
       return inner.prepareMessageDelete({ conversationId, sequenceIds, deleteForAll });

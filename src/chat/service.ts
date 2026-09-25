@@ -1,3 +1,4 @@
+import { inboundImageBytes } from "../bot/image-sniff.js";
 import { log } from "../log.js";
 import type { Store } from "../store.js";
 import type {
@@ -89,6 +90,8 @@ export class ChatService {
   private readonly seenKeyEvents = new Set<string>();
   /** Latest conversation key per chat, from decryptEvents — required for encryptStream. */
   private readonly conversationKeys = new Map<string, { version: string; key: Uint8Array }>();
+  /** Every version recovered this process, so an older photo still decrypts. */
+  private readonly keyring = new Map<string, Map<string, Uint8Array>>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
   private readonly remoteKeyCachePath?: string;
@@ -400,6 +403,50 @@ export class ChatService {
       dmEventId: sent.messageId || payload.messageId,
       dmConversationId: conversationId,
     };
+  }
+
+  /**
+   * Plaintext for one inbound Chat photo.
+   * Downloads ciphertext, then `decryptStream` with the message's key version.
+   * A missing version falls back to the newest key this process has.
+   * Returns undefined when the bytes are not a small image. Does not log the hash.
+   */
+  async openInboundImage(
+    conversationId: string,
+    mediaHashKey: string,
+    keyVersion?: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string } | undefined> {
+    const decrypt = this.cipher.decryptStream;
+    const download = this.http.downloadChatMedia;
+    if (!decrypt || !download) {
+      log.info(`Inbound Chat image skipped; media decrypt is not configured conversation=${conversationId}`);
+      return undefined;
+    }
+    const key = this.keyForConversation(conversationId, keyVersion);
+    if (!key) {
+      log.info(`Inbound Chat image skipped; no conversation key conversation=${conversationId}`);
+      return undefined;
+    }
+    let ciphertext: Uint8Array;
+    try {
+      ciphertext = await download.call(this.http, conversationId, mediaHashKey);
+    } catch {
+      log.warn(`Inbound Chat image download failed conversation=${conversationId}`);
+      return undefined;
+    }
+    let plain: Uint8Array;
+    try {
+      plain = decrypt.call(this.cipher, ciphertext, key);
+    } catch {
+      log.warn(`Inbound Chat image decrypt failed conversation=${conversationId}`);
+      return undefined;
+    }
+    const image = inboundImageBytes(plain, undefined);
+    if (!image) {
+      log.info(`Inbound Chat attachment was not a photo conversation=${conversationId}`);
+      return undefined;
+    }
+    return image;
   }
 
   async deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult> {
@@ -776,6 +823,7 @@ export class ChatService {
     }
     for (const [conversationId, saved] of loaded.conversations) {
       this.conversationKeys.set(conversationId, { version: saved.version, key: saved.key });
+      this.noteConversationKey(conversationId, saved.version, saved.key);
     }
     if (this.signingByUser.size > 0) this.cipher.setSigningKeys(this.currentSigningKeys());
     if (!loaded.invalid && (loaded.users.size > 0 || loaded.conversations.size > 0)) {
@@ -814,11 +862,37 @@ export class ChatService {
     return flat;
   }
 
+  private keyForConversation(conversationId: string, version: string | undefined): Uint8Array | undefined {
+    const ring = this.keyring.get(conversationId);
+    if (version) {
+      const match = ring?.get(version);
+      if (match) return match;
+    }
+    return this.conversationKeys.get(conversationId)?.key;
+  }
+
+  private noteConversationKey(conversationId: string, version: string, key: Uint8Array): void {
+    if (!version || key.byteLength === 0) return;
+    let ring = this.keyring.get(conversationId);
+    if (!ring) {
+      ring = new Map();
+      this.keyring.set(conversationId, ring);
+    }
+    const existing = ring.get(version);
+    const next = Uint8Array.from(key);
+    if (existing && sameBytes(existing, next)) return;
+    ring.set(version, next);
+  }
+
   private rememberConversationKeys(
     conversationId: string,
     conversationKeys: ConversationKeySet | undefined,
   ): void {
     if (!conversationKeys?.keys) return;
+    for (const [version, key] of Object.entries(conversationKeys.keys)) {
+      if (!version || !key || key.byteLength === 0) continue;
+      this.noteConversationKey(conversationId, version, key);
+    }
     const version = pickConversationKeyVersion(conversationKeys.keys, conversationKeys.latestVersion);
     if (!version) return;
     const key = conversationKeys.keys[version];
