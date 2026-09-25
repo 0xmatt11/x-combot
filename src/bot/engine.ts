@@ -53,6 +53,8 @@ import {
 } from "./adult-filter.js";
 import { selectAdultImage, type AdultVisionImage, type AdultVisionJudge } from "./adult-vision.js";
 import { ImageSearchError, type ImageSearch } from "./image-search.js";
+import { selectCheesePhotos } from "./cheese.js";
+import { createCheeseImageSearch, type CheeseImageSearch } from "./cheese-search.js";
 import {
   formatImagineModerationReply,
   imaginePromptRejection,
@@ -245,6 +247,12 @@ export interface EngineActions {
 
 export interface EngineDeps {
   imageSearch?: ImageSearch;
+  /**
+   * DuckDuckGo / Bing / Reddit lookup for `!cheese`.
+   * Absent means the engine builds the default search on first use.
+   * This command does not call Imagine or api.x.ai.
+   */
+  cheeseSearch?: CheeseImageSearch;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
   adultVision?: AdultVisionJudge;
@@ -357,6 +365,8 @@ export class ModerationEngine {
    * Bot replies are not on this list.
    */
   private readonly commandCleanupTimers = new Set<ReturnType<typeof setTimeout>>();
+  /** Built on the first `!cheese` when `deps.cheeseSearch` was not injected. */
+  private ownedCheeseSearch?: CheeseImageSearch;
   /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
   private readonly featureRequests = new Map<string, FeatureRequestSession>();
   private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -2008,6 +2018,9 @@ export class ModerationEngine {
       case "booty":
         await this.handleAdultImage(event, command.name, command.extra, settings, actions, nowMs);
         return;
+      case "cheese":
+        await this.handleCheese(event, command.extra, actions);
+        return;
       case "imagine":
         await this.handleImagine(event, command.prompt, actions);
         return;
@@ -2457,6 +2470,96 @@ export class ModerationEngine {
       });
     }
     await this.reply(event.conversationId, formatLeaderboard(labeled), actions);
+  }
+
+  /**
+   * `!cheese` posts several separate photos: kittens and cheese, not one
+   * combined picture. Extra words are ignored except a banned age term, which
+   * is refused. Search queries are fixed. This does not call Imagine or api.x.ai.
+   */
+  private async handleCheese(
+    event: DmEvent,
+    extra: string | undefined,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (extra && containsBannedAgeTerm(extra)) {
+      log.warn(`Refused !cheese with unsafe extra text conversation=${conversationId}`);
+      await this.reply(conversationId, "Refused. !cheese does not search custom text.", actions);
+      return;
+    }
+
+    const search = this.cheeseSearchClient();
+    const [kittens, cheeses] = await Promise.all([
+      this.loadCheeseSubject(conversationId, "kitten", () => search.searchKittens()),
+      this.loadCheeseSubject(conversationId, "cheese", () => search.searchCheese()),
+    ]);
+    const photos = selectCheesePhotos(kittens, cheeses, () => this.nextRandom());
+    if (photos.length === 0) {
+      await this.reply(conversationId, "Image search is unavailable right now.", actions);
+      return;
+    }
+
+    const caption = await this.commandCaption(event);
+    for (const photo of photos) {
+      await this.postCheesePhoto(conversationId, photo.url, actions, caption);
+    }
+  }
+
+  private cheeseSearchClient(): CheeseImageSearch {
+    if (this.deps.cheeseSearch) return this.deps.cheeseSearch;
+    this.ownedCheeseSearch ??= createCheeseImageSearch({ random: () => this.nextRandom() });
+    return this.ownedCheeseSearch;
+  }
+
+  private async loadCheeseSubject(
+    conversationId: string,
+    subject: "kitten" | "cheese",
+    load: () => Promise<string[]>,
+  ): Promise<string[]> {
+    try {
+      return await load();
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : "search failed");
+      log.warn(`!cheese ${subject} search failed conversation=${conversationId}: ${detail}`);
+      return [];
+    }
+  }
+
+  private async postCheesePhoto(
+    conversationId: string,
+    url: string,
+    actions: EngineActions,
+    caption?: MediaCaption,
+  ): Promise<void> {
+    const host = imageHost(url);
+    let fetched: AdultVisionImage | undefined;
+    if (this.deps.fetchImage) {
+      try {
+        fetched = await this.deps.fetchImage(url);
+      } catch {
+        log.warn(`!cheese image download failed conversation=${conversationId} host=${host}`);
+      }
+    }
+    if (fetched && fetched.bytes.byteLength > 0) {
+      try {
+        await this.client.sendImage(conversationId, {
+          url,
+          bytes: fetched.bytes,
+          mimeType: fetched.mimeType,
+          ...(caption ? { caption } : {}),
+        });
+        log.info(`!cheese posted native image conversation=${conversationId} host=${host}`);
+        return;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        log.warn(
+          `!cheese native attach failed; posting the image link as text. conversation=${conversationId} host=${host} (${detail})`,
+        );
+      }
+    }
+    await this.reply(conversationId, url, actions);
+    log.info(`!cheese posted image link conversation=${conversationId} host=${host}`);
   }
 
   private async handleAdultImage(
