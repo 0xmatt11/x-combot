@@ -12,6 +12,7 @@ import {
   estimateMp3DurationMillis,
   MAX_VOICE_BYTES,
   parseVoiceRequest,
+  VOICE_PERSONAS,
   VOICE_ATTACH_FAILED_MESSAGE,
   VOICE_CHAT_REQUIRED_MESSAGE,
   VOICE_FAILED_MESSAGE,
@@ -84,10 +85,10 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("sexy")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("teen portrait")).toEqual({ ok: false, reason: "refused" });
     expect(VOICE_MENU_MESSAGE).toMatch(/Pick a voice, then your line:/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/1\. Girl 1 — !voice girl1 <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/2\. regular dude — !voice dude <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/3\. Girl 2 — !voice girl2 <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/4\. Girl 3 — !voice girl3 <text>/);
+    for (let n = 1; n <= 10; n += 1) {
+      expect(VOICE_MENU_MESSAGE).toMatch(new RegExp(`${n}\\. Girl ${n} — !voice girl${n} <text>`));
+    }
+    expect(VOICE_MENU_MESSAGE).toMatch(/11\. regular dude — !voice dude <text>/);
     expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared/i);
     expect(DEFAULT_VOICE_LANGUAGE).toBe("en");
   });
@@ -95,18 +96,18 @@ describe("voice request checks", () => {
   it("maps aliases onto built-in voices and speech tags", () => {
     expect(parseVoiceRequest("sexy hello there")).toEqual({
       ok: true,
-      personaId: "sexy",
+      personaId: "girl1",
       voiceId: "ara",
       text: "hello there",
       spoken: "<whisper>hello there</whisper>",
     });
     expect(parseVoiceRequest("1 hello there")).toMatchObject({
       ok: true,
-      personaId: "sexy",
+      personaId: "girl1",
       voiceId: "ara",
       text: "hello there",
     });
-    expect(parseVoiceRequest("SEXYGIRL hello")).toMatchObject({ personaId: "sexy", voiceId: "ara" });
+    expect(parseVoiceRequest("SEXYGIRL hello")).toMatchObject({ personaId: "girl1", voiceId: "ara" });
     expect(parseVoiceRequest("dude what's up")).toEqual({
       ok: true,
       personaId: "dude",
@@ -114,13 +115,13 @@ describe("voice request checks", () => {
       text: "what's up",
       spoken: "what's up",
     });
-    expect(parseVoiceRequest("2 what's up")).toMatchObject({ personaId: "dude", voiceId: "rex" });
+    expect(parseVoiceRequest("2 what's up")).toMatchObject({ personaId: "girl2", voiceId: "eve" });
     expect(parseVoiceRequest("guy hey")).toMatchObject({ personaId: "dude", voiceId: "rex" });
     expect(parseVoiceRequest("regular hey")).toMatchObject({ personaId: "dude" });
     const scared = parseVoiceRequest("scared stay with me");
     expect(scared).toMatchObject({
       ok: true,
-      personaId: "scared",
+      personaId: "girl2",
       voiceId: "eve",
       text: "stay with me",
     });
@@ -128,22 +129,48 @@ describe("voice request checks", () => {
       expect(scared.spoken).toBe("[breath] <whisper><higher-pitch>stay with me</higher-pitch></whisper>");
       expect(scared.spoken).not.toMatch(/scared|nsfw/i);
     }
-    expect(parseVoiceRequest("3 stay")).toMatchObject({ personaId: "scared", voiceId: "eve" });
-    expect(parseVoiceRequest("scaredgirl stay")).toMatchObject({ personaId: "scared" });
+    expect(parseVoiceRequest("3 stay")).toMatchObject({ personaId: "girl3", voiceId: "ara" });
+    expect(parseVoiceRequest("scaredgirl stay")).toMatchObject({ personaId: "girl2" });
     const horny = parseVoiceRequest("horny hello there");
     expect(horny).toMatchObject({
       ok: true,
-      personaId: "horny",
-      voiceId: "ara",
+      personaId: "girl6",
+      voiceId: "eve",
       text: "hello there",
     });
     if (horny.ok) {
-      expect(horny.spoken).toBe("<build-intensity>hello there</build-intensity>");
+      expect(horny.spoken).toBe(
+        "[inhale] [sigh] [breath] <whisper><higher-pitch><build-intensity>hello there</build-intensity></higher-pitch></whisper>",
+      );
       expect(horny.spoken).not.toMatch(/horny|nsfw|sexy/i);
     }
-    expect(parseVoiceRequest("4 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
-    expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
-    expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "horny" });
+    expect(parseVoiceRequest("6 hello")).toMatchObject({ personaId: "girl6", voiceId: "eve" });
+    expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "girl3", voiceId: "ara" });
+    expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "girl6" });
+    const aliases = VOICE_PERSONAS.flatMap((persona) => persona.aliases);
+    expect(new Set(aliases).size).toBe(aliases.length);
+    const line = "say this";
+    for (let n = 1; n <= 10; n += 1) {
+      const parsed = parseVoiceRequest(`girl${n} ${line}`);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) continue;
+      expect(parsed.personaId).toBe(`girl${n}`);
+      expect(parsed.text).toBe(line);
+      expect(parsed.spoken.replace(/<[^>]+>/g, "").replace(/\[[a-z-]+\]/gi, "").replace(/\s+/g, " ").trim()).toBe(
+        line,
+      );
+      expect(parseVoiceRequest(`${n} ${line}`)).toMatchObject({ ok: true, personaId: `girl${n}` });
+    }
+    const peak = parseVoiceRequest("girl10 say this");
+    const numberedPeak = parseVoiceRequest("10 say this");
+    expect(peak).toEqual(numberedPeak);
+    if (peak.ok) {
+      expect(peak.voiceId).toBe("eve");
+      expect(peak.spoken).toBe(
+        "[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>say this</emphasis></build-intensity></higher-pitch></fast></loud>",
+      );
+      expect(peak.spoken).toMatch(/\[breath\].*\[inhale\].*\[sigh\].*\[exhale\].*<loud>.*<fast>.*<higher-pitch>.*<build-intensity>/);
+    }
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
     const long = parseVoiceRequest(`dude ${"a".repeat(20_000)}`);
     expect(long.ok).toBe(true);
@@ -414,6 +441,17 @@ describe("!voice command", () => {
     );
     expect(dude.voice.prompts).toEqual([{ text: "what's up", voiceId: "rex" }]);
     expect(dude.client.audios[0]?.voiceId).toBe("rex");
+
+    const peak = setup();
+    await peak.engine.processEvent(
+      message({ id: "v10", conversationId: chatGroupId, text: "!voice 10 say this" }),
+    );
+    expect(peak.voice.prompts).toEqual([
+      {
+        text: "[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>say this</emphasis></build-intensity></higher-pitch></fast></loud>",
+        voiceId: "eve",
+      },
+    ]);
   });
 
   it("tells a classic group DM that Chat is required and does not call the API", async () => {
@@ -479,9 +517,7 @@ describe("!voice command", () => {
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!voice/);
-    expect(loaded.help).toMatch(/Girl 1/);
-    expect(loaded.help).toMatch(/Girl 2/);
-    expect(loaded.help).toMatch(/Girl 3/);
+    expect(loaded.help).toMatch(/Girl 1 through Girl 10/);
     expect(loaded.help).toMatch(/regular dude/);
     expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
     expect(loaded.help).not.toMatch(/1500/);

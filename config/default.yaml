@@ -44,7 +44,7 @@ help: |
   Media
   !imagine <prompt> — image on grok.com/imagine
   !video <prompt> — short video on grok.com/imagine
-  !voice — speak a line: Girl 1, regular dude, Girl 2, Girl 3
+  !voice — speak a line: Girl 1 through Girl 10, or regular dude
   !boobs — chest photo from the saved imagine-public bank (off until enabled). Does not open grok.com/imagine
   !ass / !booty — butt photo, same switch (!booties)
   !cheese — a few kitten photos and cheese photos. Extra words are ignored. Does not open grok.com/imagine

@@ -17,14 +17,30 @@ export type VoiceId = (typeof VOICE_IDS)[number];
 
 export const DEFAULT_VOICE_LANGUAGE = "en";
 
-export type VoicePersonaId = "sexy" | "dude" | "scared" | "horny";
+export type VoicePersonaId =
+  | "girl1"
+  | "girl2"
+  | "girl3"
+  | "girl4"
+  | "girl5"
+  | "girl6"
+  | "girl7"
+  | "girl8"
+  | "girl9"
+  | "girl10"
+  | "dude";
 
 /**
- * Named personas. `voiceId` is always a built-in xAI id.
+ * Named personas. `voiceId` is always a built-in xAI id already used here.
  * ara is "warm and friendly", eve is "energetic and upbeat", rex is "confident and clear".
- * Girl 1 and Girl 3 use ara. Girl 2 uses eve. sal and leo are the other male tones and are unused.
- * Display labels are Girl 1, regular dude, Girl 2, and Girl 3. Older aliases still select the same voice.
- * Delivery uses documented speech tags only. It does not add words to the user's line.
+ * Girls alternate ara and eve. sal and leo stay unused.
+ * Numeric aliases 1–10 are the girls. Dude is `dude`, `regular`, or `guy`.
+ * Older aliases: `sexy` / `sexygirl` are Girl 1, `scared` / `scaredgirl` are Girl 2,
+ * `horny` / `hornygirl` are Girl 6 (the first build-intensity tier).
+ * Delivery uses documented speech tags only. xAI has no moan tag; breath, sigh,
+ * inhale, and exhale are the pleasure sounds. Tags do not add words to the line.
+ * Girl 1 is a mild whisper. Each later girl adds breath, pitch, or intensity.
+ * Girl 10 is the peak: gasping breaths around loud, fast, high, building delivery.
  */
 export const VOICE_PERSONAS: readonly {
   id: VoicePersonaId;
@@ -36,7 +52,7 @@ export const VOICE_PERSONAS: readonly {
   deliver: (text: string) => string;
 }[] = [
   {
-    id: "sexy",
+    id: "girl1",
     label: "Girl 1",
     menuAlias: "girl1",
     aliases: ["girl1", "1", "sexy", "sexygirl"],
@@ -44,28 +60,92 @@ export const VOICE_PERSONAS: readonly {
     deliver: (text) => `<whisper>${text}</whisper>`,
   },
   {
-    id: "dude",
-    label: "regular dude",
-    menuAlias: "dude",
-    aliases: ["dude", "regular", "guy", "2"],
-    voiceId: "rex",
-    deliver: (text) => text,
-  },
-  {
-    id: "scared",
+    id: "girl2",
     label: "Girl 2",
     menuAlias: "girl2",
-    aliases: ["girl2", "3", "scared", "scaredgirl"],
+    aliases: ["girl2", "2", "scared", "scaredgirl"],
     voiceId: "eve",
     deliver: (text) => `[breath] <whisper><higher-pitch>${text}</higher-pitch></whisper>`,
   },
   {
-    id: "horny",
+    id: "girl3",
     label: "Girl 3",
     menuAlias: "girl3",
-    aliases: ["girl3", "4", "horny", "hornygirl"],
+    aliases: ["girl3", "3"],
     voiceId: "ara",
-    deliver: (text) => `<build-intensity>${text}</build-intensity>`,
+    deliver: (text) =>
+      `[sigh] [breath] <whisper><slow><higher-pitch>${text}</higher-pitch></slow></whisper>`,
+  },
+  {
+    id: "girl4",
+    label: "Girl 4",
+    menuAlias: "girl4",
+    aliases: ["girl4", "4"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] <whisper><slow><higher-pitch>${text}</higher-pitch></slow></whisper>`,
+  },
+  {
+    id: "girl5",
+    label: "Girl 5",
+    menuAlias: "girl5",
+    aliases: ["girl5", "5"],
+    voiceId: "ara",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] <whisper><slow><higher-pitch><emphasis>${text}</emphasis></higher-pitch></slow></whisper>`,
+  },
+  {
+    id: "girl6",
+    label: "Girl 6",
+    menuAlias: "girl6",
+    aliases: ["girl6", "6", "horny", "hornygirl"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] <whisper><higher-pitch><build-intensity>${text}</build-intensity></higher-pitch></whisper>`,
+  },
+  {
+    id: "girl7",
+    label: "Girl 7",
+    menuAlias: "girl7",
+    aliases: ["girl7", "7"],
+    voiceId: "ara",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] [exhale] <higher-pitch><fast><build-intensity>${text}</build-intensity></fast></higher-pitch>`,
+  },
+  {
+    id: "girl8",
+    label: "Girl 8",
+    menuAlias: "girl8",
+    aliases: ["girl8", "8"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] [exhale] <loud><higher-pitch><fast><build-intensity>${text}</build-intensity></fast></higher-pitch></loud>`,
+  },
+  {
+    id: "girl9",
+    label: "Girl 9",
+    menuAlias: "girl9",
+    aliases: ["girl9", "9"],
+    voiceId: "ara",
+    deliver: (text) =>
+      `[inhale] [breath] [sigh] [exhale] [breath] <loud><higher-pitch><fast><build-intensity>${text}</build-intensity></fast></higher-pitch></loud>`,
+  },
+  {
+    id: "girl10",
+    label: "Girl 10",
+    menuAlias: "girl10",
+    aliases: ["girl10", "10"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>${text}</emphasis></build-intensity></higher-pitch></fast></loud>`,
+  },
+  {
+    id: "dude",
+    label: "regular dude",
+    menuAlias: "dude",
+    aliases: ["dude", "regular", "guy"],
+    voiceId: "rex",
+    deliver: (text) => text,
   },
 ];
 /** Default MP3 is 128 kbps. Used only to fill duration_millis on the Chat attachment. */
