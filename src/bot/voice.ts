@@ -7,6 +7,9 @@ import { containsBannedAgeTerm, redactSecrets } from "./adult-filter.js";
  * POST https://api.x.ai/v1/tts
  * Body: { text, voice_id, language } — language is required.
  * The response is raw audio bytes (default MP3). Do not set with_timestamps.
+ * Unary POST documents a 15,000 character maximum. This bot does not enforce a
+ * text-length cap. An API length error becomes a short chat line. Audio larger
+ * than MAX_VOICE_BYTES is still rejected before upload.
  */
 
 export const VOICE_IDS = ["eve", "ara", "rex", "sal", "leo"] as const;
@@ -14,14 +17,22 @@ export type VoiceId = (typeof VOICE_IDS)[number];
 
 export const DEFAULT_VOICE_LANGUAGE = "en";
 
-export type VoicePersonaId = "sexy" | "dude" | "scared" | "horny";
+export type VoicePersonaId =
+  | "girl1"
+  | "girl2"
+  | "girl3"
+  | "girl4"
+  | "girl5"
+  | "girl6"
+  | "girl7"
+  | "girl8"
+  | "girl9"
+  | "girl10";
 
 /**
- * Named personas. `voiceId` is always a built-in xAI id.
- * ara is "warm and friendly", eve is "energetic and upbeat", rex is "confident and clear".
- * Girl 1 and Girl 3 use ara. Girl 2 uses eve. sal and leo are the other male tones and are unused.
- * Display labels are Girl 1, regular dude, Girl 2, and Girl 3. Older aliases still select the same voice.
- * Delivery uses documented speech tags only. It does not add words to the user's line.
+ * Girl 1–10. Labels stay "Girl N". Higher numbers use stronger speech tags.
+ * Tags wrap the line and do not add words. rex, sal, and leo are unused.
+ * dude, guy, and regular are not voices.
  */
 export const VOICE_PERSONAS: readonly {
   id: VoicePersonaId;
@@ -33,7 +44,7 @@ export const VOICE_PERSONAS: readonly {
   deliver: (text: string) => string;
 }[] = [
   {
-    id: "sexy",
+    id: "girl1",
     label: "Girl 1",
     menuAlias: "girl1",
     aliases: ["girl1", "1", "sexy", "sexygirl"],
@@ -41,32 +52,86 @@ export const VOICE_PERSONAS: readonly {
     deliver: (text) => `<whisper>${text}</whisper>`,
   },
   {
-    id: "dude",
-    label: "regular dude",
-    menuAlias: "dude",
-    aliases: ["dude", "regular", "guy", "2"],
-    voiceId: "rex",
-    deliver: (text) => text,
-  },
-  {
-    id: "scared",
+    id: "girl2",
     label: "Girl 2",
     menuAlias: "girl2",
-    aliases: ["girl2", "3", "scared", "scaredgirl"],
+    aliases: ["girl2", "2", "scared", "scaredgirl"],
     voiceId: "eve",
     deliver: (text) => `[breath] <whisper><higher-pitch>${text}</higher-pitch></whisper>`,
   },
   {
-    id: "horny",
+    id: "girl3",
     label: "Girl 3",
     menuAlias: "girl3",
-    aliases: ["girl3", "4", "horny", "hornygirl"],
+    aliases: ["girl3", "3"],
     voiceId: "ara",
-    deliver: (text) => `<build-intensity>${text}</build-intensity>`,
+    deliver: (text) =>
+      `[sigh] [breath] <whisper><slow><higher-pitch>${text}</higher-pitch></slow></whisper>`,
+  },
+  {
+    id: "girl4",
+    label: "Girl 4",
+    menuAlias: "girl4",
+    aliases: ["girl4", "4"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] <whisper><slow><higher-pitch>${text}</higher-pitch></slow></whisper>`,
+  },
+  {
+    id: "girl5",
+    label: "Girl 5",
+    menuAlias: "girl5",
+    aliases: ["girl5", "5"],
+    voiceId: "ara",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] <whisper><slow><higher-pitch><emphasis>${text}</emphasis></higher-pitch></slow></whisper>`,
+  },
+  {
+    id: "girl6",
+    label: "Girl 6",
+    menuAlias: "girl6",
+    aliases: ["girl6", "6", "horny", "hornygirl"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] <whisper><higher-pitch><build-intensity>${text}</build-intensity></higher-pitch></whisper>`,
+  },
+  {
+    id: "girl7",
+    label: "Girl 7",
+    menuAlias: "girl7",
+    aliases: ["girl7", "7"],
+    voiceId: "ara",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] [exhale] <higher-pitch><fast><build-intensity>${text}</build-intensity></fast></higher-pitch>`,
+  },
+  {
+    id: "girl8",
+    label: "Girl 8",
+    menuAlias: "girl8",
+    aliases: ["girl8", "8"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[inhale] [sigh] [breath] [exhale] <loud><higher-pitch><fast><build-intensity>${text}</build-intensity></fast></higher-pitch></loud>`,
+  },
+  {
+    id: "girl9",
+    label: "Girl 9",
+    menuAlias: "girl9",
+    aliases: ["girl9", "9"],
+    voiceId: "ara",
+    deliver: (text) =>
+      `[inhale] [breath] [sigh] [exhale] [breath] <loud><higher-pitch><fast><build-intensity>${text}</build-intensity></fast></higher-pitch></loud>`,
+  },
+  {
+    id: "girl10",
+    label: "Girl 10",
+    menuAlias: "girl10",
+    aliases: ["girl10", "10"],
+    voiceId: "eve",
+    deliver: (text) =>
+      `[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>${text}</emphasis></build-intensity></higher-pitch></fast></loud>`,
   },
 ];
-/** Spoken text cap for Chat. The API allows much more; an mp3 of this size stays small. */
-export const VOICE_MAX_CHARS = 1_500;
 /** Default MP3 is 128 kbps. Used only to fill duration_millis on the Chat attachment. */
 export const VOICE_MP3_BIT_RATE = 128_000;
 export const MAX_VOICE_BYTES = 8 * 1024 * 1024;
@@ -80,7 +145,8 @@ export const VOICE_MENU_MESSAGE = [
       `${index + 1}. ${persona.label} — !voice ${persona.menuAlias} <text>`,
   ),
 ].join("\n");
-export const VOICE_TOO_LONG_MESSAGE = `That text is too long to speak here. Keep it under ${VOICE_MAX_CHARS} characters.`;
+/** Shown when the TTS API rejects the text for length. This bot does not cap the line. */
+export const VOICE_TOO_LONG_MESSAGE = "That text is too long to speak. Try a shorter line.";
 export const VOICE_UNAVAILABLE_MESSAGE = "Voice needs XAI_API_KEY.";
 export const VOICE_FAILED_MESSAGE = "Voice synthesis failed. Try again later.";
 export const VOICE_TOO_LARGE_MESSAGE = "That audio is too large to post in chat.";
@@ -89,7 +155,7 @@ export const VOICE_CHAT_REQUIRED_MESSAGE =
 export const VOICE_ATTACH_FAILED_MESSAGE = "Couldn't post that voice note. Try again.";
 export const VOICE_MODERATED_MESSAGE = "That text was blocked by content moderation.";
 
-export type VoiceRejectReason = "menu" | "refused" | "too_long";
+export type VoiceRejectReason = "menu" | "refused";
 
 export interface SpokenAudio {
   bytes: Uint8Array;
@@ -159,7 +225,6 @@ export function parseVoiceRequest(
   }
   if (!rest) return { ok: false, reason: "menu" };
   if (containsBannedAgeTerm(rest)) return { ok: false, reason: "refused" };
-  if (rest.length > VOICE_MAX_CHARS) return { ok: false, reason: "too_long" };
   return {
     ok: true,
     personaId: persona.id,
@@ -171,7 +236,6 @@ export function parseVoiceRequest(
 
 export function voicePromptRejection(reason: VoiceRejectReason): string {
   if (reason === "menu") return VOICE_MENU_MESSAGE;
-  if (reason === "too_long") return VOICE_TOO_LONG_MESSAGE;
   return IMAGINE_REFUSED_MESSAGE;
 }
 

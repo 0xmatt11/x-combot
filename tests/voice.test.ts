@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { IMAGINE_REFUSED_MESSAGE } from "../src/bot/imagine.js";
@@ -12,10 +13,10 @@ import {
   estimateMp3DurationMillis,
   MAX_VOICE_BYTES,
   parseVoiceRequest,
+  VOICE_PERSONAS,
   VOICE_ATTACH_FAILED_MESSAGE,
   VOICE_CHAT_REQUIRED_MESSAGE,
   VOICE_FAILED_MESSAGE,
-  VOICE_MAX_CHARS,
   VOICE_MENU_MESSAGE,
   VOICE_MODERATED_MESSAGE,
   VOICE_TOO_LARGE_MESSAGE,
@@ -84,44 +85,42 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("robot hello")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("sexy")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("teen portrait")).toEqual({ ok: false, reason: "refused" });
-    expect(VOICE_MENU_MESSAGE).toMatch(/Pick a voice, then your line:/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/1\. Girl 1 — !voice girl1 <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/2\. regular dude — !voice dude <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/3\. Girl 2 — !voice girl2 <text>/);
-    expect(VOICE_MENU_MESSAGE).toMatch(/4\. Girl 3 — !voice girl3 <text>/);
-    expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared/i);
+    expect(VOICE_MENU_MESSAGE).toBe(
+      [
+        "Pick a voice, then your line:",
+        ...Array.from({ length: 10 }, (_, index) => {
+          const n = index + 1;
+          return `${n}. Girl ${n} — !voice girl${n} <text>`;
+        }),
+      ].join("\n"),
+    );
     expect(DEFAULT_VOICE_LANGUAGE).toBe("en");
   });
 
   it("maps aliases onto built-in voices and speech tags", () => {
     expect(parseVoiceRequest("sexy hello there")).toEqual({
       ok: true,
-      personaId: "sexy",
+      personaId: "girl1",
       voiceId: "ara",
       text: "hello there",
       spoken: "<whisper>hello there</whisper>",
     });
     expect(parseVoiceRequest("1 hello there")).toMatchObject({
       ok: true,
-      personaId: "sexy",
+      personaId: "girl1",
       voiceId: "ara",
       text: "hello there",
     });
-    expect(parseVoiceRequest("SEXYGIRL hello")).toMatchObject({ personaId: "sexy", voiceId: "ara" });
-    expect(parseVoiceRequest("dude what's up")).toEqual({
-      ok: true,
-      personaId: "dude",
-      voiceId: "rex",
-      text: "what's up",
-      spoken: "what's up",
-    });
-    expect(parseVoiceRequest("2 what's up")).toMatchObject({ personaId: "dude", voiceId: "rex" });
-    expect(parseVoiceRequest("guy hey")).toMatchObject({ personaId: "dude", voiceId: "rex" });
-    expect(parseVoiceRequest("regular hey")).toMatchObject({ personaId: "dude" });
+    expect(parseVoiceRequest("SEXYGIRL hello")).toMatchObject({ personaId: "girl1", voiceId: "ara" });
+    expect(parseVoiceRequest("dude what's up")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("DUDE what's up")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("guy hey")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("regular hey")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("2 what's up")).toMatchObject({ personaId: "girl2", voiceId: "eve" });
     const scared = parseVoiceRequest("scared stay with me");
     expect(scared).toMatchObject({
       ok: true,
-      personaId: "scared",
+      personaId: "girl2",
       voiceId: "eve",
       text: "stay with me",
     });
@@ -129,28 +128,63 @@ describe("voice request checks", () => {
       expect(scared.spoken).toBe("[breath] <whisper><higher-pitch>stay with me</higher-pitch></whisper>");
       expect(scared.spoken).not.toMatch(/scared|nsfw/i);
     }
-    expect(parseVoiceRequest("3 stay")).toMatchObject({ personaId: "scared", voiceId: "eve" });
-    expect(parseVoiceRequest("scaredgirl stay")).toMatchObject({ personaId: "scared" });
+    expect(parseVoiceRequest("3 stay")).toMatchObject({ personaId: "girl3", voiceId: "ara" });
+    expect(parseVoiceRequest("scaredgirl stay")).toMatchObject({ personaId: "girl2" });
     const horny = parseVoiceRequest("horny hello there");
     expect(horny).toMatchObject({
       ok: true,
-      personaId: "horny",
-      voiceId: "ara",
+      personaId: "girl6",
+      voiceId: "eve",
       text: "hello there",
     });
     if (horny.ok) {
-      expect(horny.spoken).toBe("<build-intensity>hello there</build-intensity>");
+      expect(horny.spoken).toBe(
+        "[inhale] [sigh] [breath] <whisper><higher-pitch><build-intensity>hello there</build-intensity></higher-pitch></whisper>",
+      );
       expect(horny.spoken).not.toMatch(/horny|nsfw|sexy/i);
     }
-    expect(parseVoiceRequest("4 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
-    expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "horny", voiceId: "ara" });
-    expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "horny" });
+    expect(parseVoiceRequest("6 hello")).toMatchObject({ personaId: "girl6", voiceId: "eve" });
+    expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "girl3", voiceId: "ara" });
+    expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "girl6" });
+    const aliases = VOICE_PERSONAS.flatMap((persona) => persona.aliases);
+    expect(new Set(aliases).size).toBe(aliases.length);
+    expect(aliases).not.toContain("dude");
+    expect(aliases).not.toContain("guy");
+    expect(aliases).not.toContain("regular");
+    expect(VOICE_PERSONAS.map((persona) => persona.voiceId)).not.toContain("rex");
+    const line = "say this";
+    for (let n = 1; n <= 10; n += 1) {
+      const parsed = parseVoiceRequest(`girl${n} ${line}`);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) continue;
+      expect(parsed.personaId).toBe(`girl${n}`);
+      expect(parsed.text).toBe(line);
+      expect(parsed.spoken.replace(/<[^>]+>/g, "").replace(/\[[a-z-]+\]/gi, "").replace(/\s+/g, " ").trim()).toBe(
+        line,
+      );
+      expect(parseVoiceRequest(`${n} ${line}`)).toMatchObject({ ok: true, personaId: `girl${n}` });
+    }
+    const peak = parseVoiceRequest("girl10 say this");
+    const numberedPeak = parseVoiceRequest("10 say this");
+    expect(peak).toEqual(numberedPeak);
+    if (peak.ok) {
+      expect(peak.voiceId).toBe("eve");
+      expect(peak.spoken).toBe(
+        "[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>say this</emphasis></build-intensity></higher-pitch></fast></loud>",
+      );
+      expect(peak.spoken).toMatch(/\[breath\].*\[inhale\].*\[sigh\].*\[exhale\].*<loud>.*<fast>.*<higher-pitch>.*<build-intensity>/);
+    }
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
-    expect(parseVoiceRequest(`sexy ${"a".repeat(VOICE_MAX_CHARS)}`).ok).toBe(true);
-    expect(parseVoiceRequest(`dude ${"a".repeat(VOICE_MAX_CHARS + 1)}`)).toEqual({
-      ok: false,
-      reason: "too_long",
-    });
+    const longLine = "a".repeat(20_000);
+    const long = parseVoiceRequest(`girl1 ${longLine}`);
+    expect(long.ok).toBe(true);
+    if (long.ok) {
+      expect(long.personaId).toBe("girl1");
+      expect(long.voiceId).toBe("ara");
+      expect(long.text).toHaveLength(20_000);
+      expect(long.spoken).toBe(`<whisper>${longLine}</whisper>`);
+    }
+    expect(VOICE_TOO_LONG_MESSAGE).not.toMatch(/1500|character/i);
   });
 
   it("estimates a 128 kbps duration of at least 1 ms", () => {
@@ -283,6 +317,20 @@ describe("voice client", () => {
     expect((error as VoiceError).userMessage).toBe(VOICE_FAILED_MESSAGE);
   });
 
+  it("reports an API length rejection without imposing a local character cap", async () => {
+    const client = createVoiceClient({
+      apiKey: "test-key",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: "Text exceeds the maximum length." }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    await expect(client.synthesize("a".repeat(20_000), "rex")).rejects.toMatchObject({
+      userMessage: VOICE_TOO_LONG_MESSAGE,
+    });
+  });
+
   it("uses a short moderation line when the API blocks the text", async () => {
     const client = createVoiceClient({
       apiKey: "test-key",
@@ -382,7 +430,7 @@ describe("!voice command", () => {
     expect(JSON.stringify(client.sent)).not.toContain("hello from the group");
   });
 
-  it("speaks a numbered persona and a dude line", async () => {
+  it("speaks a numbered persona and Girl 10", async () => {
     const numbered = setup();
     await numbered.engine.processEvent(
       message({ id: "v1", conversationId: chatGroupId, text: "!voice 1 hello there" }),
@@ -391,12 +439,16 @@ describe("!voice command", () => {
       { text: "<whisper>hello there</whisper>", voiceId: "ara" },
     ]);
 
-    const dude = setup();
-    await dude.engine.processEvent(
-      message({ id: "v2", conversationId: chatGroupId, text: "/voice dude what's up" }),
+    const peak = setup();
+    await peak.engine.processEvent(
+      message({ id: "v10", conversationId: chatGroupId, text: "!voice 10 say this" }),
     );
-    expect(dude.voice.prompts).toEqual([{ text: "what's up", voiceId: "rex" }]);
-    expect(dude.client.audios[0]?.voiceId).toBe("rex");
+    expect(peak.voice.prompts).toEqual([
+      {
+        text: "[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>say this</emphasis></build-intensity></higher-pitch></fast></loud>",
+        voiceId: "eve",
+      },
+    ]);
   });
 
   it("tells a classic group DM that Chat is required and does not call the API", async () => {
@@ -420,7 +472,7 @@ describe("!voice command", () => {
     expect(actions.replies[0]).not.toContain("hello from the group");
   });
 
-  it("shows the menu when no persona is chosen, and refuses minor or oversized lines", async () => {
+  it("shows the menu when no persona is chosen, and refuses minor lines", async () => {
     const { engine, client, voice } = setup();
     await engine.processEvent(message({ id: "empty", conversationId: chatGroupId, text: "!voice" }));
     await engine.processEvent(message({ id: "blank", conversationId: chatGroupId, text: "!voice   " }));
@@ -431,7 +483,13 @@ describe("!voice command", () => {
       message({ id: "bad-voice", conversationId: chatGroupId, text: "!voice robot hello" }),
     );
     await engine.processEvent(
-      message({ id: "long", conversationId: chatGroupId, text: `!voice dude ${"b".repeat(VOICE_MAX_CHARS + 1)}` }),
+      message({ id: "old-dude", conversationId: chatGroupId, text: "/voice dude what's up" }),
+    );
+    await engine.processEvent(
+      message({ id: "old-guy", conversationId: chatGroupId, text: "!voice guy hey" }),
+    );
+    await engine.processEvent(
+      message({ id: "old-regular", conversationId: chatGroupId, text: "!voice regular hey" }),
     );
     await engine.processEvent(
       message({ id: "teen", conversationId: chatGroupId, text: "!voice sexy teen portrait" }),
@@ -439,7 +497,7 @@ describe("!voice command", () => {
     expect(voice.prompts).toHaveLength(0);
     const text = client.sent.map((row) => row.text).join("\n");
     expect(text).toContain(VOICE_MENU_MESSAGE);
-    expect(text).toContain(VOICE_TOO_LONG_MESSAGE);
+    expect(text).not.toContain(VOICE_TOO_LONG_MESSAGE);
     expect(text).toContain(IMAGINE_REFUSED_MESSAGE);
     expect(text).not.toMatch(/teen/);
 
@@ -451,14 +509,49 @@ describe("!voice command", () => {
     expect(missing.client.sent[0]?.text).toMatch(/XAI_API_KEY/);
   });
 
+  it("speaks a line longer than the old 1500 character cap", async () => {
+    const { engine, client, voice } = setup();
+    const line = "b".repeat(1_501);
+    await engine.processEvent(
+      message({ id: "long", conversationId: chatGroupId, text: `!voice girl1 ${line}` }),
+    );
+    expect(voice.prompts).toEqual([{ text: `<whisper>${line}</whisper>`, voiceId: "ara" }]);
+    expect(client.audios).toHaveLength(1);
+    expect(client.sent.map((row) => row.text).join("\n")).not.toContain(VOICE_TOO_LONG_MESSAGE);
+  });
+
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!voice/);
-    expect(loaded.help).toMatch(/Girl 1/);
-    expect(loaded.help).toMatch(/Girl 2/);
-    expect(loaded.help).toMatch(/Girl 3/);
-    expect(loaded.help).toMatch(/regular dude/);
-    expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
+    expect(loaded.help).toMatch(/Girl 1 through Girl 10/);
+    expect(loaded.help).not.toMatch(/regular dude|\bdude\b|\bguy\b|\brex\b/i);
+    const voiceCopy = [
+      VOICE_MENU_MESSAGE,
+      VOICE_TOO_LONG_MESSAGE,
+      VOICE_UNAVAILABLE_MESSAGE,
+      VOICE_FAILED_MESSAGE,
+      VOICE_TOO_LARGE_MESSAGE,
+      VOICE_CHAT_REQUIRED_MESSAGE,
+      VOICE_ATTACH_FAILED_MESSAGE,
+      VOICE_MODERATED_MESSAGE,
+      loaded.help,
+    ].join("\n");
+    expect(voiceCopy).not.toMatch(
+      /horny|sexy|scared|orgasm|pound|moan|whisper|intensity|breath|spicy|erotic|\badult\b/i,
+    );
+    expect(loaded.help).not.toMatch(/1500/);
+    expect(loaded.welcome.text).not.toMatch(/1500/);
+
+    const readme = fs.readFileSync("README.md", "utf8");
+    const voice = readme.split("## Voice")[1]?.split("## Troll")[0] ?? "";
+    expect(voice.length).toBeGreaterThan(0);
+    for (let n = 1; n <= 10; n += 1) {
+      expect(voice).toContain(`${n}. Girl ${n} —`);
+      expect(voice).toContain(`!voice girl${n} <text>`);
+    }
+    expect(voice).not.toMatch(
+      /horny|sexy|scared|orgasm|pound|moan|whisper|intensity|breath|sigh|spicy|erotic|\badult\b|dude|guy|\brex\b/i,
+    );
   });
 
   it("posts the client error line and does not include the API payload", async () => {
