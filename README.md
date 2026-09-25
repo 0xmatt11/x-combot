@@ -241,7 +241,7 @@ Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2
 
 `/` is an alias for `!`. Every in-chat reply to a command tags the sender (`@handle` when that account has one, otherwise their display name) and, in encrypted Chat, is an `encryptReply` under that command message. The handle is a mention entity. Classic group DMs have no reply field, so the same `@handle` is only the start of the text. Media from `!imagine`, `!video`, `!voice`, and the adult commands uses that label as the only caption. Admin warn DMs go to the admin's inbox, so those stay unthreaded. Welcome and leave lines already name the member and are not command replies, so they stay as written.
 
-User command messages auto-delete after 15 minutes when the API allows. Bot replies stay. That is every public command on the `!help` list, including `!help` itself, `!rules`, the games, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, `!linkroast`, `!xp`, `!top`, and `!boobs` / `!ass` / `!booty`. `/` forms are the same commands. The bang line is what gets removed. The delivered content stays: help text, pictures, video, voice notes, game posts, `!ask` answers, roasts (`!roast`, `!troll` replies, `!linkroast`), and `!status`. Admin bangs such as `!warn` drop the same way; the confirmation stays, and the warn, mute, note, and `!auth` rows in SQLite stay. A restart drops timers that have not fired, so that bang stays in the chat. Classic group DMs can delete only events this account sent (`DELETE /2/dm_events/:id`), so the member's command is left in place and the skip is logged. Those DMs also have no reply field, so there is no parent thread to orphan.
+User command messages auto-delete after 15 minutes when the API allows. Bot replies stay. That is every public command on the `!help` list, including `!help` itself, `!rules`, the games, `!ask` / `!summarize` / `!analyze`, `!request`, `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, `!linkroast`, `!xp`, `!top`, and `!boobs` / `!ass` / `!booty`. `/` forms are the same commands. The bang line is what gets removed. The delivered content stays: help text, pictures, video, voice notes, game posts, `!ask` answers, roasts (`!roast`, `!troll` replies, `!linkroast`), and `!status`. Admin bangs such as `!warn` drop the same way; the confirmation stays, and the warn, mute, note, and `!auth` rows in SQLite stay. A restart drops timers that have not fired, so that bang stays in the chat. Classic group DMs can delete only events this account sent (`DELETE /2/dm_events/:id`), so the member's command is left in place and the skip is logged. Those DMs also have no reply field, so there is no parent thread to orphan.
 
 Encrypted Chat still posts the bot reply immediately as an `encryptReply` under the command, with the `@handle` mention. Fifteen minutes later the cleanup calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all` and only that command's `sequence_id`. The body does not include the reply's sequence id and does not send `media_hash_keys`. Chat delete removes the listed sequences only. The reply is its own message: `encryptReply` copies a `replying_to_preview` into the reply when it is sent, and the reply keeps its own text, mention entity, and media. Deleting the command does not delete or hide that reply. After the parent sequence is gone, the quote strip on the reply can show the command as deleted. The reply bubble stays in the chat with its text, pictures, and `@mention`. A command with no sequence id is skipped and logged. The `!auth` bang is deleted on that timer. The confirmation stays in the chat. The `chat_authorizations` row is what keeps the group unlocked.
 
@@ -264,6 +264,7 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | `!ask <question>` | Ask the bot. Also `@botname …` |
 | `!summarize` | Recap this chat |
 | `!analyze` | Ask about this chat |
+| `!request <idea>` | File a feature (`!featurerequest`). A few questions, then it is sent on. See [Feature requests](#feature-requests) |
 | `!<made-up>` | Short LLM joke when the model is on. Real commands, including `!admin`, do not take this path |
 
 **Media**
@@ -586,6 +587,28 @@ The roast uses the same LLM completion path as `!troll` (Grok when that provider
 
 The snapshot is whatever this process already knows. It does not call X, the LLM, or Imagine to build the reply. It names the bot handle when one is known, how long this process has been up, and whether the Chat poller and Activity push are ok, still starting, off, or degraded. The keys line is the one to read when bangs go quiet: `BACKOFF` means `GET /2/users/…/public_keys` returned 429 or 402 and signing-key loads are waiting that window out. Cached user and signing-key counts stay on that line so you can see what decrypt already holds. A clear cache says `Keys: ok`. LLM is the configured provider and model, or `off`. Imagine is `browser` when `IMAGINE_BACKEND` is browser (the default: grok.com/imagine in the signed-in Chrome session) or `api` when it is `api`, with `video` when that API client is on. `api off` means the API backend is selected but no xAI key is configured. This chat's welcome, troll, and linkroast flags are included. Public media-bank counts are included only when those URL lists are already loaded. The package version and a short git sha are added when the files can be read. Tokens, API keys, and environment dumps are not included.
 
+## Feature requests
+
+`!request <idea>` (alias `!featurerequest`, and the `/` forms) lets anyone in an authorized chat ask for a feature. The bot does not implement it in this process. Chief of Staff and cloud agents do that after review.
+
+Bare `!request` asks what they want. With an idea, the bot uses the same LLM client as `!ask` (no group history) to ask a few short questions about the goal, a constraint, or an example, and nudges toward an MVP. It stops after three questions. `just build it`, `MVP is fine`, or about ten minutes of silence files whatever is already known. Those model calls share the per-user LLM rate limit; over the limit, it files without another question. If the model is off or the call fails, it still files from the text it has.
+
+The in-chat confirmation is a short summary. It tags the requester and, in encrypted Chat, threads under their message, the same way other command replies do.
+
+Then the bot POSTs JSON to `REQUEST_WEBHOOK_URL`. When `REQUEST_WEBHOOK_SECRET` is set, the header is `Authorization: Bearer <secret>`. No other secret header is sent. The body is:
+
+| Field | |
+| --- | --- |
+| `type` | `feature_request` |
+| `summary`, `detail`, `mvp_scope` | What will be filed. `summary` is the in-chat line |
+| `requester` | `id`, plus `username` and `displayName` when known |
+| `conversationId` | The chat it was asked in |
+| `clarification` | Q&A transcript (`user` / `bot` turns) |
+| `complexity_hint` | LLM guess: `simple`, `medium`, or `large`. Chief of Staff decides for real |
+| `timestamp` | ISO time |
+
+Every filing is also stored in SQLite `feature_requests`. If `REQUEST_WEBHOOK_URL` is unset, or the POST fails, the bot says it was recorded locally and DMs `BOT_OWNER_ID` when that send works. The secret is not logged and is not copied into the chat. Redirects are not followed, so the URL should be the final endpoint. An unfinished Q&A is kept in memory; a restart drops it, and the requester can send `!request` again. Filed rows stay in SQLite.
+
 ## LLM replies
 
 Independent of the X API tier. The bot calls OpenAI-compatible **Chat Completions** (`POST {base}/chat/completions`). `LLM_PROVIDER` wins over `llm.provider` in YAML. There is no per-conversation provider switch.
@@ -601,7 +624,7 @@ Independent of the X API tier. The bot calls OpenAI-compatible **Chat Completion
 
 **Grok.** `Authorization: Bearer $XAI_API_KEY` against `https://api.x.ai/v1/chat/completions`. Create a key at [console.x.ai](https://console.x.ai). xAI also documents a Responses API; this bot stays on Chat Completions so every provider shares one client. Default model is `grok-4.6`. `LLM_PROVIDER=grok` or `openai` without a key exits at startup. Leaving the provider unset and omitting keys still starts the bot; `!ask` then explains how to configure it. Local providers do not require a cloud key. `127.0.0.1` only works when the bot process can open that port.
 
-Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!ship`, `!hit`, `!stand`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
+Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!request`, `!featurerequest`, `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!ship`, `!hit`, `!stand`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
 
 | `llm.context_mode` | What is sent | Reads |
 | --- | --- | --- |
@@ -643,6 +666,8 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `ACTIVITY_BEARER_TOKEN` | App-only bearer for list, stream, and `POST /2/webhooks` |
 | `ACTIVITY_WEBHOOK_PORT`, `ACTIVITY_WEBHOOK_PATH`, `ACTIVITY_WEBHOOK_URL` | Local listener and the public HTTPS URL |
 | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY` | Provider selection. See [LLM replies](#llm-replies) |
+| `REQUEST_WEBHOOK_URL` | `!request` POSTs `feature_request` JSON here. Unset stores it and DMs `BOT_OWNER_ID`. See [Feature requests](#feature-requests) |
+| `REQUEST_WEBHOOK_SECRET` | Optional. Sent as `Authorization: Bearer <secret>`. Not logged |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI, and the last-resort key for Grok |
 | `XAI_API_KEY` | Preferred Grok key. TTS, LLM, and Imagine only when `IMAGINE_BACKEND=api` |
 | `IMAGINE_BACKEND` | `browser` (default) or `api`. Browser does not call image or video generation routes |
@@ -676,13 +701,14 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 
 `config/default.yaml` holds welcome and leave text (leave is on), rules, public help (including `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, and `!linkroast`; admin commands are `admin_help`, shown by `!admin`), flood (off by default: `max_messages: 0` disables it; `window_ms` stays 8000 and `mute_ms` stays 300000 so a group can turn it back on with `!set flood_max_messages` above 0), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine backend, Chrome profile, CDP URL, model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, `BOOBS_IMAGINE_APP`, the public CDN URLs (including `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS` and the three per-command video URL lists), the video model, duration, aspect ratio, and resolution, and the voice language are env-only. `!voice` personas are fixed in the bot. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits, reaction removals, and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
 
-SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` target, the per-conversation `!linkroast` flag and per-user roast times, and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
+SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` target, the per-conversation `!linkroast` flag and per-user roast times, filed `!request` payloads (`feature_requests`), and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
 
 ## Layout
 
 ```
 src/index.ts            # poll loops, Chat listen policy, Activity stream/webhook
 src/bot/engine.ts       # commands, XP, LLM dispatch
+src/bot/feature-request.ts # !request Q&A, webhook POST, owner-DM fallback
 src/bot/parser.ts       # command and wake parsing
 src/bot/status.ts       # !status text from in-process health (no extra API calls)
 src/bot/games/          # !dice, instant games, !minesweeper, word/solo, multiplayer, casino, and the !games catalog

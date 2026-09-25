@@ -250,8 +250,19 @@ async function main(): Promise<void> {
       llmMode: llm.mode,
       imagineBackend: backend,
       buildVersion: readBuildVersion(),
+      featureRequest: {
+        webhookUrl: env.requestWebhookUrl,
+        webhookSecret: env.requestWebhookSecret,
+      },
     },
   );
+  if (env.requestWebhookUrl) {
+    log.info("!request will POST feature requests to REQUEST_WEBHOOK_URL.");
+  } else {
+    log.info(
+      "!request has no REQUEST_WEBHOOK_URL. Requests are stored locally and DM BOT_OWNER_ID.",
+    );
+  }
 
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;
   const activity = resolveActivitySettings(env, defaults);

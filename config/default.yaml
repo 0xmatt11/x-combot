@@ -35,6 +35,7 @@ help: |
   !ask <question> — ask the bot
   !summarize — recap this chat
   !analyze — ask about this chat
+  !request <idea> — file a feature (!featurerequest)
 
   Media
   !imagine <prompt> — image on grok.com/imagine

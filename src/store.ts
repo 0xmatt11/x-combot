@@ -169,6 +169,14 @@ CREATE TABLE IF NOT EXISTS chat_authorizations (
   conversation_id TEXT PRIMARY KEY,
   authorized_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS feature_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL,
+  requester_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `;
 
 export class Store {
@@ -884,6 +892,40 @@ export class Store {
       )
       .get(conversationId, userId) as { last_ms: number } | undefined;
     return row?.last_ms;
+  }
+
+  /** Persist a filed `!request` payload. Kept when the webhook is unset or the POST fails. */
+  addFeatureRequest(
+    conversationId: string,
+    requesterId: string,
+    payload: string,
+    createdAt: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO feature_requests (conversation_id, requester_id, payload, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(conversationId, requesterId, payload, createdAt);
+  }
+
+  /** Filed feature requests for this conversation, oldest first. */
+  listFeatureRequests(
+    conversationId: string,
+  ): { requesterId: string; payload: string; createdAt: string }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT requester_id, payload, created_at
+         FROM feature_requests
+         WHERE conversation_id = ?
+         ORDER BY id ASC`,
+      )
+      .all(conversationId) as { requester_id: string; payload: string; created_at: string }[];
+    return rows.map((row) => ({
+      requesterId: row.requester_id,
+      payload: row.payload,
+      createdAt: row.created_at,
+    }));
   }
 
   /** Record a posted link roast for this sender. */

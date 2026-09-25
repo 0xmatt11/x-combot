@@ -1,0 +1,569 @@
+import fs from "node:fs";
+import { afterEach, describe, expect, it } from "vitest";
+import { ModerationEngine } from "../src/bot/engine.js";
+import {
+  buildFeatureRequestPayload,
+  fallbackFeatureFiling,
+  parseFeatureRequestModel,
+  postFeatureRequestWebhook,
+  readRequestReply,
+  type FeatureRequestFetch,
+  type FeatureRequestPayload,
+} from "../src/bot/feature-request.js";
+import { parseCommand, parseUnknownBang } from "../src/bot/parser.js";
+import { loadDefaults } from "../src/config.js";
+import { loadEnv } from "../src/env.js";
+import { MockLlmClient } from "../src/llm/mock.js";
+import { Store } from "../src/store.js";
+import type { BotRuntimeConfig, DefaultsConfig, DmEvent, XUser } from "../src/types.js";
+import { MockXClient } from "../src/x/mock-client.js";
+
+const alice: XUser = { id: "u-alice", username: "alice", name: "Alice" };
+const bob: XUser = { id: "u-bob", username: "bob", name: "Bob" };
+const owner: XUser = { id: "u-owner", username: "owner", name: "Owner" };
+const groupId = "1578398451921985538";
+
+const defaults: DefaultsConfig = {
+  welcome: { enabled: false, text: "Welcome @{username}!" },
+  rules: "Be nice.",
+  help: "Type !rules",
+  flood: { max_messages: 0, window_ms: 10_000, mute_ms: 60_000, warn_on_flood: false },
+  warns: { limit: 3, auto_mute_ms: 60_000, notify_admins: false },
+  filters: [],
+  poll: { interval_ms: 1000, max_results: 50 },
+  delete: { attempt_on_filter: false, attempt_on_flood: false, attempt_on_mute: false },
+};
+
+function ask(question: string): string {
+  return JSON.stringify({ action: "ask", question });
+}
+
+function finalize(fields: {
+  summary: string;
+  detail: string;
+  mvp_scope: string;
+  complexity_hint?: "simple" | "medium" | "large";
+}): string {
+  return JSON.stringify({ action: "finalize", complexity_hint: "simple", ...fields });
+}
+
+interface FetchCall {
+  url: string;
+  init?: RequestInit;
+}
+
+function recordingFetch(calls: FetchCall[], status = 200): FeatureRequestFetch {
+  return async (url, init) => {
+    calls.push({ url, init });
+    return new Response(status === 200 ? "ok" : "no", { status });
+  };
+}
+
+function headersOf(init?: RequestInit): Record<string, string> {
+  return (init?.headers ?? {}) as Record<string, string>;
+}
+
+function bodyOf(init?: RequestInit): FeatureRequestPayload {
+  return JSON.parse(String(init?.body)) as FeatureRequestPayload;
+}
+
+function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "senderId" | "text">): DmEvent {
+  const sender =
+    partial.sender ?? [alice, bob, owner].find((user) => user.id === partial.senderId);
+  return {
+    eventType: "MessageCreate",
+    conversationId: groupId,
+    participantIds: [],
+    participants: [],
+    mentions: [],
+    sender,
+    ...partial,
+  };
+}
+
+describe("parseCommand !request", () => {
+  it("accepts the command and the alias", () => {
+    expect(parseCommand("!request")).toEqual({ name: "request" });
+    expect(parseCommand("!request add a dice history command")).toEqual({
+      name: "request",
+      idea: "add a dice history command",
+    });
+    expect(parseCommand("!featurerequest dark mode")).toEqual({
+      name: "request",
+      idea: "dark mode",
+    });
+    expect(parseCommand("/REQUEST  ship it")).toEqual({ name: "request", idea: "ship it" });
+    expect(parseUnknownBang("!request")).toBeUndefined();
+    expect(parseUnknownBang("!featurerequest now")).toBeUndefined();
+    expect(parseUnknownBang("/request")).toBeUndefined();
+  });
+});
+
+describe("feature request model", () => {
+  it("reads skip phrases without eating a real idea", () => {
+    expect(readRequestReply("just build it")).toEqual({ skip: true, detail: "" });
+    expect(readRequestReply("MVP is fine!")).toEqual({ skip: true, detail: "" });
+    expect(readRequestReply("dark mode, just build it")).toEqual({
+      skip: true,
+      detail: "dark mode",
+    });
+    expect(readRequestReply("I want a dice history command")).toEqual({
+      skip: false,
+      detail: "I want a dice history command",
+    });
+  });
+
+  it("parses an ask, a filing, and a fenced reply", () => {
+    expect(parseFeatureRequestModel('```json\n{"action":"ask","question":"Who is it for?"}\n```')).toEqual({
+      action: "ask",
+      question: "Who is it for?",
+    });
+    expect(
+      parseFeatureRequestModel(
+        finalize({
+          summary: "Dice history",
+          detail: "Show the last rolls.",
+          mvp_scope: "Last 10 rolls for the sender.",
+          complexity_hint: "simple",
+        }),
+      ),
+    ).toMatchObject({
+      action: "finalize",
+      summary: "Dice history",
+      complexity_hint: "simple",
+    });
+    expect(parseFeatureRequestModel("not json")).toBeUndefined();
+    expect(
+      parseFeatureRequestModel(
+        '{"action":"finalize","summary":"X","detail":"Y","mvp_scope":"Z","complexity_hint":"huge"}',
+      ),
+    ).toMatchObject({ complexity_hint: "medium" });
+  });
+
+  it("posts JSON with a bearer token only when a secret is set", async () => {
+    const calls: FetchCall[] = [];
+    const payload = buildFeatureRequestPayload({
+      filing: fallbackFeatureFiling([{ role: "user", text: "dark mode" }]),
+      requester: { id: alice.id, username: "alice" },
+      conversationId: groupId,
+      clarification: [{ role: "user", text: "dark mode" }],
+      timestamp: "2026-09-25T15:00:00.000Z",
+    });
+    await postFeatureRequestWebhook({
+      url: "https://hooks.example/request",
+      secret: "sek",
+      payload,
+      fetchImpl: recordingFetch(calls),
+    });
+    expect(calls[0]?.url).toBe("https://hooks.example/request");
+    expect(headersOf(calls[0]?.init).Authorization).toBe("Bearer sek");
+    expect(headersOf(calls[0]?.init)["Content-Type"]).toBe("application/json");
+    expect(bodyOf(calls[0]?.init)).toMatchObject({ type: "feature_request", summary: "dark mode" });
+    expect(JSON.stringify(bodyOf(calls[0]?.init))).not.toContain("sek");
+
+    calls.length = 0;
+    await postFeatureRequestWebhook({
+      url: "https://hooks.example/request",
+      payload,
+      fetchImpl: recordingFetch(calls),
+    });
+    expect(headersOf(calls[0]?.init).Authorization).toBeUndefined();
+    await expect(
+      postFeatureRequestWebhook({
+        url: "https://hooks.example/request",
+        payload,
+        fetchImpl: recordingFetch([], 500),
+      }),
+    ).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("!request", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  function setup(options?: {
+    replies?: string[];
+    webhookUrl?: string;
+    webhookSecret?: string;
+    fetchImpl?: FeatureRequestFetch;
+    timeoutMs?: number;
+    help?: string;
+  }): {
+    engine: ModerationEngine;
+    client: MockXClient;
+    store: Store;
+    llm: MockLlmClient;
+  } {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(bob);
+    client.addUser(owner);
+    const config: BotRuntimeConfig = {
+      botUserId: "bot-1",
+      ownerId: owner.id,
+      globalAdminIds: [],
+      defaults: options?.help ? { ...defaults, help: options.help } : defaults,
+    };
+    const llm = new MockLlmClient(options?.replies ?? [ask("Who is it for?")]);
+    const engine = new ModerationEngine(store, client, config, llm, {
+      featureRequest: {
+        webhookUrl: options?.webhookUrl,
+        webhookSecret: options?.webhookSecret,
+        fetchImpl: options?.fetchImpl,
+        timeoutMs: options?.timeoutMs,
+      },
+    });
+    return { engine, client, store, llm };
+  }
+
+  it("asks what they want, then one clarifying question", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client, llm } = setup({
+      replies: [ask("Should it reset daily?")],
+      webhookUrl: "https://hooks.example/request",
+      fetchImpl: recordingFetch(calls),
+    });
+    const opened = await engine.processEvent(
+      message({
+        id: "req-1",
+        senderId: alice.id,
+        text: "!request",
+        sequenceId: "55",
+        encodedEvent: "blob-req",
+      }),
+    );
+    expect(llm.calls).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(opened.replies[0]).toMatch(/@alice What feature do you want/);
+    expect(client.sent[0]).toMatchObject({
+      replyToSequenceId: "55",
+      replyToEvent: "blob-req",
+    });
+
+    const clarified = await engine.processEvent(
+      message({
+        id: "req-2",
+        senderId: alice.id,
+        text: "a command that shows dice history",
+        sequenceId: "56",
+        encodedEvent: "blob-2",
+      }),
+    );
+    expect(llm.calls).toHaveLength(1);
+    expect(clarified.replies[0]).toBe("@alice Should it reset daily?");
+    expect(clarified.llm).toBe(true);
+    expect(client.sent[1]).toMatchObject({ replyToSequenceId: "56" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("stops after three questions even if the model wants another", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client, llm } = setup({
+      replies: [
+        ask("Who is it for?"),
+        ask("Any example?"),
+        ask("What is the constraint?"),
+        ask("Still more?"),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      webhookSecret: "hook-secret",
+      fetchImpl: recordingFetch(calls),
+    });
+    await engine.processEvent(
+      message({ id: "b1", senderId: alice.id, text: "!request per-user dice history" }),
+    );
+    await engine.processEvent(message({ id: "b2", senderId: alice.id, text: "for regulars" }));
+    await engine.processEvent(
+      message({ id: "b3", senderId: alice.id, text: "show the last 10" }),
+    );
+    const filed = await engine.processEvent(
+      message({ id: "b4", senderId: alice.id, text: "in this chat" }),
+    );
+
+    expect(llm.calls).toHaveLength(4);
+    const lastPrompt = llm.calls[3]?.find((message) => message.role === "user")?.content ?? "";
+    expect(lastPrompt).toContain("must_finalize: true");
+    expect(lastPrompt).toContain("questions_asked: 3");
+    const texts = client.sent.map((row) => row.text);
+    expect(texts.filter((text) => text.includes("Who is it for?"))).toHaveLength(1);
+    expect(texts.filter((text) => text.includes("Any example?"))).toHaveLength(1);
+    expect(texts.filter((text) => text.includes("What is the constraint?"))).toHaveLength(1);
+    expect(texts.join("\n")).not.toContain("Still more?");
+    expect(filed.replies[0]).toMatch(/Filed: per-user dice history/);
+    expect(filed.replies[0]).toMatch(/Sent that to Chief of Staff/);
+    expect(calls).toHaveLength(1);
+    expect(headersOf(calls[0]?.init).Authorization).toBe("Bearer hook-secret");
+    const body = bodyOf(calls[0]?.init);
+    expect(body.type).toBe("feature_request");
+    expect(body.summary).toBe("per-user dice history");
+    expect(body.conversationId).toBe(groupId);
+    expect(body.requester).toEqual({
+      id: alice.id,
+      username: "alice",
+      displayName: "Alice",
+    });
+    expect(body.clarification.map((turn) => turn.role)).toEqual([
+      "user",
+      "bot",
+      "user",
+      "bot",
+      "user",
+      "bot",
+      "user",
+    ]);
+    expect(JSON.stringify(body)).not.toContain("hook-secret");
+    expect(client.direct).toEqual([]);
+  });
+
+  it("files a skipped Q&A to the webhook with the model summary", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client, llm } = setup({
+      replies: [
+        ask("Follow the phone, or a chat toggle?"),
+        finalize({
+          summary: "Dark mode toggle",
+          detail: "A chat command that switches the bot's replies to a dark theme.",
+          mvp_scope: "One command that toggles dark mode for the sender.",
+          complexity_hint: "simple",
+        }),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      webhookSecret: "hook-secret",
+      fetchImpl: recordingFetch(calls),
+    });
+    await engine.processEvent(
+      message({
+        id: "f1",
+        senderId: alice.id,
+        text: "!featurerequest add a dark mode toggle",
+        sequenceId: "9",
+        encodedEvent: "blob-f",
+      }),
+    );
+    const filed = await engine.processEvent(
+      message({
+        id: "f2",
+        senderId: alice.id,
+        text: "MVP is fine",
+        sequenceId: "10",
+        encodedEvent: "blob-f2",
+      }),
+    );
+
+    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls[1]?.find((message) => message.role === "user")?.content).toContain(
+      "must_finalize: true",
+    );
+    expect(filed.replies).toEqual([
+      "@alice Filed: Dark mode toggle\nMVP: One command that toggles dark mode for the sender.\nSent that to Chief of Staff.",
+    ]);
+    expect(client.sent[1]).toMatchObject({ replyToSequenceId: "10", replyToEvent: "blob-f2" });
+    expect(client.direct).toEqual([]);
+    const body = bodyOf(calls[0]?.init);
+    expect(body).toMatchObject({
+      type: "feature_request",
+      summary: "Dark mode toggle",
+      detail: "A chat command that switches the bot's replies to a dark theme.",
+      mvp_scope: "One command that toggles dark mode for the sender.",
+      complexity_hint: "simple",
+      requester: { id: alice.id, username: "alice", displayName: "Alice" },
+      conversationId: groupId,
+    });
+    expect(body.clarification.map((turn) => turn.text)).toEqual([
+      "add a dark mode toggle",
+      "Follow the phone, or a chat toggle?",
+      "MVP is fine",
+    ]);
+    expect(body.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(headersOf(calls[0]?.init).Authorization).toBe("Bearer hook-secret");
+  });
+
+  it("does not take another member's message or a different command as the answer", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client } = setup({
+      replies: [
+        ask("Who is it for?"),
+        finalize({
+          summary: "Dice history",
+          detail: "Last rolls.",
+          mvp_scope: "Last 10 rolls.",
+        }),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      fetchImpl: recordingFetch(calls),
+    });
+    await engine.processEvent(
+      message({ id: "o1", senderId: alice.id, text: "!request dice history" }),
+    );
+    await engine.processEvent(message({ id: "o2", senderId: bob.id, text: "a totally different thing" }));
+    await engine.processEvent(message({ id: "o3", senderId: alice.id, text: "!rules" }));
+    expect(calls).toHaveLength(0);
+    expect(client.sent.map((row) => row.text).join("\n")).toMatch(/Be nice/);
+    await engine.processEvent(message({ id: "o4", senderId: alice.id, text: "just build it" }));
+    expect(calls).toHaveLength(1);
+    expect(bodyOf(calls[0]?.init).summary).toBe("Dice history");
+  });
+
+  it("records locally and DMs the owner when the webhook is unset", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client, store } = setup({
+      replies: [
+        finalize({
+          summary: "Pin a rules message",
+          detail: "Keep the group rules at the top of the chat.",
+          mvp_scope: "Repost !rules when asked to pin.",
+          complexity_hint: "medium",
+        }),
+      ],
+      fetchImpl: recordingFetch(calls),
+    });
+    const filed = await engine.processEvent(
+      message({ id: "m1", senderId: alice.id, text: "!request pin the rules message" }),
+    );
+    expect(calls).toHaveLength(0);
+    expect(filed.replies[0]).toMatch(/Filed: Pin a rules message/);
+    expect(filed.replies[0]).toMatch(/Recorded locally/);
+    expect(filed.replies[0]).toMatch(/owner will see it/);
+    expect(client.direct).toHaveLength(1);
+    expect(client.direct[0]?.participantId).toBe(owner.id);
+    expect(client.direct[0]?.text).toContain("Pin a rules message");
+    expect(client.direct[0]?.text).toContain("@alice");
+    expect(client.direct[0]?.text).toContain(groupId);
+    const stored = store.listFeatureRequests(groupId);
+    expect(stored).toHaveLength(1);
+    expect(JSON.parse(stored[0]!.payload).type).toBe("feature_request");
+  });
+
+  it("falls back to a local record when the webhook rejects the POST", async () => {
+    const { engine, client } = setup({
+      replies: [
+        finalize({
+          summary: "Pin a rules message",
+          detail: "Keep the rules visible.",
+          mvp_scope: "Repost !rules.",
+        }),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      fetchImpl: recordingFetch([], 500),
+    });
+    const filed = await engine.processEvent(
+      message({ id: "e1", senderId: alice.id, text: "!request pin the rules" }),
+    );
+    expect(filed.replies[0]).toMatch(/didn't accept it/);
+    expect(filed.replies[0]).toMatch(/Recorded locally/);
+    expect(client.direct[0]?.participantId).toBe(owner.id);
+    expect(client.direct[0]?.text).toContain("Pin a rules message");
+  });
+
+  it("files an unanswered request when the silence window passes", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client, llm } = setup({
+      replies: [
+        ask("Who is it for?"),
+        finalize({
+          summary: "Dice history",
+          detail: "Show recent rolls.",
+          mvp_scope: "Last 10 rolls.",
+          complexity_hint: "simple",
+        }),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      fetchImpl: recordingFetch(calls),
+      timeoutMs: 5_000,
+    });
+    await engine.processEvent(
+      message({
+        id: "t1",
+        senderId: alice.id,
+        text: "!request dice history",
+        sequenceId: "3",
+        encodedEvent: "blob-t",
+      }),
+      1_000,
+    );
+    await engine.processEvent(
+      message({ id: "t2", senderId: bob.id, text: "hello" }),
+      6_000,
+    );
+    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls[1]?.find((message) => message.role === "user")?.content).toContain(
+      "must_finalize: true",
+    );
+    const filed = client.sent.map((row) => row.text).find((text) => text.includes("Filed:"));
+    expect(filed).toMatch(/^@alice Filed: Dice history/);
+    expect(filed).not.toMatch(/@bob/);
+    expect(client.sent.find((row) => row.text.includes("Filed:"))).toMatchObject({
+      replyToSequenceId: "3",
+      replyToEvent: "blob-t",
+    });
+    expect(bodyOf(calls[0]?.init).summary).toBe("Dice history");
+    expect(client.direct).toEqual([]);
+  });
+});
+
+describe("!request help and env", () => {
+  it("lists the command on public help", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    expect(loaded.help).toMatch(/!request <idea>/);
+    expect(loaded.help).toMatch(/!featurerequest/);
+    expect(loaded.help).toMatch(/Chat/);
+    const readme = fs.readFileSync("README.md", "utf8");
+    expect(readme).toMatch(/REQUEST_WEBHOOK_URL/);
+    expect(readme).toMatch(/Authorization: Bearer/);
+    expect(fs.readFileSync(".env.example", "utf8")).toMatch(/REQUEST_WEBHOOK_SECRET/);
+  });
+
+  it("posts !help with the command", async () => {
+    const store = new Store(":memory:");
+    const client = new MockXClient();
+    client.addUser(alice);
+    const loaded = loadDefaults("config/default.yaml");
+    const engine = new ModerationEngine(
+      store,
+      client,
+      { botUserId: "bot-1", ownerId: owner.id, globalAdminIds: [], defaults: loaded },
+    );
+    try {
+      await engine.processEvent(
+        message({ id: "h1", senderId: alice.id, text: "!help" }),
+      );
+      expect(client.sent[0]?.text).toMatch(/!request <idea>/);
+      expect(client.sent[0]?.text).toMatch(/!featurerequest/);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reads the webhook env and rejects a bad URL", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    const previousUrl = process.env.REQUEST_WEBHOOK_URL;
+    const previousSecret = process.env.REQUEST_WEBHOOK_SECRET;
+    try {
+      delete process.env.REQUEST_WEBHOOK_URL;
+      delete process.env.REQUEST_WEBHOOK_SECRET;
+      expect(loadEnv(true).requestWebhookUrl).toBeUndefined();
+      expect(loadEnv(true).requestWebhookSecret).toBeUndefined();
+      process.env.REQUEST_WEBHOOK_URL = "https://hooks.example/request";
+      process.env.REQUEST_WEBHOOK_SECRET = "sek";
+      expect(loadEnv(true).requestWebhookUrl).toBe("https://hooks.example/request");
+      expect(loadEnv(true).requestWebhookSecret).toBe("sek");
+      process.env.REQUEST_WEBHOOK_URL = "not a url";
+      expect(() => loadEnv(true)).toThrow(/REQUEST_WEBHOOK_URL/);
+    } finally {
+      restoreEnv("REQUEST_WEBHOOK_URL", previousUrl);
+      restoreEnv("REQUEST_WEBHOOK_SECRET", previousSecret);
+    }
+  });
+});
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
