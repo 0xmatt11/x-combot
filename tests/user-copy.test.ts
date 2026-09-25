@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ADULT_IMAGE_RETRY_MESSAGE, ADULT_VISION_UNAVAILABLE_MESSAGE } from "../src/bot/adult-filter.js";
-import { asChatCopy } from "../src/bot/user-copy.js";
+import { asChatCopy, CHAT_COPY_RULE } from "../src/bot/user-copy.js";
 import { CHAT_AUTH_ALREADY, CHAT_AUTH_CLASSIC, CHAT_AUTH_OK } from "../src/bot/engine.js";
 import {
   buildFeatureRequestMessages,
@@ -52,6 +52,7 @@ import {
 } from "../src/bot/imagine-backend.js";
 import {
   IMAGINE_EMPTY_MESSAGE,
+  SUGGESTION_SYSTEM,
   IMAGINE_FAILED_MESSAGE,
   IMAGINE_MODERATED_INTRO,
   IMAGINE_REFUSED_MESSAGE,
@@ -97,7 +98,7 @@ import {
   unresolvedReplyMessage,
   xpDisabledMessage,
 } from "../src/bot/xp.js";
-import { loadDefaults } from "../src/config.js";
+import { DEFAULT_LLM_CONFIG, loadDefaults } from "../src/config.js";
 import { buildUnknownCommandMessages } from "../src/llm/context.js";
 
 const BANNED = /telegram/i;
@@ -116,7 +117,50 @@ describe("chat copy", () => {
     expect(asChatCopy("Send to Telegram")).toBe("Send to this chat");
     expect(asChatCopy("A Telegram bot")).toBe("A chat bot");
     expect(asChatCopy("MVP: Telegram reply")).not.toMatch(BANNED);
+    expect(asChatCopy(CHAT_COPY_RULE)).not.toMatch(BANNED);
     expect(asChatCopy("line one\nline two")).toBe("line one\nline two");
+  });
+
+  it("tells every chat-writing model this is an X group DM bot and never to write that name", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    const feature = buildFeatureRequestMessages({
+      transcript: [{ role: "user", text: "dice history" }],
+      questionsAsked: 0,
+      maxQuestions: 3,
+      mustFinalize: false,
+    });
+    const safety = buildFeatureRequestSafetyMessages({
+      filing: {
+        summary: "Dice history",
+        detail: "Show recent rolls.",
+        mvp_scope: "Last 10 rolls.",
+        complexity_hint: "simple",
+      },
+      transcript: [{ role: "user", text: "dice history" }],
+    });
+    const unknown = buildUnknownCommandMessages({ token: "banana", args: "now", maxChars: 180 });
+    const prompts = [
+      loaded.llm?.system_prompt ?? "",
+      DEFAULT_LLM_CONFIG.system_prompt,
+      TROLL_SYSTEM_PROMPT,
+      ROAST_SYSTEM_PROMPT,
+      LINKROAST_SYSTEM_PROMPT,
+      SUGGESTION_SYSTEM,
+      feature.map((message) => message.content).join("\n"),
+      safety.map((message) => message.content).join("\n"),
+      unknown.map((message) => message.content).join("\n"),
+    ];
+    for (const prompt of prompts) {
+      expect(prompt).toContain(CHAT_COPY_RULE);
+      expect(prompt).toMatch(/X \(Twitter\) group DM bot/);
+      expect(prompt).toMatch(/this chat/);
+      expect(prompt).toMatch(/reply-thread/);
+    }
+    expect(feature.find((message) => message.role === "system")?.content).toContain(CHAT_COPY_RULE);
+    expect(feature.find((message) => message.role === "user")?.content).toContain(CHAT_COPY_RULE);
+    expect(safety.find((message) => message.role === "system")?.content).toContain(CHAT_COPY_RULE);
+    expect(safety.find((message) => message.role === "user")?.content).toContain(CHAT_COPY_RULE);
+    expect(unknown.find((message) => message.role === "system")?.content).toContain(CHAT_COPY_RULE);
   });
 
   it("keeps help, command docs, and known replies free of that name", () => {
@@ -128,37 +172,7 @@ describe("chat copy", () => {
       ["welcome", loaded.welcome.text],
       ["rules", loaded.rules],
       ["leave", loaded.leave?.text ?? ""],
-      ["system_prompt", loaded.llm?.system_prompt ?? ""],
-      ["troll prompt", TROLL_SYSTEM_PROMPT],
-      ["roast prompt", ROAST_SYSTEM_PROMPT],
-      ["linkroast prompt", LINKROAST_SYSTEM_PROMPT],
       ["linkroast ack", LINKROAST_ON_ACK],
-      ["unknown command", buildUnknownCommandMessages({ token: "banana", args: "", maxChars: 180 }).map((message) => message.content).join("\n")],
-      [
-        "feature prompt",
-        buildFeatureRequestMessages({
-          transcript: [{ role: "user", text: "dice history" }],
-          questionsAsked: 0,
-          maxQuestions: 3,
-          mustFinalize: false,
-        })
-          .map((message) => message.content)
-          .join("\n"),
-      ],
-      [
-        "safety prompt",
-        buildFeatureRequestSafetyMessages({
-          filing: {
-            summary: "Dice history",
-            detail: "Show recent rolls.",
-            mvp_scope: "Last 10 rolls.",
-            complexity_hint: "simple",
-          },
-          transcript: [{ role: "user", text: "dice history" }],
-        })
-          .map((message) => message.content)
-          .join("\n"),
-      ],
     ];
 
     for (let asked = 0; asked < 4; asked += 1) {
@@ -320,5 +334,20 @@ describe("chat copy", () => {
     });
     expect(filed).not.toMatch(BANNED);
     expect(filed).toMatch(/MVP: reply-thread/);
+    const echoed = parseFeatureRequestModel(
+      JSON.stringify({
+        action: "finalize",
+        summary: CHAT_COPY_RULE,
+        detail: CHAT_COPY_RULE,
+        mvp_scope: CHAT_COPY_RULE,
+        complexity_hint: "simple",
+      }),
+    );
+    expect(JSON.stringify(echoed)).not.toMatch(BANNED);
+    expect(
+      parseFeatureRequestSafety(JSON.stringify({ risk: "benign", reasons: [CHAT_COPY_RULE] })).reasons.join(
+        " ",
+      ),
+    ).not.toMatch(BANNED);
   });
 });

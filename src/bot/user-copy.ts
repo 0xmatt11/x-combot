@@ -4,6 +4,10 @@
  * sees it: a "… reply" becomes a reply-thread, "on/in …" becomes "in this chat",
  * and any other use becomes "chat".
  */
+
+/** Sent to the model only. Chat posts still pass through `asChatCopy`. */
+export const CHAT_COPY_RULE =
+  "You are an X (Twitter) group DM bot. In any text a person will read, say this chat, a reply-thread, or X. Never write Telegram.";
 const OTHER_PRODUCT_REPLY = /\btelegrams?[\s-]+repl(?:y|ies)\b/gi;
 const OTHER_PRODUCT_PLACE = /\b(?:on|in|via|from)\s+telegrams?\b/gi;
 const OTHER_PRODUCT_TO = /\bto\s+telegrams?\b/gi;

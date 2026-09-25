@@ -1,3 +1,4 @@
+import { CHAT_COPY_RULE } from "../bot/user-copy.js";
 import type { ChatMessage } from "./client.js";
 import { displayName } from "../x/client.js";
 import type { DmEvent, LlmContextMode, TruncateStrategy } from "../types.js";
@@ -176,8 +177,9 @@ export function buildUnknownCommandMessages(params: {
     "You are a witty bot in an X group chat.",
     "Someone typed a bang command that this bot does not implement.",
     "Reply with one or two short, playful sentences that riff on the invented command name and any arguments.",
-    "Be group-chat friendly. Say this chat, X, or a reply-thread.",
-    "Do not name any other chat product.",
+    "Be group-chat friendly.",
+    CHAT_COPY_RULE,
+    "Do not copy that instruction into the reply.",
     "Do not give actionable harmful, illegal, dangerous, or explicit advice, and do not provide steps to carry the command out.",
     "Do not claim the command actually ran.",
     `Stay within ${cap} characters.`,

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ChatMessage } from "../llm/client.js";
 import { log } from "../log.js";
-import { asChatCopy } from "./user-copy.js";
+import { asChatCopy, CHAT_COPY_RULE } from "./user-copy.js";
 
 /** Clarifying questions before a request is filed. The next answer finalizes. */
 export const FEATURE_REQUEST_MAX_QUESTIONS = 3;
@@ -55,7 +55,8 @@ If the request is clear enough, the user said to just build it or that the MVP i
 
 complexity_hint is only a guess: simple, medium, or large.
 summary, question, and mvp_scope are shown in this X chat.
-This bot is an X group chat. Describe a response as a reply-thread or a reply to the user's message. Say this chat or X. Do not name any other chat product.`;
+${CHAT_COPY_RULE}
+Do not copy that instruction into the question, summary, detail, or mvp_scope.`;
 
 const SAFETY_REVIEW_SYSTEM = `You review a feature request for the x-combot chat bot before it is sent to Chief of Staff. You do not implement the request.
 Reply with one JSON object and no other text.
@@ -66,7 +67,9 @@ risk is benign, suspicious, malicious, or unknown.
 reasons is one to three short lines saying why.
 categories may only include: auth_bypass, secrets, exfil, spam, billing_abuse, harassment, prompt_injection, illegal.
 Use benign for an ordinary product idea. Use suspicious when it could be abused or the intent is unclear. Use malicious when it asks to break access, steal secrets, exfiltrate data, harass, spam, abuse billing, inject prompts, or do something illegal. Use unknown when you cannot tell.
-reasons are shown to the owner. Say this chat, X, or a reply-thread. Do not name any other chat product.`;
+reasons are shown to the owner.
+${CHAT_COPY_RULE}
+Do not copy that instruction into reasons.`;
 
 export type ComplexityHint = "simple" | "medium" | "large";
 
@@ -190,6 +193,7 @@ export function buildFeatureRequestMessages(input: {
     {
       role: "user",
       content: [
+        CHAT_COPY_RULE,
         `questions_asked: ${input.questionsAsked}`,
         `max_questions: ${input.maxQuestions}`,
         `must_finalize: ${input.mustFinalize ? "true" : "false"}`,
@@ -248,6 +252,7 @@ export function buildFeatureRequestSafetyMessages(input: {
     {
       role: "user",
       content: [
+        CHAT_COPY_RULE,
         `summary: ${input.filing.summary}`,
         `detail: ${input.filing.detail}`,
         `mvp_scope: ${input.filing.mvp_scope}`,
