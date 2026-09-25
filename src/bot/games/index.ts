@@ -61,7 +61,7 @@ export {
   guessAttemptCap,
   guessReply,
 } from "./guess.js";
-export { HIGHERLOWER_HELP, higherLowerReply } from "./higherlower.js";
+export { HIGHERLOWER_HELP, higherLowerOpen, higherLowerReply } from "./higherlower.js";
 export { scrambleLetters, spacedLetters } from "./letters.js";
 export { SCRAMBLE_HELP, SCRAMBLE_WORDS, scrambleReply } from "./scramble.js";
 export { GAME_IDLE_MS } from "./sessions.js";
@@ -86,6 +86,7 @@ export type { LetterMark } from "./wordle.js";
 export {
   WOULD_YOU_RATHER,
   WOULD_YOU_RATHER_HELP,
+  wouldYouRatherOpen,
   wouldYouRatherReply,
 } from "./wouldyourather.js";
 
@@ -132,6 +133,16 @@ export { POKER_HELP, playPoker } from "./poker.js";
 export { ROULETTE_HELP, playRoulette, rouletteColor, spinWheel } from "./roulette.js";
 export { SLOTS_HELP, playSlots } from "./slots.js";
 export { TRIVIA_HELP, TRIVIA_QUESTIONS, playTrivia } from "./trivia.js";
+export {
+  buildTriviaInterpretMessages,
+  deterministicTriviaChoice,
+  looksLikeTriviaAttempt,
+  looseCasinoVerb,
+  looseHigherLowerCall,
+  looseWouldChoice,
+  parseTriviaInterpret,
+} from "./loose.js";
+export { SHIP_HELP, compatibility, mergeMembers, resolveShipQuery, shipReply } from "./ship.js";
 export { SESSION_TTL_MS, SessionMap } from "./session.js";
 export {
   DEFAULT_BET,

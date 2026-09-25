@@ -59,6 +59,10 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
     title: "Board",
     games: [{ command: "!minesweeper", blurb: "minesweeper" }],
   },
+  {
+    title: "Social",
+    games: [{ command: "!ship", blurb: "@handle or a name in this chat" }],
+  },
 ];
 
 /** Grouped catalog. One short line per game. */
@@ -70,5 +74,6 @@ export function gamesMenu(): string {
       lines.push(`${game.command} — ${game.blurb}`);
     }
   }
+  lines.push("Open round: a letter, !a, or a short phrase.");
   return lines.join("\n");
 }

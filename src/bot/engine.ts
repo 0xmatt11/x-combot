@@ -108,22 +108,34 @@ import { matchFilters } from "./filters.js";
 import { floodDetectionEnabled } from "./flood.js";
 import {
   GameRoom,
+  TRIVIA_QUESTIONS,
   anagramReply,
+  buildTriviaInterpretMessages,
   coinflipReply,
+  deterministicTriviaChoice,
   diceReply,
   eightBallReply,
   gamesMenu,
   guessReply,
+  higherLowerOpen,
   higherLowerReply,
+  looksLikeTriviaAttempt,
+  looseCasinoVerb,
+  looseHigherLowerCall,
+  looseWouldChoice,
+  mergeMembers,
   minesweeperReply,
   namedPlayer,
+  parseTriviaInterpret,
   playCasino,
   resolveDiceRoller,
   rpsReply,
   scrambleReply,
+  shipReply,
   splitLeadingMention,
   truthOrDareReply,
   wordleReply,
+  wouldYouRatherOpen,
   wouldYouRatherReply,
   CasinoTable,
   type CasinoGame,
@@ -273,6 +285,8 @@ export class ModerationEngine {
   private readonly casino = new CasinoTable();
   /** Users we have already resolved to a handle or display name. */
   private readonly namedUsers = new Map<string, XUser>();
+  /** People seen in each conversation, for !ship name matching. */
+  private readonly chatMembers = new Map<string, Map<string, XUser>>();
   /**
    * `!video` keeps generating after the ack so a multi-minute render does not
    * stall moderation. Tests await this before reading the finished reply.
@@ -376,6 +390,7 @@ export class ModerationEngine {
     );
 
     this.rememberInboundAliases(event);
+    this.rememberEventMembers(event);
 
     const vote = parseLevelVote(event.text);
     if (vote && event.replyTo && settings.xpEnabled && settings.xpLevelGrantEnabled) {
@@ -414,6 +429,12 @@ export class ModerationEngine {
       if (command.name !== "linkroast") {
         await this.linkroastIfSpam(event, senderId, actions, nowMs);
       }
+      return actions;
+    }
+
+    if (await this.tryLooseGamePlay(event, senderIsAdmin, settings, actions, nowMs)) {
+      await this.trollIfTarget(event, senderId, actions, nowMs);
+      await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
     }
 
@@ -1161,6 +1182,7 @@ export class ModerationEngine {
     settings: ResolvedConversationConfig,
     actions: EngineActions,
   ): Promise<void> {
+    this.rememberEventMembers(event);
     if (!settings.welcomeEnabled) return;
     const joiners: XUser[] =
       event.participants.length > 0
@@ -1652,6 +1674,215 @@ export class ModerationEngine {
     });
   }
 
+  /**
+   * While a game is open, a loose line can be a move. Known bangs are already
+   * handled. This runs before the unknown-command joke and before generic chat.
+   * The chat model is used only for a short trivia answer that is not already
+   * a letter, a bang letter, or a glued `!triviac`.
+   */
+  private async tryLooseGamePlay(
+    event: DmEvent,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<boolean> {
+    const text = event.text?.trim() ?? "";
+    const senderId = event.senderId;
+    if (!text || !senderId) return false;
+    const conversationId = event.conversationId;
+
+    const trivia = this.casino.trivia.peek(conversationId, nowMs);
+    if (trivia) {
+      const choice = deterministicTriviaChoice(text);
+      if (choice !== undefined) {
+        await this.finishLoose(event, text, () =>
+          this.handleCasino(event, "trivia", triviaChoiceArg(choice), settings, actions, nowMs),
+        );
+        return true;
+      }
+      if (looksLikeTriviaAttempt(text)) {
+        const interpreted = await this.interpretTriviaChoice(
+          event,
+          trivia.index,
+          text,
+          senderIsAdmin,
+          settings,
+          nowMs,
+        );
+        if (interpreted !== undefined) {
+          await this.finishLoose(event, text, () =>
+            this.handleCasino(
+              event,
+              "trivia",
+              triviaChoiceArg(interpreted),
+              settings,
+              actions,
+              nowMs,
+            ),
+          );
+          actions.llm = true;
+          return true;
+        }
+      }
+    }
+
+    const vote = looseWouldChoice(text);
+    if (vote && wouldYouRatherOpen(conversationId, nowMs)) {
+      await this.finishLoose(event, text, async () => {
+        await this.reply(
+          conversationId,
+          wouldYouRatherReply({
+            conversationId,
+            choice: vote,
+            player: await this.diceRoller(event),
+            voterKey: senderId,
+            nowMs,
+          }),
+          actions,
+        );
+      });
+      return true;
+    }
+
+    const call = looseHigherLowerCall(text);
+    if (call && higherLowerOpen(conversationId, nowMs)) {
+      await this.finishLoose(event, text, async () => {
+        await this.reply(
+          conversationId,
+          higherLowerReply({
+            conversationId,
+            call,
+            player: await this.diceRoller(event),
+            nowMs,
+          }),
+          actions,
+        );
+      });
+      return true;
+    }
+
+    const verb = looseCasinoVerb(text);
+    if (verb) {
+      const key = `${conversationId}\u0000${senderId}`;
+      const blackjack = this.casino.blackjack.peek(key, nowMs);
+      const poker = this.casino.poker.peek(key, nowMs);
+      if (verb === "hit" && blackjack) {
+        await this.finishLoose(event, text, () =>
+          this.handleCasino(event, "hit", "", settings, actions, nowMs),
+        );
+        return true;
+      }
+      if (verb === "stand" && (blackjack || poker)) {
+        await this.finishLoose(event, text, () =>
+          this.handleCasino(event, "stand", "", settings, actions, nowMs),
+        );
+        return true;
+      }
+    }
+
+    const move = this.gameRoom.looseCommand(conversationId, senderId, text, nowMs);
+    if (move) {
+      await this.finishLoose(event, text, () =>
+        this.handleMultiplayer(event, { name: move.kind, args: move.args }, actions, nowMs),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  private async finishLoose(
+    event: DmEvent,
+    text: string,
+    work: () => Promise<void>,
+  ): Promise<void> {
+    if (/^[!/]/.test(text.trim())) {
+      await this.runCommandCleanup(event, work);
+      return;
+    }
+    await work();
+  }
+
+  /**
+   * Ask the chat model which choice a short line means.
+   * Undefined means "not an answer" (or the model cannot run), so the
+   * message continues as ordinary chat or an unknown bang.
+   */
+  private async interpretTriviaChoice(
+    event: DmEvent,
+    index: number,
+    text: string,
+    senderIsAdmin: boolean,
+    settings: ResolvedConversationConfig,
+    nowMs: number,
+  ): Promise<number | undefined> {
+    const senderId = event.senderId;
+    if (!senderId) return undefined;
+    if (this.unknownCommandSkipReason(settings, senderIsAdmin)) return undefined;
+    const uses = this.store.recordLlmUse(
+      event.conversationId,
+      senderId,
+      nowMs,
+      settings.llmRateLimitWindowMs,
+    );
+    if (uses > settings.llmRateLimitPerUser) return undefined;
+    const question = TRIVIA_QUESTIONS[index] ?? TRIVIA_QUESTIONS[0];
+    if (!question) return undefined;
+    try {
+      const messages = buildTriviaInterpretMessages({
+        utterance: text,
+        prompt: question.prompt,
+        choices: question.choices,
+      });
+      const reply = await this.llmClient!.complete(messages);
+      const parsed = parseTriviaInterpret(reply);
+      if (parsed === "none" || parsed === undefined) return undefined;
+      return parsed;
+    } catch (error) {
+      log.warn(
+        `Trivia answer interpret failed for conversation=${event.conversationId}`,
+        error,
+      );
+      return undefined;
+    }
+  }
+
+  private rememberEventMembers(event: DmEvent): void {
+    const conversationId = event.conversationId;
+    if (!conversationId) return;
+    this.rememberMember(conversationId, event.sender);
+    for (const user of event.participants) this.rememberMember(conversationId, user);
+    for (const mention of event.mentions) {
+      if (!mention.id) continue;
+      this.rememberMember(conversationId, { id: mention.id, username: mention.username });
+    }
+  }
+
+  private rememberMember(conversationId: string, user: XUser | undefined): void {
+    if (!user?.id) return;
+    const username = user.username?.trim().replace(/^@+/, "");
+    const name = user.name?.trim();
+    const handle = username && !isNumericUserId(username) ? username : undefined;
+    const display = name && !isNumericUserId(name) ? name : undefined;
+    if (!handle && !display) return;
+    let bucket = this.chatMembers.get(conversationId);
+    if (!bucket) {
+      bucket = new Map();
+      this.chatMembers.set(conversationId, bucket);
+    }
+    const prev = bucket.get(user.id);
+    bucket.set(user.id, {
+      id: user.id,
+      username: handle ?? prev?.username,
+      name: display ?? prev?.name,
+    });
+  }
+
+  private membersFor(conversationId: string): XUser[] {
+    const rows = this.chatMembers.get(conversationId);
+    return mergeMembers([rows ? [...rows.values()] : []]);
+  }
+
   private async handleCommand(
     event: DmEvent,
     command: ParsedCommand,
@@ -1747,6 +1978,14 @@ export class ModerationEngine {
         return;
       case "games":
         await this.reply(conversationId, gamesMenu(), actions);
+        return;
+      case "ship":
+        this.rememberEventMembers(event);
+        await this.reply(
+          conversationId,
+          shipReply(command.args, this.membersFor(event.conversationId), senderId),
+          actions,
+        );
         return;
       case "minesweeper":
         await this.reply(
@@ -3142,6 +3381,10 @@ function untrollHint(label: string): string {
 /** `{username}` is the @handle when known, otherwise the display name or "someone". */
 export function leaveAnnouncementText(user: XUser, template = DEFAULT_LEAVE_TEXT): string {
   return membershipText(template, user);
+}
+
+function triviaChoiceArg(choice: number): string {
+  return ["a", "b", "c", "d"][choice] ?? "a";
 }
 
 /** A user we can name in chat. Numeric ids stored in username/name are ignored. */

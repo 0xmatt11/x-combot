@@ -60,6 +60,7 @@ const PLANNED = [
   "!crash",
   "!trivia",
   "!minesweeper",
+  "!ship",
 ];
 
 function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "senderId" | "text">): DmEvent {

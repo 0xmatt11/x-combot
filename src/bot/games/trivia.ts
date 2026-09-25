@@ -1,6 +1,7 @@
 /**
- * Multiple-choice trivia. One open question per player. The score stays
- * in memory for the conversation and is printed with labels, never ids.
+ * Multiple-choice trivia. One open question per conversation, so anyone
+ * in the chat can answer the question that was just posted. The score stays
+ * per player, in memory, and is printed with labels, never ids.
  */
 import { pickIndex, playerName } from "./random.js";
 import type { SessionMap } from "./session.js";
@@ -9,7 +10,7 @@ import { joinLines, playerKey, wordsOf, type CasinoContext } from "./stake.js";
 export const TRIVIA_TTL_MS = 2 * 60 * 1000;
 
 export const TRIVIA_HELP =
-  "Ask with !trivia. Answer with !trivia a (or b, c, d). !trivia score shows the score for this chat.";
+  "Ask with !trivia. One question is open for the chat, and anyone can answer with a, !a, !trivia c, or a short phrase. !trivia score shows the score for this chat.";
 
 export type TriviaQuestion = {
   prompt: string;
@@ -44,6 +45,8 @@ const LETTERS = ["a", "b", "c", "d"] as const;
 
 export type TriviaRound = {
   index: number;
+  /** Label of the player who asked. Reprints keep this name. */
+  askerLabel: string;
 };
 
 export type TriviaScore = {
@@ -92,38 +95,39 @@ export function playTrivia(
 ): string {
   const action = parseTriviaArgs(args);
   if (action.kind === "help") return TRIVIA_HELP;
-  const key = playerKey(ctx);
-  if (action.kind === "score") return scoreText(book, ctx, key);
+  const scoreKey = playerKey(ctx);
+  if (action.kind === "score") return scoreText(book, ctx, scoreKey);
 
-  const existing = sessions.take(key, ctx.nowMs);
+  const sessionKey = ctx.conversationId;
+  const existing = sessions.take(sessionKey, ctx.nowMs);
   if (action.kind === "answer") {
     if (existing.status === "expired") {
       return "That question expired. Ask again with !trivia.";
     }
     if (existing.status === "missing") return "No trivia question. Ask with !trivia.";
-    sessions.delete(key);
-    return answer(book, ctx, key, existing.value.index, action.choice);
+    sessions.delete(sessionKey);
+    return answer(book, ctx, scoreKey, existing.value.index, action.choice);
   }
 
   if (existing.status === "live") {
-    sessions.touch(key, ctx.nowMs);
-    return askText(ctx, existing.value.index);
+    sessions.touch(sessionKey, ctx.nowMs);
+    return askText(existing.value.askerLabel, existing.value.index);
   }
-  const last = book.get(key)?.lastIndex;
+  const last = book.get(scoreKey)?.lastIndex;
   let index = pickIndex(TRIVIA_QUESTIONS.length, ctx.rng);
   if (last !== undefined && index === last && TRIVIA_QUESTIONS.length > 1) {
     index = (index + 1) % TRIVIA_QUESTIONS.length;
   }
-  const prior = book.get(key);
-  book.put(key, {
+  const prior = book.get(scoreKey);
+  book.put(scoreKey, {
     correct: prior?.correct ?? 0,
     wrong: prior?.wrong ?? 0,
     label: ctx.label,
     lastIndex: index,
   });
-  sessions.set(key, { index }, ctx.nowMs);
+  sessions.set(sessionKey, { index, askerLabel: ctx.label }, ctx.nowMs);
   const expired = existing.status === "expired" ? "That question expired." : undefined;
-  return joinLines([expired, askText(ctx, index)]);
+  return joinLines([expired, askText(ctx.label, index)]);
 }
 
 function answer(
@@ -153,13 +157,13 @@ function answer(
   return joinLines([verdict, `${who}: ${next.correct} right, ${next.wrong} wrong.`]);
 }
 
-function askText(ctx: CasinoContext, index: number): string {
+function askText(label: string, index: number): string {
   const question = TRIVIA_QUESTIONS[index] ?? TRIVIA_QUESTIONS[0]!;
-  const lines = [`❓ ${playerName(ctx.label)}`, question.prompt];
+  const lines = [`❓ ${playerName(label)}`, question.prompt];
   question.choices.forEach((choice, i) => {
     lines.push(`${LETTERS[i]}) ${choice}`);
   });
-  lines.push("Reply `!trivia a`");
+  lines.push("Reply a, !a, or a short phrase.");
   return lines.join("\n");
 }
 

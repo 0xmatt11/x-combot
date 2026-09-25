@@ -34,6 +34,14 @@ export class SessionMap<T> {
     return { status: "live", value: row.value };
   }
 
+  /** Live value only. Expired and missing rows stay untouched. */
+  peek(key: string, now: number): T | undefined {
+    const row = this.rows.get(key);
+    if (!row) return undefined;
+    if (now - row.updatedAt > this.ttlMs) return undefined;
+    return row.value;
+  }
+
   set(key: string, value: T, now: number): void {
     this.rows.delete(key);
     this.rows.set(key, { value, updatedAt: now });

@@ -55,6 +55,7 @@ export type ParsedCommand =
   | { name: "roulette"; args: string }
   | { name: "crash"; args: string }
   | { name: "trivia"; args: string }
+  | { name: "ship"; args: string }
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef }
@@ -134,6 +135,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "crash",
   "trivia",
   "quiz",
+  "ship",
   "hit",
   "stand",
   "troll",
@@ -353,6 +355,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
     case "trivia":
     case "quiz":
       return { name: "trivia", args: rest };
+    case "ship":
+      return { name: "ship", args: rest };
     case "hit":
       return { name: "hit", args: rest };
     case "stand":

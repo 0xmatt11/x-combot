@@ -37,6 +37,11 @@ export function clearWouldYouRatherSessions(): void {
   sessions.clear();
 }
 
+/** True when this chat has a round that has not gone quiet. */
+export function wouldYouRatherOpen(conversationId: string, nowMs = Date.now()): boolean {
+  return sessions.get(conversationId, nowMs) !== undefined;
+}
+
 export function wouldYouRatherReply(input: {
   conversationId: string;
   choice?: string | null;

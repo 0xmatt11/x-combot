@@ -43,6 +43,11 @@ export function clearHigherLowerSessions(): void {
   sessions.clear();
 }
 
+/** True when this chat has a card waiting for higher or lower. */
+export function higherLowerOpen(conversationId: string, nowMs = Date.now()): boolean {
+  return sessions.get(conversationId, nowMs) !== undefined;
+}
+
 export function higherLowerReply(input: {
   conversationId: string;
   call?: string | null;
