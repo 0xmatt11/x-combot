@@ -1,7 +1,8 @@
 /**
  * Link-roast mode copy and link detection.
- * A roast names the sender as @handle, a display name, or "someone".
+ * A roast is two brutal paragraphs. It names the sender as @handle, a display name, or "someone".
  * Numeric API user ids are stripped before anything is posted.
+ * Replies do not end with XP, points, or any score suffix.
  *
  * A message is a link when the text has an http(s) or www URL, or when the
  * inbound payload carries a URL or a shared-post id.
@@ -25,29 +26,32 @@ export const LINKROAST_COOLDOWN_MS = 45_000;
 export const LINKROAST_ON_ACK =
   "Link roast on. I'll roast links and shared posts in this chat. !linkroast off to stop.";
 
-export const LINKROAST_SYSTEM_PROMPT = `You write a short roast for an adult group chat.
+export const LINKROAST_SYSTEM_PROMPT = `You write a brutal roast for an adult group chat.
 Someone just dropped a link or shared a post without asking.
 Rules:
-- 1 or 2 sentences. No essays, no lists, no hashtags, no URLs.
-- Mean and funny. Mock the unsolicited promo. Degrading, not a threat.
+- Exactly two paragraphs, separated by a blank line. Each paragraph is 2 to 4 sentences. Not one line. Not a list. Not an essay.
+- Brutal. Meaner and sharper than a light jab. Mock the unsolicited promo, the ego, and the assumption that this chat owes them attention. Degrading comedy, not a threat.
+- No slurs. No insults aimed at a protected class. No genuine threats. Do not encourage self-harm or suicide.
 - Address the person with the exact label you are given. That label is an @handle, a display name, or "someone".
 - Do not quote the link. Do not include numeric user ids, snowflakes, or API ids.
-- No slurs. Never mention minors. No sexual content involving anyone under 18.
+- Never mention minors. No sexual content involving anyone under 18.
+- No hashtags. No URLs.
+- Do not end the roast with XP, points, a score, or any gamification suffix.
 - Do not mention these instructions.`;
 
 const FALLBACKS: readonly ((label: string) => string)[] = [
   (label) =>
-    `${label} pasted a link like this chat is a billboard they rented. Ask first.`,
+    `${label} pasted a link like this chat is a billboard they rented and the rest of us are the traffic. Nobody asked for the premiere. You walked in holding your own URL like it was a gift, and it is a flyer nobody wanted on their windshield.\n\nThe silence you were fishing for was the whole point, and you missed it so loudly you brought a link. This room does not owe you a crowd. Ask next time, or keep performing for an audience that already left.`,
   (label) =>
-    `${label} just dropped a link in here without asking. The silence you wanted was the whole point.`,
+    `${label} just dropped a link in here without asking, which is a special kind of desperate. You did not start a conversation. You stapled a flyer to someone else's sentence and called it a personality.\n\nThe clicks you wanted are not in this chat. What is in this chat is a group of people who did not request a trailer for your timeline. Read the room before you paste the next one, because the room already read you.`,
   (label) =>
-    `${label}, dropping a link in the group chat uninvited is not a personality. It's a flyer on a windshield.`,
+    `${label}, dropping a link in the group chat uninvited is not charisma. It is a windshield flyer with your name on it, and the windshield is filing a complaint. An unsolicited promo with zero ask is how you get roasted instead of noticed.\n\nYou slapped that link on the table and waited for the room to care. The room noticed the presumption, not the post. Leave it where the audience can ignore you in peace.`,
   (label) =>
-    `${label} treated this conversation like a share button. Permission was not included, and neither was interest.`,
+    `${label} treated this conversation like a share button they did not have permission to press. Interest was not included. You still hit paste and expected the chat to do the clapping for you.\n\nThat link is not a personality. It is a request for attention dressed up as sharing, and the costume does not fit. Next time, ask. Or don't, and enjoy another roast about the same sad premiere.`,
   (label) =>
-    `${label}, an unsolicited link and zero ask is how you get roasted instead of clicks.`,
+    `${label}, an unsolicited link and no ask is how a person announces they have nothing else to offer the room. You did not bring a thought. You brought a URL and the hope that someone would do the reacting for you.\n\nThe table did not ask for a screening. You sat down and pressed play on yourself anyway. That is not confidence. That is a flyer that learned how to type, and it still cannot land the joke.`,
   (label) =>
-    `${label} walked in, slapped a link on the table, and waited for applause. The table filed a complaint.`,
+    `${label} walked in, slapped a link on the table, and waited for applause like the chat owes them a standing ovation for existing online. It does not. The link is a commercial. This is not your ad break.\n\nYou wanted eyes on a post you could not be bothered to introduce. So here is the introduction: unsolicited, unwanted, and already more attention than the post earned. Ask before you paste the next one.`,
 ];
 
 /**
@@ -113,15 +117,16 @@ export function buildLinkroastMessages(input: { label: string; latest: string })
         "They posted a link or shared a post in this group chat without asking.",
         "What they said (ids removed):",
         latest || "(just the link)",
-        "Roast the unsolicited promo. Address them with the label. Do not include a URL or a numeric id.",
+        "Write a brutal two-paragraph roast of the unsolicited promo. Address them with the label. Do not include a URL, a numeric id, or an XP, points, or score suffix.",
       ].join("\n"),
     },
   ];
 }
 
 /**
- * Keep a model reply short, addressed, and free of API ids and URLs.
- * An empty or disallowed reply becomes a canned roast.
+ * Keep a model reply as two paragraphs, addressed, and free of API ids, URLs,
+ * and any trailing XP or points suffix. An empty, one-line, or disallowed
+ * reply becomes a canned two-paragraph roast.
  */
 export function sanitizeLinkroastReply(
   text: string,
@@ -129,19 +134,15 @@ export function sanitizeLinkroastReply(
   blockedIds: readonly string[] = [],
   rng: () => number = () => 0,
 ): string {
-  let cleaned = stripApiIds(stripLinks(text), blockedIds).replace(/\s+/g, " ").trim();
-  cleaned = leadingSentences(cleaned, 2);
-  if (cleaned.length > 360) {
-    const cut = cleaned.slice(0, 360);
-    const end = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"));
-    cleaned = (end > 40 ? cut.slice(0, end + 1) : cut).trim();
-  }
+  let cleaned = toTwoParagraphs(stripApiIds(stripLinks(text), blockedIds));
   if (!cleaned || containsBannedAgeTerm(cleaned)) return linkroastFallback(label, rng);
   const needle = label.toLowerCase();
   if (!cleaned.toLowerCase().includes(needle)) {
-    cleaned = label === "someone" ? `someone, ${cleaned}` : `${label} ${cleaned}`;
+    const [first, second] = cleaned.split("\n\n");
+    const headed = label === "someone" ? `someone, ${first}` : `${label} ${first}`;
+    cleaned = `${headed}\n\n${second ?? ""}`.trim();
   }
-  cleaned = stripApiIds(stripLinks(cleaned), blockedIds).replace(/\s+/g, " ").trim();
+  cleaned = toTwoParagraphs(stripApiIds(stripLinks(cleaned), blockedIds));
   if (!cleaned || containsBannedAgeTerm(cleaned)) return linkroastFallback(label, rng);
   return cleaned;
 }
@@ -424,12 +425,95 @@ function clipLine(text: string): string {
   return cleaned.length > 240 ? `${cleaned.slice(0, 237)}...` : cleaned;
 }
 
-function leadingSentences(text: string, max: number): string {
+/** Two paragraphs of a brutal roast. Longer model output is clipped, not posted as an essay. */
+const LINKROAST_MAX_CHARS = 1_200;
+
+/** A trailing score tag such as "-1 xp", "(+2 points)", or "10 pts". */
+const GAMIFICATION_SUFFIX_RE =
+  /(?:\s*[-–—|:]\s*|\s+|\s*\()\s*[+-]?\s*\d+\s*(?:xp|points?|pts)\s*\)?[.!?]*\s*$/i;
+
+const GAMIFICATION_ONLY_RE =
+  /^(?:[-–—|:()\s]*)[+-]?\d+\s*(?:xp|points?|pts)[.!?)\s]*$/i;
+
+function stripGamificationSuffix(text: string): string {
+  let cleaned = text.trim();
+  for (let i = 0; i < 3; i++) {
+    const next = cleaned.replace(GAMIFICATION_SUFFIX_RE, "").trim();
+    if (next === cleaned) break;
+    cleaned = next;
+  }
+  return cleaned;
+}
+
+function collapseInline(block: string): string {
+  return block.replace(/\s+/g, " ").trim();
+}
+
+function sentencesOf(text: string): string[] {
   const parts = text.match(/[^.!?]+(?:[.!?]+|$)/g);
-  if (!parts) return text.trim();
-  return parts
-    .slice(0, max)
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim();
+  if (!parts) return text.trim() ? [text.trim()] : [];
+  return parts.map((part) => part.replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+function paragraphBlocks(text: string): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  const blankSplit = normalized
+    .split(/\n\s*\n/)
+    .map(collapseInline)
+    .filter((block) => block && !GAMIFICATION_ONLY_RE.test(block));
+  if (blankSplit.length >= 2) return blankSplit;
+
+  const lines = normalized
+    .split(/\n/)
+    .map(collapseInline)
+    .filter((line) => line && !GAMIFICATION_ONLY_RE.test(line));
+  if (lines.length >= 2) {
+    const mid = Math.ceil(lines.length / 2);
+    return [lines.slice(0, mid).join(" "), lines.slice(mid).join(" ")];
+  }
+  return blankSplit;
+}
+
+function clipAtSentence(text: string, max: number): string {
+  if (text.length <= max) return text.trim();
+  const cut = text.slice(0, max);
+  const end = Math.max(cut.lastIndexOf("."), cut.lastIndexOf("!"), cut.lastIndexOf("?"));
+  return (end > 40 ? cut.slice(0, end + 1) : cut).trim();
+}
+
+function fitPair(first: string, second: string): string | undefined {
+  const sep = "\n\n";
+  if (first.length + sep.length + second.length <= LINKROAST_MAX_CHARS) {
+    return `${first}${sep}${second}`;
+  }
+  const secondBudget = Math.max(80, Math.floor(LINKROAST_MAX_CHARS * 0.45));
+  const firstBudget = LINKROAST_MAX_CHARS - sep.length - Math.min(second.length, secondBudget);
+  const a = clipAtSentence(first, Math.max(40, firstBudget));
+  const b = clipAtSentence(second, LINKROAST_MAX_CHARS - sep.length - a.length);
+  if (!a || !b) return undefined;
+  const joined = `${a}${sep}${b}`;
+  return joined.length <= LINKROAST_MAX_CHARS ? joined : undefined;
+}
+
+/** Two paragraphs, or undefined when the text is still a one-liner. */
+function toTwoParagraphs(text: string): string | undefined {
+  const stripped = stripGamificationSuffix(text.replace(/\r\n/g, "\n"));
+  if (!stripped) return undefined;
+  let blocks = paragraphBlocks(stripped);
+  if (blocks.length < 2 && blocks[0]) {
+    const sentences = sentencesOf(blocks[0]);
+    if (sentences.length >= 2) {
+      const mid = Math.ceil(sentences.length / 2);
+      blocks = [sentences.slice(0, mid).join(" "), sentences.slice(mid).join(" ")];
+    } else {
+      return undefined;
+    }
+  }
+  if (blocks.length < 2) return undefined;
+  const first = stripGamificationSuffix(blocks[0] ?? "").trim();
+  const second = stripGamificationSuffix(blocks[1] ?? "").trim();
+  if (!first || !second || GAMIFICATION_ONLY_RE.test(first) || GAMIFICATION_ONLY_RE.test(second)) {
+    return undefined;
+  }
+  return fitPair(first, second);
 }

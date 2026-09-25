@@ -6,8 +6,10 @@ import {
   classicDmLinkSignals,
   containsLink,
   findLinks,
+  buildLinkroastMessages,
   LINKROAST_COOLDOWN_MS,
   LINKROAST_ON_ACK,
+  LINKROAST_SYSTEM_PROMPT,
   linkroastFallback,
   messageHasRoastableLink,
   sanitizeLinkroastReply,
@@ -74,6 +76,11 @@ function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "senderId" | "
 }
 
 const FIRST_FALLBACK = linkroastFallback("@alice", () => 0);
+
+/** Model replies in these tests are already the two-paragraph shape the sanitizer keeps. */
+function asTwoParagraphs(opening: string): string {
+  return `${opening}\n\nNobody asked for the link, and this chat is not your billboard.`;
+}
 
 describe("link detection", () => {
   it("matches any http(s) URL, www without a scheme, shortlinks, and x.com statuses", () => {
@@ -281,7 +288,7 @@ describe("link roast mode", () => {
   });
 
   it("roasts a status link with the LLM and ignores text with no URL", async () => {
-    const roast = "@alice your timeline called. It wants the group chat back.";
+    const roast = asTwoParagraphs("@alice your timeline called. It wants the group chat back.");
     const llm = new MockLlmClient(roast);
     const { engine, client } = setup(llm);
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
@@ -320,9 +327,9 @@ describe("link roast mode", () => {
 
   it("rate-limits one roast per user and still roasts someone else", async () => {
     const llm = new MockLlmClient([
-      "@alice first roast stays.",
-      "@bob gets a turn.",
-      "@alice second roast stays.",
+      asTwoParagraphs("@alice first roast stays."),
+      asTwoParagraphs("@bob gets a turn."),
+      asTwoParagraphs("@alice second roast stays."),
     ]);
     const { engine, client } = setup(llm);
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
@@ -347,9 +354,9 @@ describe("link roast mode", () => {
 
     expect(client.sent.map((row) => row.text)).toEqual([
       `@alice ${LINKROAST_ON_ACK}`,
-      "@alice first roast stays.",
-      "@bob gets a turn.",
-      "@alice second roast stays.",
+      asTwoParagraphs("@alice first roast stays."),
+      asTwoParagraphs("@bob gets a turn."),
+      asTwoParagraphs("@alice second roast stays."),
     ]);
     expect(llm.calls).toHaveLength(3);
   });
@@ -441,13 +448,13 @@ describe("link roast mode", () => {
 
   it("roasts generic URLs, shortlinks, www, profiles, and a shared post with no pasted URL", async () => {
     const llm = new MockLlmClient([
-      "@alice youtube stays.",
-      "@bob shortlink stays.",
-      "@alice www stays.",
-      "@bob profile stays.",
-      "@alice card stays.",
-      "@bob news stays.",
-      "@alice entity stays.",
+      asTwoParagraphs("@alice youtube stays."),
+      asTwoParagraphs("@bob shortlink stays."),
+      asTwoParagraphs("@alice www stays."),
+      asTwoParagraphs("@bob profile stays."),
+      asTwoParagraphs("@alice card stays."),
+      asTwoParagraphs("@bob news stays."),
+      asTwoParagraphs("@alice entity stays."),
     ]);
     const { engine, client } = setup(llm);
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
@@ -538,13 +545,13 @@ describe("link roast mode", () => {
 
     expect(client.sent.map((row) => row.text)).toEqual([
       `@alice ${LINKROAST_ON_ACK}`,
-      "@alice youtube stays.",
-      "@bob shortlink stays.",
-      "@alice www stays.",
-      "@bob profile stays.",
-      "@alice card stays.",
-      "@bob news stays.",
-      "@alice entity stays.",
+      asTwoParagraphs("@alice youtube stays."),
+      asTwoParagraphs("@bob shortlink stays."),
+      asTwoParagraphs("@alice www stays."),
+      asTwoParagraphs("@bob profile stays."),
+      asTwoParagraphs("@alice card stays."),
+      asTwoParagraphs("@bob news stays."),
+      asTwoParagraphs("@alice entity stays."),
     ]);
     expect(llm.calls).toHaveLength(7);
     expect(llm.calls[0]?.[1]?.content ?? "").not.toContain("youtube.com");
@@ -585,7 +592,7 @@ describe("link roast mode", () => {
     expect(containsLink(event?.text)).toBe(false);
     expect(event?.linkSignals).toEqual({ urls: [], statusIds: [snowflake] });
 
-    const roast = "@alice that preview is not a conversation.";
+    const roast = asTwoParagraphs("@alice that preview is not a conversation.");
     const llm = new MockLlmClient(roast);
     const { engine, client } = setup(llm);
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
@@ -657,24 +664,80 @@ describe("link roast mode", () => {
     expect(loaded.help).toMatch(/!linkroast on/);
     expect(loaded.help).toMatch(/!linkroast off/);
     expect(loaded.help).toMatch(/Sent a post/);
+    expect(loaded.help).toMatch(/two-paragraph brutal roast/);
+    expect(loaded.help).toMatch(/No XP/);
     const readme = fs.readFileSync("README.md", "utf8");
-    expect(readme).toMatch(/\| `!linkroast on` \| Roast any link or shared post/);
+    expect(readme).toMatch(
+      /\| `!linkroast on` \| Two-paragraph brutal roast of any link or shared post, no XP/,
+    );
+    expect(readme).toMatch(/two-paragraph brutal roast/);
+    expect(readme).toMatch(/no XP/);
+    expect(readme).toMatch(/canned two-paragraph roast instead, also with no XP/);
     expect(readme).toMatch(/Sent a post/);
     expect(readme).toMatch(/t\.co/);
     expect(readme).toMatch(/referenced_tweets/);
   });
 });
 
+describe("link roast copy", () => {
+  it("asks for two brutal paragraphs and forbids an XP suffix", () => {
+    expect(LINKROAST_SYSTEM_PROMPT).toMatch(/exactly two paragraphs/i);
+    expect(LINKROAST_SYSTEM_PROMPT).toMatch(/brutal/i);
+    expect(LINKROAST_SYSTEM_PROMPT).toMatch(
+      /do not end the roast with XP, points, a score, or any gamification suffix/i,
+    );
+    expect(LINKROAST_SYSTEM_PROMPT).not.toMatch(/-1\s*xp/i);
+    expect(LINKROAST_SYSTEM_PROMPT).not.toMatch(/1 or 2 sentences/);
+    const messages = buildLinkroastMessages({ label: "@alice", latest: "look at this" });
+    expect(messages[1]?.content).toMatch(/brutal two-paragraph roast/i);
+    expect(messages[1]?.content).toMatch(/XP, points, or score suffix/);
+    expect(messages[1]?.content).not.toMatch(/-1\s*xp/i);
+  });
+
+  it("canned roasts are two paragraphs and carry no XP suffix", () => {
+    for (let i = 0; i < 6; i++) {
+      const text = linkroastFallback("@alice", () => (i + 0.01) / 6);
+      expect(text.split("\n\n")).toHaveLength(2);
+      expect(text).toContain("@alice");
+      expect(text).not.toMatch(/-?\d+\s*xp|\bxp\b|\d+\s*points?\b|\bpts\b/i);
+      expect(sanitizeLinkroastReply(text, "@alice", [], () => 0)).toBe(text);
+      expect(text.length).toBeGreaterThan(180);
+    }
+  });
+});
+
 describe("sanitizeLinkroastReply", () => {
-  it("strips snowflakes and status URLs and keeps the label", () => {
+  it("strips snowflakes and URLs and keeps two paragraphs", () => {
     const text = sanitizeLinkroastReply(
-      `${snowflake} posted https://www.youtube.com/watch?v=1 and https://x.com/alice/status/${snowflake} again. Second sentence stays. Third is gone.`,
+      `${snowflake} posted https://www.youtube.com/watch?v=1 and https://x.com/alice/status/${snowflake} again. Second sentence stays. Third stays in the next paragraph.`,
       "@alice",
       [snowflake],
     );
     expect(text).not.toContain(snowflake);
     expect(text).not.toMatch(/https?:\/\//);
     expect(text.toLowerCase()).toContain("@alice");
-    expect(text).not.toContain("Third");
+    const [first, second] = text.split("\n\n");
+    expect(second).toBeTruthy();
+    expect(first).toMatch(/Second sentence stays/);
+    expect(second).toMatch(/Third stays/);
+  });
+
+  it("drops a trailing score and a third paragraph", () => {
+    const text = sanitizeLinkroastReply(
+      "@alice the link is a billboard you rented. Nobody clapped.\n\nAsk before you paste the next one, or enjoy the silence.\n\nThis third paragraph is gone.\n\n-1 xp",
+      "@alice",
+    );
+    expect(text).toBe(
+      "@alice the link is a billboard you rented. Nobody clapped.\n\nAsk before you paste the next one, or enjoy the silence.",
+    );
+    expect(text).not.toMatch(/-1\s*xp|\bxp\b|\bpoints?\b/i);
+    expect(text).not.toContain("third paragraph");
+  });
+
+  it("replaces a one-line reply, including a score suffix, with the canned roast", () => {
+    const text = sanitizeLinkroastReply("@alice your link is sad. -1 xp", "@alice", [], () => 0);
+    expect(text).toBe(FIRST_FALLBACK);
+    expect(text.split("\n\n")).toHaveLength(2);
+    expect(text).not.toMatch(/-?\d+\s*xp|\bxp\b|\d+\s*points?\b/i);
   });
 });
