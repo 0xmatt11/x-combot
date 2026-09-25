@@ -78,6 +78,14 @@ describe("command cleanup", () => {
           return { url: "https://cdn.example/clip.mp4", width: 16, height: 9 };
         },
       },
+      cheeseSearch: {
+        async searchKittens() {
+          return ["https://i.redd.it/kitten-a.jpg"];
+        },
+        async searchCheese() {
+          return ["https://i.redd.it/cheese-a.jpg"];
+        },
+      },
     });
     return { engine, client, store };
   }
@@ -229,6 +237,7 @@ describe("command cleanup", () => {
       "!xp",
       "!ask what is up",
       "!boobs",
+      "!cheese",
       "!imagine a red boat",
     ];
     for (const [index, text] of commands.entries()) {

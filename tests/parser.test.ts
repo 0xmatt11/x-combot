@@ -173,6 +173,19 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!booties")).toBeUndefined();
   });
 
+  it("parses !cheese and keeps extra text off the search query", () => {
+    expect(parseCommand("!cheese")).toEqual({ name: "cheese" });
+    expect(parseCommand("!CHEESE")).toEqual({ name: "cheese" });
+    expect(parseCommand("  /cheese  ")).toEqual({ name: "cheese" });
+    expect(parseCommand("!cheese please")).toEqual({ name: "cheese", extra: "please" });
+    expect(parseCommand("!cheese a kitten made of cheese")).toEqual({
+      name: "cheese",
+      extra: "a kitten made of cheese",
+    });
+    expect(parseUnknownBang("!cheese")).toBeUndefined();
+    expect(parseUnknownBang("!cheese please")).toBeUndefined();
+  });
+
   it("parses xp, level, rank, and the leaderboard aliases", () => {
     expect(parseCommand("!xp")).toEqual({ name: "xp" });
     expect(parseCommand("/level")).toEqual({ name: "xp" });

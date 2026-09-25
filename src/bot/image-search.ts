@@ -155,13 +155,17 @@ export function duckDuckGoVqdPageUrl(query = ADULT_CHEST_QUERY): string {
  * Same `i.js` request current `ddgs` sends for images: `o=json`, safesearch off (`p=-1`).
  * `vqd` comes from the HTML page. `query` stays the fixed adult phrase for that command.
  */
-export function duckDuckGoImageScriptUrl(vqd: string, query = ADULT_CHEST_QUERY): string {
+export function duckDuckGoImageScriptUrl(
+  vqd: string,
+  query = ADULT_CHEST_QUERY,
+  safeSearch: "off" | "on" = "off",
+): string {
   const params = new URLSearchParams({
     o: "json",
     q: query,
     l: "us-en",
     vqd,
-    p: "-1",
+    p: safeSearch === "on" ? "1" : "-1",
     ct: "AT",
   });
   return `https://duckduckgo.com/i.js?${params.toString()}`;
@@ -171,10 +175,13 @@ export function duckDuckGoImageScriptUrl(vqd: string, query = ADULT_CHEST_QUERY)
  * Keyless Bing images HTML (`ddgs` Bing images backend). Not the Azure Image Search API.
  * `adlt=off` allows adult results. `query` is the fixed phrase for that command.
  */
-export function bingHtmlImageSearchUrl(query = ADULT_CHEST_QUERY): string {
+export function bingHtmlImageSearchUrl(
+  query = ADULT_CHEST_QUERY,
+  safeSearch: "off" | "moderate" = "off",
+): string {
   const params = new URLSearchParams({
     q: query,
-    adlt: "off",
+    adlt: safeSearch === "moderate" ? "moderate" : "off",
     async: "1",
     first: "1",
     count: "35",
