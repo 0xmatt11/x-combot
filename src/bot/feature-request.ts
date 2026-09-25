@@ -51,7 +51,39 @@ If the request is clear enough, the user said to just build it or that the MVP i
 
 complexity_hint is only a guess: simple, medium, or large. summary is shown in chat.`;
 
+const SAFETY_REVIEW_SYSTEM = `You review a feature request for the x-combot chat bot before it is sent to Chief of Staff. You do not implement the request.
+Reply with one JSON object and no other text.
+
+{"risk":"benign","reasons":["short why"],"categories":[]}
+
+risk is benign, suspicious, malicious, or unknown.
+reasons is one to three short lines saying why.
+categories may only include: auth_bypass, secrets, exfil, spam, billing_abuse, harassment, prompt_injection, illegal.
+Use benign for an ordinary product idea. Use suspicious when it could be abused or the intent is unclear. Use malicious when it asks to break access, steal secrets, exfiltrate data, harass, spam, abuse billing, inject prompts, or do something illegal. Use unknown when you cannot tell.`;
+
 export type ComplexityHint = "simple" | "medium" | "large";
+
+export const SAFETY_RISKS = ["benign", "suspicious", "malicious", "unknown"] as const;
+export type SafetyRisk = (typeof SAFETY_RISKS)[number];
+
+export const SAFETY_CATEGORIES = [
+  "auth_bypass",
+  "secrets",
+  "exfil",
+  "spam",
+  "billing_abuse",
+  "harassment",
+  "prompt_injection",
+  "illegal",
+] as const;
+export type SafetyCategory = (typeof SAFETY_CATEGORIES)[number];
+
+export interface FeatureRequestSafety {
+  risk: SafetyRisk;
+  reasons: string[];
+  /** Known tags only. Empty when none apply. */
+  categories: SafetyCategory[];
+}
 
 export interface ClarificationTurn {
   role: "user" | "bot";
@@ -84,6 +116,8 @@ export interface FeatureRequestPayload {
   conversationId: string;
   clarification: ClarificationTurn[];
   complexity_hint: ComplexityHint;
+  /** LLM review produced before the webhook or owner DM. */
+  safety: FeatureRequestSafety;
   timestamp: string;
 }
 
@@ -188,6 +222,51 @@ export function parseFeatureRequestModel(raw: string): FeatureRequestModelAction
   return undefined;
 }
 
+export function unknownFeatureSafety(reason: string): FeatureRequestSafety {
+  const why = clip(reason, 180) || "The model did not return a safety review.";
+  return { risk: "unknown", reasons: [why], categories: [] };
+}
+
+export function buildFeatureRequestSafetyMessages(input: {
+  filing: FeatureRequestFiling;
+  transcript: ClarificationTurn[];
+}): ChatMessage[] {
+  const lines = input.transcript
+    .map((turn) => `${turn.role}: ${turn.text.replace(/\s+/g, " ").trim()}`)
+    .join("\n");
+  return [
+    { role: "system", content: SAFETY_REVIEW_SYSTEM },
+    {
+      role: "user",
+      content: [
+        `summary: ${input.filing.summary}`,
+        `detail: ${input.filing.detail}`,
+        `mvp_scope: ${input.filing.mvp_scope}`,
+        "transcript:",
+        lines || "(empty)",
+      ].join("\n"),
+    },
+  ];
+}
+
+/** Always returns a safety object. A bad model reply is `unknown`, not a missing field. */
+export function parseFeatureRequestSafety(raw: string): FeatureRequestSafety {
+  const value = extractJsonObject(raw);
+  const record = safetyRecord(value);
+  if (!record) return unknownFeatureSafety("The model did not return a safety review.");
+  const risk = normalizeSafetyRisk(record.risk);
+  let reasons = normalizeSafetyReasons(record.reasons);
+  const categories = normalizeSafetyCategories(record.categories);
+  if (reasons.length === 0) {
+    reasons = [
+      risk === "benign"
+        ? "Ordinary product request."
+        : "The model did not explain the safety review.",
+    ];
+  }
+  return { risk, reasons, categories };
+}
+
 export function fallbackFeatureFiling(transcript: ClarificationTurn[]): FeatureRequestFiling {
   const body = substantiveRequestText(transcript);
   const first = body.split("\n")[0]?.trim() || "Feature request";
@@ -207,6 +286,7 @@ export function buildFeatureRequestPayload(input: {
   requester: FeatureRequester;
   conversationId: string;
   clarification: ClarificationTurn[];
+  safety: FeatureRequestSafety;
   timestamp: string;
 }): FeatureRequestPayload {
   const summary = clip(input.filing.summary, SUMMARY_MAX) || "Feature request";
@@ -224,6 +304,13 @@ export function buildFeatureRequestPayload(input: {
       text: turn.text,
     })),
     complexity_hint: normalizeComplexity(input.filing.complexity_hint),
+    safety: {
+      risk: normalizeSafetyRisk(input.safety.risk),
+      reasons: input.safety.reasons.length
+        ? input.safety.reasons
+        : unknownFeatureSafety("The model did not explain the safety review.").reasons,
+      categories: normalizeSafetyCategories(input.safety.categories),
+    },
     timestamp: input.timestamp,
   };
 }
@@ -254,6 +341,7 @@ export function featureRequestOwnerDm(payload: FeatureRequestPayload): string {
     `MVP: ${payload.mvp_scope}`,
     payload.detail,
     `Guess: ${payload.complexity_hint}`,
+    `Safety: ${payload.safety.risk}${payload.safety.reasons[0] ? ` — ${payload.safety.reasons[0]}` : ""}`,
   ].join("\n");
   if (text.length <= OWNER_DM_MAX) return text;
   return `${text.slice(0, OWNER_DM_MAX - 1)}…`;
@@ -321,6 +409,53 @@ function compactRequester(requester: FeatureRequester): FeatureRequester {
 function normalizeComplexity(value: unknown): ComplexityHint {
   if (value === "simple" || value === "medium" || value === "large") return value;
   return "medium";
+}
+
+function safetyRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.safety && typeof record.safety === "object") {
+    return record.safety as Record<string, unknown>;
+  }
+  if ("risk" in record) return record;
+  return undefined;
+}
+
+function normalizeSafetyRisk(value: unknown): SafetyRisk {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (text === "benign" || text === "suspicious" || text === "malicious" || text === "unknown") {
+    return text;
+  }
+  return "unknown";
+}
+
+function normalizeSafetyReasons(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  const reasons: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const text = clip(item, 180);
+    if (!text || reasons.includes(text)) continue;
+    reasons.push(text);
+    if (reasons.length === 4) break;
+  }
+  return reasons;
+}
+
+function normalizeSafetyCategories(value: unknown): SafetyCategory[] {
+  if (!Array.isArray(value)) return [];
+  const categories: SafetyCategory[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const tag = item.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (!isSafetyCategory(tag) || categories.includes(tag)) continue;
+    categories.push(tag);
+  }
+  return categories;
+}
+
+function isSafetyCategory(value: string): value is SafetyCategory {
+  return (SAFETY_CATEGORIES as readonly string[]).includes(value);
 }
 
 function clip(text: string, max: number): string {

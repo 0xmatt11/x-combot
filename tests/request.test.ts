@@ -5,6 +5,7 @@ import {
   buildFeatureRequestPayload,
   fallbackFeatureFiling,
   parseFeatureRequestModel,
+  parseFeatureRequestSafety,
   postFeatureRequestWebhook,
   readRequestReply,
   type FeatureRequestFetch,
@@ -45,6 +46,14 @@ function finalize(fields: {
   complexity_hint?: "simple" | "medium" | "large";
 }): string {
   return JSON.stringify({ action: "finalize", complexity_hint: "simple", ...fields });
+}
+
+function safety(fields: {
+  risk: "benign" | "suspicious" | "malicious" | "unknown";
+  reasons: string[];
+  categories?: string[];
+}): string {
+  return JSON.stringify({ categories: [], ...fields });
 }
 
 interface FetchCall {
@@ -140,6 +149,30 @@ describe("feature request model", () => {
     ).toMatchObject({ complexity_hint: "medium" });
   });
 
+  it("keeps a safety review and drops tags outside the list", () => {
+    expect(
+      parseFeatureRequestSafety(
+        safety({
+          risk: "malicious",
+          reasons: ["Asks to dump the bot token."],
+          categories: ["secrets", "not_a_tag", "exfil"],
+        }),
+      ),
+    ).toEqual({
+      risk: "malicious",
+      reasons: ["Asks to dump the bot token."],
+      categories: ["secrets", "exfil"],
+    });
+    expect(parseFeatureRequestSafety("nope")).toMatchObject({
+      risk: "unknown",
+      categories: [],
+    });
+    expect(parseFeatureRequestSafety('{"risk":"benign"}').reasons.length).toBeGreaterThan(0);
+    expect(
+      parseFeatureRequestSafety('{"safety":{"risk":"suspicious","reasons":["Unclear intent."]}}'),
+    ).toMatchObject({ risk: "suspicious", reasons: ["Unclear intent."] });
+  });
+
   it("posts JSON with a bearer token only when a secret is set", async () => {
     const calls: FetchCall[] = [];
     const payload = buildFeatureRequestPayload({
@@ -147,6 +180,7 @@ describe("feature request model", () => {
       requester: { id: alice.id, username: "alice" },
       conversationId: groupId,
       clarification: [{ role: "user", text: "dark mode" }],
+      safety: { risk: "benign", reasons: ["Ordinary product request."], categories: [] },
       timestamp: "2026-09-25T15:00:00.000Z",
     });
     await postFeatureRequestWebhook({
@@ -158,7 +192,11 @@ describe("feature request model", () => {
     expect(calls[0]?.url).toBe("https://hooks.example/request");
     expect(headersOf(calls[0]?.init).Authorization).toBe("Bearer sek");
     expect(headersOf(calls[0]?.init)["Content-Type"]).toBe("application/json");
-    expect(bodyOf(calls[0]?.init)).toMatchObject({ type: "feature_request", summary: "dark mode" });
+    expect(bodyOf(calls[0]?.init)).toMatchObject({
+      type: "feature_request",
+      summary: "dark mode",
+      safety: { risk: "benign", reasons: ["Ordinary product request."], categories: [] },
+    });
     expect(JSON.stringify(bodyOf(calls[0]?.init))).not.toContain("sek");
 
     calls.length = 0;
@@ -271,6 +309,7 @@ describe("!request", () => {
         ask("Any example?"),
         ask("What is the constraint?"),
         ask("Still more?"),
+        safety({ risk: "benign", reasons: ["A dice history command."] }),
       ],
       webhookUrl: "https://hooks.example/request",
       webhookSecret: "hook-secret",
@@ -287,8 +326,10 @@ describe("!request", () => {
       message({ id: "b4", senderId: alice.id, text: "in this chat" }),
     );
 
-    expect(llm.calls).toHaveLength(4);
+    expect(llm.calls).toHaveLength(5);
     const lastPrompt = llm.calls[3]?.find((message) => message.role === "user")?.content ?? "";
+    const safetyPrompt = llm.calls[4]?.find((message) => message.role === "user")?.content ?? "";
+    expect(safetyPrompt).toContain("summary:");
     expect(lastPrompt).toContain("must_finalize: true");
     expect(lastPrompt).toContain("questions_asked: 3");
     const texts = client.sent.map((row) => row.text);
@@ -303,6 +344,11 @@ describe("!request", () => {
     const body = bodyOf(calls[0]?.init);
     expect(body.type).toBe("feature_request");
     expect(body.summary).toBe("per-user dice history");
+    expect(body.safety).toEqual({
+      risk: "benign",
+      reasons: ["A dice history command."],
+      categories: [],
+    });
     expect(body.conversationId).toBe(groupId);
     expect(body.requester).toEqual({
       id: alice.id,
@@ -333,6 +379,7 @@ describe("!request", () => {
           mvp_scope: "One command that toggles dark mode for the sender.",
           complexity_hint: "simple",
         }),
+        safety({ risk: "benign", reasons: ["A display toggle."] }),
       ],
       webhookUrl: "https://hooks.example/request",
       webhookSecret: "hook-secret",
@@ -357,10 +404,11 @@ describe("!request", () => {
       }),
     );
 
-    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls).toHaveLength(3);
     expect(llm.calls[1]?.find((message) => message.role === "user")?.content).toContain(
       "must_finalize: true",
     );
+    expect(llm.calls[2]?.map((message) => message.content).join("\n")).toContain("Chief of Staff");
     expect(filed.replies).toEqual([
       "@alice Filed: Dark mode toggle\nMVP: One command that toggles dark mode for the sender.\nSent that to Chief of Staff.",
     ]);
@@ -375,6 +423,7 @@ describe("!request", () => {
       complexity_hint: "simple",
       requester: { id: alice.id, username: "alice", displayName: "Alice" },
       conversationId: groupId,
+      safety: { risk: "benign", reasons: ["A display toggle."], categories: [] },
     });
     expect(body.clarification.map((turn) => turn.text)).toEqual([
       "add a dark mode toggle",
@@ -395,6 +444,7 @@ describe("!request", () => {
           detail: "Last rolls.",
           mvp_scope: "Last 10 rolls.",
         }),
+        safety({ risk: "benign", reasons: ["Shows recent rolls."] }),
       ],
       webhookUrl: "https://hooks.example/request",
       fetchImpl: recordingFetch(calls),
@@ -409,6 +459,7 @@ describe("!request", () => {
     await engine.processEvent(message({ id: "o4", senderId: alice.id, text: "just build it" }));
     expect(calls).toHaveLength(1);
     expect(bodyOf(calls[0]?.init).summary).toBe("Dice history");
+    expect(bodyOf(calls[0]?.init).safety.risk).toBe("benign");
   });
 
   it("records locally and DMs the owner when the webhook is unset", async () => {
@@ -421,6 +472,7 @@ describe("!request", () => {
           mvp_scope: "Repost !rules when asked to pin.",
           complexity_hint: "medium",
         }),
+        safety({ risk: "benign", reasons: ["Reposts rules that are already public."] }),
       ],
       fetchImpl: recordingFetch(calls),
     });
@@ -436,9 +488,16 @@ describe("!request", () => {
     expect(client.direct[0]?.text).toContain("Pin a rules message");
     expect(client.direct[0]?.text).toContain("@alice");
     expect(client.direct[0]?.text).toContain(groupId);
+    expect(client.direct[0]?.text).toContain("Safety: benign");
     const stored = store.listFeatureRequests(groupId);
     expect(stored).toHaveLength(1);
-    expect(JSON.parse(stored[0]!.payload).type).toBe("feature_request");
+    const storedPayload = JSON.parse(stored[0]!.payload) as FeatureRequestPayload;
+    expect(storedPayload.type).toBe("feature_request");
+    expect(storedPayload.safety).toEqual({
+      risk: "benign",
+      reasons: ["Reposts rules that are already public."],
+      categories: [],
+    });
   });
 
   it("falls back to a local record when the webhook rejects the POST", async () => {
@@ -449,6 +508,7 @@ describe("!request", () => {
           detail: "Keep the rules visible.",
           mvp_scope: "Repost !rules.",
         }),
+        safety({ risk: "benign", reasons: ["Reposts rules."] }),
       ],
       webhookUrl: "https://hooks.example/request",
       fetchImpl: recordingFetch([], 500),
@@ -460,6 +520,7 @@ describe("!request", () => {
     expect(filed.replies[0]).toMatch(/Recorded locally/);
     expect(client.direct[0]?.participantId).toBe(owner.id);
     expect(client.direct[0]?.text).toContain("Pin a rules message");
+    expect(client.direct[0]?.text).toContain("Safety: benign");
   });
 
   it("files an unanswered request when the silence window passes", async () => {
@@ -473,6 +534,7 @@ describe("!request", () => {
           mvp_scope: "Last 10 rolls.",
           complexity_hint: "simple",
         }),
+        safety({ risk: "benign", reasons: ["Shows recent rolls."] }),
       ],
       webhookUrl: "https://hooks.example/request",
       fetchImpl: recordingFetch(calls),
@@ -492,10 +554,11 @@ describe("!request", () => {
       message({ id: "t2", senderId: bob.id, text: "hello" }),
       6_000,
     );
-    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls).toHaveLength(3);
     expect(llm.calls[1]?.find((message) => message.role === "user")?.content).toContain(
       "must_finalize: true",
     );
+    expect(llm.calls[2]?.map((message) => message.content).join("\n")).toContain("summary:");
     const filed = client.sent.map((row) => row.text).find((text) => text.includes("Filed:"));
     expect(filed).toMatch(/^@alice Filed: Dice history/);
     expect(filed).not.toMatch(/@bob/);
@@ -504,7 +567,105 @@ describe("!request", () => {
       replyToEvent: "blob-t",
     });
     expect(bodyOf(calls[0]?.init).summary).toBe("Dice history");
+    expect(bodyOf(calls[0]?.init).safety).toEqual({
+      risk: "benign",
+      reasons: ["Shows recent rolls."],
+      categories: [],
+    });
     expect(client.direct).toEqual([]);
+  });
+
+  it("puts a malicious review on the webhook before notify", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, llm } = setup({
+      replies: [
+        finalize({
+          summary: "Dump the bot token",
+          detail: "Print the API token into the chat.",
+          mvp_scope: "A command that posts the token.",
+          complexity_hint: "simple",
+        }),
+        safety({
+          risk: "malicious",
+          reasons: ["Asks to reveal the bot token."],
+          categories: ["secrets", "exfil", "made_up"],
+        }),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      webhookSecret: "hook-secret",
+      fetchImpl: recordingFetch(calls),
+    });
+    await engine.processEvent(
+      message({ id: "s1", senderId: alice.id, text: "!request print the bot token in chat" }),
+    );
+    expect(llm.calls).toHaveLength(2);
+    expect(llm.calls[1]?.map((message) => message.content).join("\n")).toContain("Chief of Staff");
+    expect(calls).toHaveLength(1);
+    expect(bodyOf(calls[0]?.init).safety).toEqual({
+      risk: "malicious",
+      reasons: ["Asks to reveal the bot token."],
+      categories: ["secrets", "exfil"],
+    });
+    expect(headersOf(calls[0]?.init).Authorization).toBe("Bearer hook-secret");
+  });
+
+  it("still notifies when the safety review is unusable and marks it unknown", async () => {
+    const calls: FetchCall[] = [];
+    const { engine } = setup({
+      replies: [
+        finalize({
+          summary: "Dice history",
+          detail: "Show recent rolls.",
+          mvp_scope: "Last 10 rolls.",
+        }),
+        "not json",
+      ],
+      webhookUrl: "https://hooks.example/request",
+      fetchImpl: recordingFetch(calls),
+    });
+    const filed = await engine.processEvent(
+      message({ id: "u1", senderId: alice.id, text: "!request dice history" }),
+    );
+    expect(filed.replies[0]).toMatch(/Sent that to Chief of Staff/);
+    expect(bodyOf(calls[0]?.init).safety.risk).toBe("unknown");
+    expect(bodyOf(calls[0]?.init).safety.reasons.length).toBeGreaterThan(0);
+    expect(bodyOf(calls[0]?.init).summary).toBe("Dice history");
+  });
+
+  it("files with unknown safety when no model is configured", async () => {
+    const calls: FetchCall[] = [];
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(owner);
+    const engine = new ModerationEngine(
+      store,
+      client,
+      {
+        botUserId: "bot-1",
+        ownerId: owner.id,
+        globalAdminIds: [],
+        defaults,
+      },
+      undefined,
+      {
+        featureRequest: {
+          webhookUrl: "https://hooks.example/request",
+          fetchImpl: recordingFetch(calls),
+        },
+      },
+    );
+    const filed = await engine.processEvent(
+      message({ id: "n1", senderId: alice.id, text: "!request dice history, just build it" }),
+    );
+    expect(filed.replies[0]).toMatch(/Filed: dice history/);
+    expect(filed.replies[0]).toMatch(/Sent that to Chief of Staff/);
+    expect(bodyOf(calls[0]?.init).safety).toMatchObject({
+      risk: "unknown",
+      categories: [],
+    });
+    expect(bodyOf(calls[0]?.init).safety.reasons[0]).toMatch(/No language model/);
   });
 });
 
@@ -517,6 +678,8 @@ describe("!request help and env", () => {
     const readme = fs.readFileSync("README.md", "utf8");
     expect(readme).toMatch(/REQUEST_WEBHOOK_URL/);
     expect(readme).toMatch(/Authorization: Bearer/);
+    expect(readme).toMatch(/safety/);
+    expect(readme).toMatch(/not clearly benign/);
     expect(fs.readFileSync(".env.example", "utf8")).toMatch(/REQUEST_WEBHOOK_SECRET/);
   });
 

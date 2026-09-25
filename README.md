@@ -591,7 +591,7 @@ The snapshot is whatever this process already knows. It does not call X, the LLM
 
 `!request <idea>` (alias `!featurerequest`, and the `/` forms) lets anyone in an authorized chat ask for a feature. The bot does not implement it in this process. Chief of Staff and cloud agents do that after review.
 
-Bare `!request` asks what they want. With an idea, the bot uses the same LLM client as `!ask` (no group history) to ask a few short questions about the goal, a constraint, or an example, and nudges toward an MVP. It stops after three questions. `just build it`, `MVP is fine`, or about ten minutes of silence files whatever is already known. Those model calls share the per-user LLM rate limit; over the limit, it files without another question. If the model is off or the call fails, it still files from the text it has.
+Bare `!request` asks what they want. With an idea, the bot uses the same LLM client as `!ask` (no group history) to ask a few short questions about the goal, a constraint, or an example, and nudges toward an MVP. It stops after three questions. `just build it`, `MVP is fine`, or about ten minutes of silence files whatever is already known. Those clarifying calls share the per-user LLM rate limit; over the limit, it files without another question. If the model is off or the call fails, it still files from the text it has. After the MVP is chosen, and before the webhook or owner DM, the same model writes a safety review. That review still runs when the ask budget is already spent. If it cannot, `safety.risk` is `unknown`.
 
 The in-chat confirmation is a short summary. It tags the requester and, in encrypted Chat, threads under their message, the same way other command replies do.
 
@@ -605,6 +605,7 @@ Then the bot POSTs JSON to `REQUEST_WEBHOOK_URL`. When `REQUEST_WEBHOOK_SECRET` 
 | `conversationId` | The chat it was asked in |
 | `clarification` | Q&A transcript (`user` / `bot` turns) |
 | `complexity_hint` | LLM guess: `simple`, `medium`, or `large`. Chief of Staff decides for real |
+| `safety` | LLM review run after the MVP is chosen and before this POST. `risk` is `benign`, `suspicious`, `malicious`, or `unknown`. `reasons` is a short list of why. `categories` may include `auth_bypass`, `secrets`, `exfil`, `spam`, `billing_abuse`, `harassment`, `prompt_injection`, `illegal`. Chief of Staff re-checks and prompts Matt before auto-merge when risk is not clearly benign. If the model cannot review, `risk` is `unknown` and the request is still filed |
 | `timestamp` | ISO time |
 
 Every filing is also stored in SQLite `feature_requests`. If `REQUEST_WEBHOOK_URL` is unset, or the POST fails, the bot says it was recorded locally and DMs `BOT_OWNER_ID` when that send works. The secret is not logged and is not copied into the chat. Redirects are not followed, so the URL should be the final endpoint. An unfinished Q&A is kept in memory; a restart drops it, and the requester can send `!request` again. Filed rows stay in SQLite.

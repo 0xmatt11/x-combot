@@ -159,20 +159,24 @@ import {
 import {
   buildFeatureRequestMessages,
   buildFeatureRequestPayload,
+  buildFeatureRequestSafetyMessages,
   cannedFeatureQuestion,
   deliverFeatureRequest,
   fallbackFeatureFiling,
   featureRequestConfirmation,
   featureRequestOwnerDm,
   parseFeatureRequestModel,
+  parseFeatureRequestSafety,
   readRequestReply,
   substantiveRequestText,
+  unknownFeatureSafety,
   FEATURE_REQUEST_MAX_QUESTIONS,
   FEATURE_REQUEST_TIMEOUT_MS,
   type ClarificationTurn,
   type FeatureRequestFetch,
   type FeatureRequestFiling,
   type FeatureRequestPayload,
+  type FeatureRequestSafety,
   type FeatureRequester,
 } from "./feature-request.js";
 import {
@@ -3626,12 +3630,14 @@ export class ModerationEngine {
     nowMs: number,
   ): Promise<void> {
     if (!this.dropFeatureRequest(session)) return;
+    const safety = await this.reviewFeatureRequestSafety(session, filing, actions, nowMs);
     const timestamp = new Date(nowMs).toISOString();
     const payload = buildFeatureRequestPayload({
       filing,
       requester: session.requester,
       conversationId: session.conversationId,
       clarification: session.transcript,
+      safety,
       timestamp,
     });
     this.store.addFeatureRequest(
@@ -3657,6 +3663,43 @@ export class ModerationEngine {
       if (!delivered) text += " I couldn't DM the owner.";
     }
     await this.reply(session.conversationId, text, actions);
+  }
+
+  /**
+   * Safety review runs after the MVP is chosen and before the webhook or owner DM.
+   * A missing or broken model still files the request, with risk `unknown`.
+   * This call is not skipped when the per-user ask budget is already spent.
+   */
+  private async reviewFeatureRequestSafety(
+    session: FeatureRequestSession,
+    filing: FeatureRequestFiling,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<FeatureRequestSafety> {
+    const settings = this.conversationConfig(session.conversationId);
+    const model = settings.llmEnabled ? this.llmClient : undefined;
+    if (!model) {
+      return unknownFeatureSafety("No language model was available to review this request.");
+    }
+    this.store.recordLlmUse(
+      session.conversationId,
+      session.requester.id,
+      nowMs,
+      settings.llmRateLimitWindowMs,
+    );
+    try {
+      const raw = await model.complete(
+        buildFeatureRequestSafetyMessages({
+          filing,
+          transcript: session.transcript,
+        }),
+      );
+      actions.llm = true;
+      return parseFeatureRequestSafety(raw);
+    } catch (error) {
+      log.warn(`Feature request safety review failed conversation=${session.conversationId}`, error);
+      return unknownFeatureSafety("The safety review failed.");
+    }
   }
 
   private async dmFeatureRequestOwner(payload: FeatureRequestPayload): Promise<boolean> {
