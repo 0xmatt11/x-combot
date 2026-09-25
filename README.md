@@ -17,7 +17,7 @@ Other chat bots can kick and delete anyone's messages when those apps expose tho
 - Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. They use the saved imagine-public bank (`BOOBS_IMAGINE_APP` and the `BOOBS_IMAGINE_PUBLIC_*` URL lists), including each command's mp4 bank. `!ass` / `!booty` stills rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. If that bank is empty or exhausted, image search runs. They do not open grok.com/imagine and they do not call api.x.ai image generation. `!imagine` and `!video` still use the Chrome session.
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
 - `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one).
-- `!voice <persona> <text>` speaks that line as Girl 1 through Girl 10, or regular dude, and posts an audio attachment in encrypted Chat. Bare `!voice` lists all eleven. Classic group DMs get a short note that Chat is required.
+- `!voice <persona> <text>` speaks that line as Girl 1 through Girl 10 and posts an audio attachment in encrypted Chat. Bare `!voice` lists those ten. Classic group DMs get a short note that Chat is required.
 - Encrypted groups: decrypt with [chat-xdk](https://github.com/xdevplatform/chat-xdk), reply with an encrypted payload, and (when opted in) take `chat.received` from the X Activity API.
 - With a Chat identity and no allowlist, it **tracks** every encrypted group the account is in, including groups it is added to later. A group first seen after this rule stays quiet until `BOT_OWNER_ID` sends `!auth` in that chat. Groups that already had a Chat watermark are grandfathered and keep being moderated.
 - `!ask` and `@bot` can read recent public posts for someone in the chat or an outside `@handle`, and can search the web. A complex ask runs up to five in-process LLM workers. It does not call other Grok bots. See [Public timelines, web search, and workers](#public-timelines-web-search-and-workers).
@@ -279,7 +279,7 @@ If X Chat rate-limits `!ask`, `@bot`, `!summarize`, or `!analyze`, the bot says 
 | --- | --- |
 | `!imagine <prompt>` | Image on grok.com/imagine. See [Imagine](#imagine) |
 | `!video <prompt>` | Short video on grok.com/imagine. See [Video](#video) |
-| `!voice` | Speak a line: Girl 1 through Girl 10, or regular dude. See [Voice](#voice) |
+| `!voice` | Speak a line: Girl 1 through Girl 10. See [Voice](#voice) |
 | `!boobs` | Chest photo from the saved bank (off until enabled). Does not open grok.com/imagine. See [Adult photos](#adult-photos) |
 | `!ass` / `!booty` | Butt photo, same switch (`!booties`) |
 | `!cheese` | A few kitten photos and cheese photos. Extra words are ignored. See [Kitten and cheese photos](#kitten-and-cheese-photos) |
@@ -593,7 +593,7 @@ When the clip is ready, encrypted Chat uploads the mp4 the same way as a photo (
 
 ## Voice
 
-`!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice girl1 hello there`, `!voice 10 hello there`, or `!voice dude what's up`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text.
+`!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice girl1 hello there` or `!voice 10 hello there`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text. Old names such as `dude`, `guy`, and `regular` show that menu too.
 
 Girl 1 is a mild whisper. Each later girl adds breath, pitch, pace, or intensity. Girl 10 is the peak: gasping breaths around a loud, fast, high, building delivery. The tags wrap the line. They do not add words.
 
@@ -609,9 +609,8 @@ Girl 1 is a mild whisper. Each later girl adds breath, pitch, pace, or intensity
 | 8 | Girl 8 | `girl8`, `8` | `eve` | Girl 7's tags plus `<loud>` |
 | 9 | Girl 9 | `girl9`, `9` | `ara` | an extra `[breath]`, then `<loud>`, `<higher-pitch>`, `<fast>`, and `<build-intensity>` |
 | 10 | Girl 10 | `girl10`, `10` | `eve` | two breath cycles, then `<loud>`, `<fast>`, `<higher-pitch>`, `<build-intensity>`, and `<emphasis>` |
-| 11 | regular dude | `dude`, `regular`, `guy` | `rex` (confident and clear) | the line as written |
 
-Those tags are xAI speech tags. They change delivery and do not add words to the line. The docs have no moan tag, so the heavier girls use breath, sigh, inhale, and exhale. Girls share `ara` and `eve`. `rex` is regular dude. `sal` and `leo` are not used. Older names still work: `sexy` and `sexygirl` are Girl 1, `scared` and `scaredgirl` are Girl 2, and `horny` and `hornygirl` are Girl 6. `2` is Girl 2.
+Those tags are xAI speech tags. They change delivery and do not add words to the line. The docs have no moan tag, so the heavier girls use breath, sigh, inhale, and exhale. Girls share `ara` and `eve`. `rex`, `sal`, and `leo` are not used. Older names still work: `sexy` and `sexygirl` are Girl 1, `scared` and `scaredgirl` are Girl 2, and `horny` and `hornygirl` are Girl 6. `2` is Girl 2.
 
 The bot waits for the clip and posts it in one reply that tags the requester and, in encrypted Chat, replies to the command. The audio caption is only that `@handle`. Synthesis is usually a few seconds, so there is no separate "Speaking…" line. It uses an xAI key (`XAI_API_KEY`, or the grok LLM key stack). With no key the bot says voice needs `XAI_API_KEY`. Browser Imagine does not move `!voice` off that API. It does not use image search, the adult-command switch, or the adult rate limit, and it stays available when `!boobs` is off.
 

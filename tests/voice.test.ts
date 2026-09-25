@@ -88,8 +88,8 @@ describe("voice request checks", () => {
     for (let n = 1; n <= 10; n += 1) {
       expect(VOICE_MENU_MESSAGE).toMatch(new RegExp(`${n}\\. Girl ${n} — !voice girl${n} <text>`));
     }
-    expect(VOICE_MENU_MESSAGE).toMatch(/11\. regular dude — !voice dude <text>/);
-    expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared/i);
+    expect(VOICE_MENU_MESSAGE).not.toMatch(/11\.|regular dude|!voice dude/);
+    expect(VOICE_MENU_MESSAGE).not.toMatch(/horny|sexy|scared|\bdude\b|\bguy\b|\brex\b/i);
     expect(DEFAULT_VOICE_LANGUAGE).toBe("en");
   });
 
@@ -108,16 +108,11 @@ describe("voice request checks", () => {
       text: "hello there",
     });
     expect(parseVoiceRequest("SEXYGIRL hello")).toMatchObject({ personaId: "girl1", voiceId: "ara" });
-    expect(parseVoiceRequest("dude what's up")).toEqual({
-      ok: true,
-      personaId: "dude",
-      voiceId: "rex",
-      text: "what's up",
-      spoken: "what's up",
-    });
+    expect(parseVoiceRequest("dude what's up")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("DUDE what's up")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("guy hey")).toEqual({ ok: false, reason: "menu" });
+    expect(parseVoiceRequest("regular hey")).toEqual({ ok: false, reason: "menu" });
     expect(parseVoiceRequest("2 what's up")).toMatchObject({ personaId: "girl2", voiceId: "eve" });
-    expect(parseVoiceRequest("guy hey")).toMatchObject({ personaId: "dude", voiceId: "rex" });
-    expect(parseVoiceRequest("regular hey")).toMatchObject({ personaId: "dude" });
     const scared = parseVoiceRequest("scared stay with me");
     expect(scared).toMatchObject({
       ok: true,
@@ -149,6 +144,10 @@ describe("voice request checks", () => {
     expect(parseVoiceRequest("hornygirl hello")).toMatchObject({ personaId: "girl6" });
     const aliases = VOICE_PERSONAS.flatMap((persona) => persona.aliases);
     expect(new Set(aliases).size).toBe(aliases.length);
+    expect(aliases).not.toContain("dude");
+    expect(aliases).not.toContain("guy");
+    expect(aliases).not.toContain("regular");
+    expect(VOICE_PERSONAS.map((persona) => persona.voiceId)).not.toContain("rex");
     const line = "say this";
     for (let n = 1; n <= 10; n += 1) {
       const parsed = parseVoiceRequest(`girl${n} ${line}`);
@@ -172,13 +171,14 @@ describe("voice request checks", () => {
       expect(peak.spoken).toMatch(/\[breath\].*\[inhale\].*\[sigh\].*\[exhale\].*<loud>.*<fast>.*<higher-pitch>.*<build-intensity>/);
     }
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
-    const long = parseVoiceRequest(`dude ${"a".repeat(20_000)}`);
+    const longLine = "a".repeat(20_000);
+    const long = parseVoiceRequest(`girl1 ${longLine}`);
     expect(long.ok).toBe(true);
     if (long.ok) {
-      expect(long.personaId).toBe("dude");
-      expect(long.voiceId).toBe("rex");
+      expect(long.personaId).toBe("girl1");
+      expect(long.voiceId).toBe("ara");
       expect(long.text).toHaveLength(20_000);
-      expect(long.spoken).toBe("a".repeat(20_000));
+      expect(long.spoken).toBe(`<whisper>${longLine}</whisper>`);
     }
     expect(VOICE_TOO_LONG_MESSAGE).not.toMatch(/1500|character/i);
   });
@@ -426,7 +426,7 @@ describe("!voice command", () => {
     expect(JSON.stringify(client.sent)).not.toContain("hello from the group");
   });
 
-  it("speaks a numbered persona and a dude line", async () => {
+  it("speaks a numbered persona and Girl 10", async () => {
     const numbered = setup();
     await numbered.engine.processEvent(
       message({ id: "v1", conversationId: chatGroupId, text: "!voice 1 hello there" }),
@@ -434,13 +434,6 @@ describe("!voice command", () => {
     expect(numbered.voice.prompts).toEqual([
       { text: "<whisper>hello there</whisper>", voiceId: "ara" },
     ]);
-
-    const dude = setup();
-    await dude.engine.processEvent(
-      message({ id: "v2", conversationId: chatGroupId, text: "/voice dude what's up" }),
-    );
-    expect(dude.voice.prompts).toEqual([{ text: "what's up", voiceId: "rex" }]);
-    expect(dude.client.audios[0]?.voiceId).toBe("rex");
 
     const peak = setup();
     await peak.engine.processEvent(
@@ -486,6 +479,15 @@ describe("!voice command", () => {
       message({ id: "bad-voice", conversationId: chatGroupId, text: "!voice robot hello" }),
     );
     await engine.processEvent(
+      message({ id: "old-dude", conversationId: chatGroupId, text: "/voice dude what's up" }),
+    );
+    await engine.processEvent(
+      message({ id: "old-guy", conversationId: chatGroupId, text: "!voice guy hey" }),
+    );
+    await engine.processEvent(
+      message({ id: "old-regular", conversationId: chatGroupId, text: "!voice regular hey" }),
+    );
+    await engine.processEvent(
       message({ id: "teen", conversationId: chatGroupId, text: "!voice sexy teen portrait" }),
     );
     expect(voice.prompts).toHaveLength(0);
@@ -507,9 +509,9 @@ describe("!voice command", () => {
     const { engine, client, voice } = setup();
     const line = "b".repeat(1_501);
     await engine.processEvent(
-      message({ id: "long", conversationId: chatGroupId, text: `!voice dude ${line}` }),
+      message({ id: "long", conversationId: chatGroupId, text: `!voice girl1 ${line}` }),
     );
-    expect(voice.prompts).toEqual([{ text: line, voiceId: "rex" }]);
+    expect(voice.prompts).toEqual([{ text: `<whisper>${line}</whisper>`, voiceId: "ara" }]);
     expect(client.audios).toHaveLength(1);
     expect(client.sent.map((row) => row.text).join("\n")).not.toContain(VOICE_TOO_LONG_MESSAGE);
   });
@@ -518,7 +520,7 @@ describe("!voice command", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!voice/);
     expect(loaded.help).toMatch(/Girl 1 through Girl 10/);
-    expect(loaded.help).toMatch(/regular dude/);
+    expect(loaded.help).not.toMatch(/regular dude|\bdude\b|\bguy\b|\brex\b/i);
     expect(loaded.help).not.toMatch(/horny|sexy|scared/i);
     expect(loaded.help).not.toMatch(/1500/);
     expect(loaded.welcome.text).not.toMatch(/1500/);

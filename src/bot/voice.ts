@@ -27,14 +27,13 @@ export type VoicePersonaId =
   | "girl7"
   | "girl8"
   | "girl9"
-  | "girl10"
-  | "dude";
+  | "girl10";
 
 /**
  * Named personas. `voiceId` is always a built-in xAI id already used here.
- * ara is "warm and friendly", eve is "energetic and upbeat", rex is "confident and clear".
- * Girls alternate ara and eve. sal and leo stay unused.
- * Numeric aliases 1–10 are the girls. Dude is `dude`, `regular`, or `guy`.
+ * ara is "warm and friendly", eve is "energetic and upbeat".
+ * Girls alternate ara and eve. rex, sal, and leo are unused.
+ * Numeric aliases 1–10 are the girls. `dude`, `guy`, and `regular` are not voices.
  * Older aliases: `sexy` / `sexygirl` are Girl 1, `scared` / `scaredgirl` are Girl 2,
  * `horny` / `hornygirl` are Girl 6 (the first build-intensity tier).
  * Delivery uses documented speech tags only. xAI has no moan tag; breath, sigh,
@@ -138,14 +137,6 @@ export const VOICE_PERSONAS: readonly {
     voiceId: "eve",
     deliver: (text) =>
       `[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>${text}</emphasis></build-intensity></higher-pitch></fast></loud>`,
-  },
-  {
-    id: "dude",
-    label: "regular dude",
-    menuAlias: "dude",
-    aliases: ["dude", "regular", "guy"],
-    voiceId: "rex",
-    deliver: (text) => text,
   },
 ];
 /** Default MP3 is 128 kbps. Used only to fill duration_millis on the Chat attachment. */
