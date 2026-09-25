@@ -131,6 +131,32 @@ describe("Poller scheduling", () => {
 
     poller.stop();
   });
+
+  it("drains LLM retries after a successful DM poll and skips the drain when the poll throws", async () => {
+    const drainLlmRetries = vi.fn().mockResolvedValue(0);
+    const listDmEvents = vi.fn().mockResolvedValue({ events: [] });
+    const client = { listDmEvents } as unknown as XClient;
+    const store = {
+      getWatermark: () => undefined,
+      setWatermark: () => {},
+    } as unknown as Store;
+    const poller = new Poller(
+      client,
+      store,
+      { drainLlmRetries } as unknown as ModerationEngine,
+      INTERVAL_MS,
+      50,
+    );
+
+    await poller.tick();
+    expect(drainLlmRetries).toHaveBeenCalledTimes(1);
+
+    listDmEvents.mockRejectedValueOnce(rateLimitError(429, 60_000));
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(drainLlmRetries).toHaveBeenCalledTimes(1);
+
+    poller.stop();
+  });
 });
 
 describe("Poller with LiveXClient backoff", () => {

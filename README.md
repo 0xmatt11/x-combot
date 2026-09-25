@@ -239,7 +239,7 @@ curl -X POST "https://api.x.com/2/webhooks" \
 
 Auto-subscribe does not set `webhook_id`. Events still arrive on the stream when that connection is open. To deliver only to the webhook, create the subscription yourself with `webhook_id` and set `ACTIVITY_SUBSCRIBE=false`. Point a reverse proxy at `ACTIVITY_WEBHOOK_PORT`. X will not call `http://127.0.0.1:8080`.
 
-Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2/dm_events` when `DM_POLL=true`, and the Activity stream itself can still return 429 or 402. The bot waits those out. A 429 on send delays that one reply. The next inbound command is not stuck behind a 12s poll while the stream is connected.
+Sending a reply, key registration, key rotation, the slow catch-up poll, `GET /2/dm_events` when `DM_POLL=true`, and the Activity stream itself can still return 429 or 402. The bot waits those out. A 429 on send delays that one reply. The next inbound command is not stuck behind a 12s poll while the stream is connected. A freeform `@bot` / `!ask` runs off the stream read loop, the same way `!video` does, so a long answer does not stall the next event.
 
 ## Commands
 
@@ -270,6 +270,8 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | `!analyze` | Ask about this chat |
 | `!request <idea>` | File a feature (`!featurerequest`). A few questions, then it is sent on. See [Feature requests](#feature-requests) |
 | `!<made-up>` | Short LLM joke when the model is on. Real commands, including `!admin`, do not take this path |
+
+If X Chat rate-limits `!ask`, `@bot`, `!summarize`, or `!analyze`, the bot says so in that chat (tagging the requester) and retries. `!ask` and `@bot` still answer without group history when that read keeps failing. See [LLM replies](#llm-replies).
 
 **Media**
 
@@ -720,6 +722,8 @@ Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. Th
 | `full` / `conversation` | Up to `full_max_messages` / `full_max_chars` | Up to `max_pages` (default 5) × 100 events |
 
 Classic history is `GET /2/dm_conversations/:id/dm_events` (~30 days). `g…` groups decrypt `GET /2/chat/conversations/:id/events`. `!summarize` and `!analyze` always use the full fetch, still truncated by those caps. Truncation drops oldest messages by default. Prompts are not stored. Rate-limit timestamps are.
+
+A Chat 429, 402, or 503, or any error with `retryAfterMs`, while loading that history does not drop the ask. The bot waits once (at most 5 seconds) and reads history again. `!ask` and `@bot` then answer with empty chat context if the read is still blocked, same as `!troll` continuing when timeline or chat history fails. `!summarize` and `!analyze` need that history, and a reply that cannot be sent is the same kind of block: the bot tags the requester (`X Chat is rate-limiting me right now. I'll retry this and reply when it clears.`) and stores the ask in SQLite `llm_retry_jobs`. Poll ticks and a 15 second timer drain that table. The row survives a restart. After 48 failed drains, or 6 hours, the bot says to send it again. The ciphertext of the original message is not written into the row; a later reply still tags the sender and threads when a sequence id was saved.
 
 `llm.allow: admins` gates `!ask`, summarize, analyze, and unknown-bang jokes to the owner, `ADMIN_IDS`, and per-group admins. The system prompt is `llm.system_prompt` in `config/default.yaml`. It tells the model it cannot kick users on X.
 

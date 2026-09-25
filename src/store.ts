@@ -192,6 +192,20 @@ CREATE TABLE IF NOT EXISTS feature_requests (
   payload TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS llm_retry_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_ms INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  UNIQUE(conversation_id, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_retry_due
+  ON llm_retry_jobs (next_attempt_ms);
 `;
 
 export class Store {
@@ -1091,6 +1105,78 @@ export class Store {
     }));
   }
 
+  /**
+   * Queue or replace a freeform LLM ask that Chat rate-limited.
+   * `created_at_ms` stays on conflict so the age cap does not reset.
+   */
+  upsertLlmRetry(row: {
+    conversationId: string;
+    eventId: string;
+    payload: string;
+    attempts: number;
+    nextAttemptMs: number;
+    createdAtMs: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO llm_retry_jobs (
+           conversation_id, event_id, payload, attempts, next_attempt_ms, created_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, event_id) DO UPDATE SET
+           payload = excluded.payload,
+           attempts = excluded.attempts,
+           next_attempt_ms = excluded.next_attempt_ms`,
+      )
+      .run(
+        row.conversationId,
+        row.eventId,
+        row.payload,
+        row.attempts,
+        row.nextAttemptMs,
+        row.createdAtMs,
+      );
+  }
+
+  getLlmRetry(conversationId: string, eventId: string): LlmRetryJob | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, conversation_id, event_id, payload, attempts, next_attempt_ms, created_at_ms
+         FROM llm_retry_jobs
+         WHERE conversation_id = ? AND event_id = ?`,
+      )
+      .get(conversationId, eventId) as LlmRetryRow | undefined;
+    return row ? llmRetryFromRow(row) : undefined;
+  }
+
+  /** Due jobs, soonest first. */
+  listDueLlmRetries(nowMs: number, limit: number): LlmRetryJob[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, conversation_id, event_id, payload, attempts, next_attempt_ms, created_at_ms
+         FROM llm_retry_jobs
+         WHERE next_attempt_ms <= ?
+         ORDER BY next_attempt_ms ASC, id ASC
+         LIMIT ?`,
+      )
+      .all(nowMs, limit) as LlmRetryRow[];
+    return rows.map(llmRetryFromRow);
+  }
+
+  listLlmRetries(): LlmRetryJob[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, conversation_id, event_id, payload, attempts, next_attempt_ms, created_at_ms
+         FROM llm_retry_jobs
+         ORDER BY id ASC`,
+      )
+      .all() as LlmRetryRow[];
+    return rows.map(llmRetryFromRow);
+  }
+
+  deleteLlmRetry(id: number): void {
+    this.db.prepare("DELETE FROM llm_retry_jobs WHERE id = ?").run(id);
+  }
+
   /** Record a posted link roast for this sender. */
   markLinkroastSent(conversationId: string, userId: string, nowMs: number): void {
     this.db
@@ -1101,6 +1187,38 @@ export class Store {
       )
       .run(conversationId, userId, nowMs);
   }
+}
+
+interface LlmRetryRow {
+  id: number;
+  conversation_id: string;
+  event_id: string;
+  payload: string;
+  attempts: number;
+  next_attempt_ms: number;
+  created_at_ms: number;
+}
+
+function llmRetryFromRow(row: LlmRetryRow): LlmRetryJob {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    eventId: row.event_id,
+    payload: row.payload,
+    attempts: row.attempts,
+    nextAttemptMs: row.next_attempt_ms,
+    createdAtMs: row.created_at_ms,
+  };
+}
+
+export interface LlmRetryJob {
+  id: number;
+  conversationId: string;
+  eventId: string;
+  payload: string;
+  attempts: number;
+  nextAttemptMs: number;
+  createdAtMs: number;
 }
 
 export interface TrollTarget {

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { loadDefaults, normalizeBoobsConfig, normalizeXpConfig } from "./config.js";
 import { loadEnv, type Env } from "./env.js";
+import { startLlmRetryDrain } from "./llm/chat-retry.js";
 import { log } from "./log.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
@@ -339,8 +340,11 @@ async function main(): Promise<void> {
     );
   }
 
+  const llmRetryDrain = startLlmRetryDrain(engine);
+
   const shutdown = () => {
     log.info("Shutting down");
+    llmRetryDrain.stop();
     poller.stop();
     chatPoller?.stop();
     activityRuntime?.stop();

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
+import type { LlmClient } from "../src/llm/client.js";
+import { LLM_RATE_LIMIT_ACK } from "../src/llm/chat-retry.js";
+import { MockLlmClient } from "../src/llm/mock.js";
 import {
   ChatActivityIntake,
   chatReceivedSubscriptionBody,
@@ -374,6 +377,117 @@ describe("Activity intake", () => {
     expect(seen).toHaveLength(2);
     expect(parseActivityChat(seen[0])?.conversationId).toBe(GROUP);
     expect(parseActivityChat(seen[1])).toBeUndefined();
+  });
+
+  it("keeps a summarize when Chat history is rate-limited instead of dropping it", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(GROUP);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-sum", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!summarize" },
+    });
+    const http = new FakeHttp();
+    http.getConversationEvents = async () => {
+      const error = new Error("Rate limited; retry after 40ms") as Error & {
+        status: number;
+        retryAfterMs: number;
+      };
+      error.status = 429;
+      error.retryAfterMs = 40;
+      throw error;
+    };
+    const slept: number[] = [];
+    const llm = new MockLlmClient("should-not-run");
+    const service = new ChatService(http, cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+      llm,
+      {
+        sleep: async (ms) => {
+          slept.push(ms);
+        },
+      },
+    );
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
+
+    await expect(
+      intake.handle(envelope({ encoded_event: "b64-sum", id: "evt-sum" })),
+    ).resolves.toBeUndefined();
+    await engine.waitForBackgroundWork();
+
+    expect(slept).toEqual([40]);
+    expect(llm.calls).toHaveLength(0);
+    expect(cipher.texts.some((text) => text.includes(LLM_RATE_LIMIT_ACK))).toBe(true);
+    expect(store.listLlmRetries()).toHaveLength(1);
+    expect(store.listLlmRetries()[0]?.eventId).toBeTruthy();
+  });
+
+  it("does not block the activity read loop on a slow LLM reply", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(GROUP);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-ask", {
+      type: "message",
+      sequenceId: "70",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "@miladybot hello" },
+    });
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "71",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const llm: LlmClient = {
+      async complete() {
+        await gate;
+        return "roasted";
+      },
+    };
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+      llm,
+    );
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
+    const body = [
+      JSON.stringify(envelope({ encoded_event: "b64-ask", id: "evt-ask", event_uuid: "ask" })),
+      JSON.stringify(envelope({ encoded_event: "b64-help", id: "evt-help", event_uuid: "help" })),
+    ].join("\n");
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`${body}\n`));
+        controller.close();
+      },
+    });
+
+    let result: "done" | "timeout" = "timeout";
+    try {
+      result = await Promise.race([
+        readActivityBody(stream, (event) => intake.handle(event)).then(() => "done" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+      ]);
+      expect(result).toBe("done");
+      expect(cipher.texts.some((text) => text.includes("CHAT_HELP_OK"))).toBe(true);
+      expect(cipher.texts.some((text) => text.includes("roasted"))).toBe(false);
+    } finally {
+      release();
+      await engine.waitForBackgroundWork();
+    }
+    expect(cipher.texts.some((text) => text.includes("roasted"))).toBe(true);
   });
 });
 

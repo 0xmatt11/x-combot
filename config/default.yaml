@@ -38,6 +38,7 @@ help: |
   Workers — a complex ask runs up to 5 in-bot workers at once. Extra work waits
   !summarize — recap this chat
   !analyze — ask about this chat
+  Rate limit — if X Chat blocks !ask, !summarize, or !analyze, I say so and retry
   !request <idea> — file a feature (!featurerequest)
 
   Media
