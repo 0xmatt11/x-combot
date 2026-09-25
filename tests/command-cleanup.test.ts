@@ -86,6 +86,18 @@ describe("command cleanup", () => {
           return ["https://i.redd.it/cheese-a.jpg"];
         },
       },
+      milady: {
+        async randomImage() {
+          return {
+            tokenId: "1",
+            url: "https://i2c.seadn.io/ethereum/0x5af0d9827e0c53e4799bb226655a1de152a425a5/milady.png",
+          };
+        },
+      },
+      fetchImage: async (url) =>
+        url.includes("seadn.io")
+          ? { bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/png" }
+          : undefined,
     });
     return { engine, client, store };
   }
@@ -238,6 +250,7 @@ describe("command cleanup", () => {
       "!ask what is up",
       "!boobs",
       "!cheese",
+      "!milady",
       "!imagine a red boat",
     ];
     for (const [index, text] of commands.entries()) {

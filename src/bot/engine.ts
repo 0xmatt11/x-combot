@@ -56,6 +56,14 @@ import { ImageSearchError, type ImageSearch } from "./image-search.js";
 import { selectCheesePhotos } from "./cheese.js";
 import { createCheeseImageSearch, type CheeseImageSearch } from "./cheese-search.js";
 import {
+  createMiladyLookup,
+  isSafeMiladyImageUrl,
+  MILADY_UNAVAILABLE,
+  MiladyLookupError,
+  type MiladyImage,
+  type MiladyLookup,
+} from "./milady.js";
+import {
   formatImagineModerationReply,
   imaginePromptRejection,
   ImagineError,
@@ -253,6 +261,15 @@ export interface EngineDeps {
    * This command does not call Imagine or api.x.ai.
    */
   cheeseSearch?: CheeseImageSearch;
+  /**
+   * OpenSea lookup for `!milady`. Absent means the engine builds the default
+   * client on first use. `openseaApiKey` selects the REST NFT endpoint.
+   * Without a key the public GraphQL search is used.
+   * This command does not call Imagine or api.x.ai.
+   */
+  milady?: MiladyLookup;
+  /** Optional `OPENSEA_API_KEY`. Unused when `milady` is injected. */
+  openseaApiKey?: string;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
   adultVision?: AdultVisionJudge;
@@ -367,6 +384,8 @@ export class ModerationEngine {
   private readonly commandCleanupTimers = new Set<ReturnType<typeof setTimeout>>();
   /** Built on the first `!cheese` when `deps.cheeseSearch` was not injected. */
   private ownedCheeseSearch?: CheeseImageSearch;
+  /** Built on the first `!milady` when `deps.milady` was not injected. */
+  private ownedMilady?: MiladyLookup;
   /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
   private readonly featureRequests = new Map<string, FeatureRequestSession>();
   private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -2021,6 +2040,9 @@ export class ModerationEngine {
       case "cheese":
         await this.handleCheese(event, command.extra, actions);
         return;
+      case "milady":
+        await this.handleMilady(event, command.extra, actions);
+        return;
       case "imagine":
         await this.handleImagine(event, command.prompt, actions);
         return;
@@ -2560,6 +2582,80 @@ export class ModerationEngine {
     }
     await this.reply(conversationId, url, actions);
     log.info(`!cheese posted image link conversation=${conversationId} host=${host}`);
+  }
+
+  /**
+   * `!milady` posts one Milady Maker image. Extra words are ignored except a
+   * banned age term, which is refused. The lookup is OpenSea only. This does
+   * not call Imagine or api.x.ai, and a failure does not post a link.
+   */
+  private async handleMilady(
+    event: DmEvent,
+    extra: string | undefined,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (extra && containsBannedAgeTerm(extra)) {
+      log.warn(`Refused !milady with unsafe extra text conversation=${conversationId}`);
+      await this.reply(conversationId, "Refused. !milady does not search custom text.", actions);
+      return;
+    }
+
+    const lookup = this.miladyClient();
+    let image: MiladyImage;
+    try {
+      image = await lookup.randomImage();
+    } catch (error) {
+      const userMessage = error instanceof MiladyLookupError ? error.userMessage : MILADY_UNAVAILABLE;
+      const detail = redactSecrets(error instanceof Error ? error.message : "lookup failed");
+      log.warn(`!milady lookup failed conversation=${conversationId}: ${detail}`);
+      await this.reply(conversationId, userMessage, actions);
+      return;
+    }
+
+    if (!isSafeMiladyImageUrl(image.url)) {
+      log.warn(`!milady skipped an unsafe image url conversation=${conversationId}`);
+      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
+      return;
+    }
+
+    const host = imageHost(image.url);
+    const caption = await this.commandCaption(event);
+    let fetched: AdultVisionImage | undefined;
+    if (this.deps.fetchImage) {
+      try {
+        fetched = await this.deps.fetchImage(image.url);
+      } catch {
+        fetched = undefined;
+      }
+    }
+    if (!fetched || fetched.bytes.byteLength === 0) {
+      log.warn(`!milady image download failed conversation=${conversationId} host=${host}`);
+      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
+      return;
+    }
+    try {
+      await this.client.sendImage(conversationId, {
+        url: image.url,
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+        ...(caption ? { caption } : {}),
+      });
+      log.info(`!milady posted native image conversation=${conversationId} host=${host}`);
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : String(error));
+      log.warn(`!milady native attach failed conversation=${conversationId} host=${host} (${detail})`);
+      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
+    }
+  }
+
+  private miladyClient(): MiladyLookup {
+    if (this.deps.milady) return this.deps.milady;
+    this.ownedMilady ??= createMiladyLookup({
+      apiKey: this.deps.openseaApiKey,
+      random: () => this.nextRandom(),
+    });
+    return this.ownedMilady;
   }
 
   private async handleAdultImage(

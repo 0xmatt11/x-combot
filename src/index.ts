@@ -235,6 +235,7 @@ async function main(): Promise<void> {
         provider: searchProvider,
         apiKey: env.boobsSearchApiKey,
       }),
+      openseaApiKey: env.openseaApiKey,
       fetchImage: fetchAdultImage,
       imagine,
       imaginePublic,
