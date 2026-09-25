@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { chatLinkSignals } from "../bot/linkroast.js";
 import type { DmEvent, Mention, ReplyTarget } from "../types.js";
 import type { DecryptedEvent } from "./cipher.js";
 import type { RawChatEvent } from "./http.js";
@@ -58,8 +59,12 @@ export function chatEventToDm(
         ...aliases,
       };
     }
-    const text = messageText(decrypted);
-    if (text === undefined) return undefined;
+    const kind = messageKind(decrypted);
+    if (kind && kind !== "text") return undefined;
+    const text = typeof decrypted.content?.text === "string" ? decrypted.content.text : undefined;
+    const linkSignals = chatLinkSignals(decrypted);
+    if (text === undefined && !linkSignals) return undefined;
+    const body = text ?? "";
     const replyToSenderId = trustedReplySenderId(decrypted);
     const replyTo = readReply(decrypted);
     return {
@@ -70,9 +75,10 @@ export function chatEventToDm(
       senderId,
       participantIds: [],
       participants: [],
-      text,
-      mentions: mentionsIn(text),
+      text: body,
+      mentions: mentionsIn(body),
       sequenceId,
+      ...(linkSignals ? { linkSignals } : {}),
       ...(raw.encoded_event ? { encodedEvent: raw.encoded_event } : {}),
       ...(replyToSenderId ? { replyToSenderId } : {}),
       ...(replyTo ? { replyTo } : {}),
@@ -210,12 +216,10 @@ function readRecord(value: object, ...keys: string[]): object | undefined {
   return undefined;
 }
 
-function messageText(event: DecryptedEvent): string | undefined {
+function messageKind(event: DecryptedEvent): string {
   const content = event.content;
-  if (!content || typeof content.text !== "string") return undefined;
-  const kind = content.contentType ?? content.content_type;
-  if (kind && kind !== "text") return undefined;
-  return content.text;
+  if (!content) return "";
+  return `${content.contentType ?? content.content_type ?? ""}`;
 }
 
 function readChangeType(event: DecryptedEvent): string | undefined {

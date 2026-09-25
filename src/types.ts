@@ -244,6 +244,17 @@ export interface Mention {
   id?: string;
 }
 
+/**
+ * Link-shaped data copied off an inbound payload when it is not only in `text`.
+ * Photos and other media are not included. Used by `!linkroast`.
+ */
+export interface LinkSignals {
+  /** http(s) URLs from entities, cards, or a shared-post attachment. */
+  urls: string[];
+  /** Shared X post ids when the payload names a status without a URL. */
+  statusIds: string[];
+}
+
 export interface DmEvent {
   id: string;
   eventType: DmEventType;
@@ -256,11 +267,19 @@ export interface DmEvent {
   text?: string;
   mentions: Mention[];
   /**
+   * URLs and shared-post ids from the inbound payload that may not appear in `text`.
+   * Classic DMs: `entities.urls` and `referenced_tweets`.
+   * Encrypted Chat: a url or post card, or a url entity that carries its own URL.
+   * Absent when the payload had none. Media attachments are not links.
+   */
+  linkSignals?: LinkSignals;
+  /**
    * Author of the message this event replies to.
    *
    * Set for encrypted X Chat only when chat-xdk validates the reply preview
    * (`replyPreviewValidation === "valid"`). Classic `GET /2/dm_events` payloads
-   * have no reply-to sender; `referenced_tweets` is a post linked in the text.
+   * have no reply-to sender; `referenced_tweets` is a post linked in the text
+   * and is copied onto `linkSignals`, not `replyToSenderId`.
    */
   replyToSenderId?: string;
   /**

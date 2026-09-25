@@ -38,9 +38,10 @@ import {
 } from "./troll.js";
 import {
   buildLinkroastMessages,
-  containsXStatusLink,
   LINKROAST_COOLDOWN_MS,
+  LINKROAST_ON_ACK,
   linkroastFallback,
+  messageHasRoastableLink,
   sanitizeLinkroastReply,
 } from "./linkroast.js";
 import {
@@ -148,6 +149,7 @@ import {
 import {
   isAdmin,
   isChatAuthMessage,
+  isCommandMessage,
   isLlmCommandName,
   llmRequestFromCommand,
   parseCommand,
@@ -1306,8 +1308,9 @@ export class ModerationEngine {
   }
 
   /**
-   * Roast a status/tweet link while `!linkroast` is on in this conversation.
+   * Roast an unsolicited link while `!linkroast` is on in this conversation.
    * One reply per sender per cooldown. The bot's own messages never reach here.
+   * A `!` or `/` command line is left to the command, even when it contains a URL.
    */
   private async linkroastIfSpam(
     event: DmEvent,
@@ -1316,8 +1319,9 @@ export class ModerationEngine {
     nowMs: number,
   ): Promise<void> {
     if (!senderId || senderId === this.config.botUserId) return;
+    if (isCommandMessage(event.text)) return;
     const text = event.text ?? "";
-    if (!containsXStatusLink(text)) return;
+    if (!messageHasRoastableLink(event)) return;
     if (!this.store.isLinkroastEnabled(event.conversationId)) return;
     const last = this.store.getLinkroastLastMs(event.conversationId, senderId);
     if (last !== undefined && nowMs - last < LINKROAST_COOLDOWN_MS) return;
@@ -1383,7 +1387,7 @@ export class ModerationEngine {
       this.store.setLinkroastEnabled(conversationId, true);
       await this.reply(
         conversationId,
-        "Link roast on. I'll roast X status links in this chat. !linkroast off to stop.",
+        LINKROAST_ON_ACK,
         actions,
       );
       return;

@@ -254,7 +254,7 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | --- | --- |
 | `!troll @user` | Roast them until `!untroll @user`. See [Troll mode](#troll-mode) |
 | `!roast @user` | One dunk. Does not turn on `!troll`. See [Roast](#roast) |
-| `!linkroast on` | Roast X status links (`!linkroast off`). See [Link roast](#link-roast) |
+| `!linkroast on` | Roast any link or shared post (`!linkroast off`). See [Link roast](#link-roast) |
 | `!xp` / `!top` | Your level, or the leaderboard. Reply `+` or `-` on a message. See [XP](#xp-and-levels) |
 
 **Chat**
@@ -591,7 +591,13 @@ The roast uses that person's recent lines in this conversation (the same history
 
 `!linkroast on` turns link roast on for this conversation. `/linkroast` works the same way. `!linkroast off` turns it off. The command and `on` / `off` are case-insensitive. Each toggle gets a short acknowledgement. Saying `on` again, or `off` when it is already off, does not change the flag.
 
-While it is on, a message that contains a link to an X or Twitter status gets a reply in the same chat. The host is `x.com` or `twitter.com`, including `www` and other subdomains, and the path contains `/status/` plus a numeric id. `https://x.com/user/status/123`, `https://twitter.com/i/web/status/123`, and `https://www.x.com/user/status/123` count. A bare profile (`https://x.com/user`), a search page, and `help.x.com` do not. The reply mocks that person for dropping a self-promoting post link without asking. It is mean and funny, not a threat, and it does not mention minors or print a numeric API user id.
+While it is on, a message that contains any link gets a reply in the same chat. A link is an `http` or `https` URL, or a `www.` URL that normalizes to one. Full X and Twitter status URLs still count, including `https://x.com/user/status/123`, `https://twitter.com/i/web/status/123`, and `https://www.x.com/user/status/123`. So do `t.co` and other shortlinks, other X links (a profile, a search page, `help.x.com`), and any other host (YouTube, OpenSea, a news site). A bare domain with no scheme and no `www.` does not count (`example.com/story`). An email address does not count.
+
+A `!` or `/` command line is not roasted. `!ask https://example.com/...` and `!rules` stay commands. The roast is for an unsolicited link, not for a bang that happens to include one.
+
+A shared X post counts when the payload names it, even if the text has no URL. Encrypted Chat (chat-xdk) puts that on a `post` attachment (`restId` and/or `postUrl`) or a `url` attachment (`url`). A url entity that carries its own URL is included too. Classic `GET /2/dm_events` puts the same idea on `entities.urls` (`url`, `expanded_url`, `display_url`) and `referenced_tweets[].id`. A photo, video, GIF, or other media attachment is not a link. A native share that arrives with no URL, no post id, and no url or post card is not visible to the bot, so that message stays quiet.
+
+The reply mocks that person for dropping an unsolicited link or shared post. It is mean and funny, not a threat, and it does not mention minors or print a numeric API user id or a URL.
 
 The roast uses the same LLM completion path as `!troll` (Grok when that provider is configured). If the LLM is off or the completion fails, the bot posts a short canned line instead. The flag is one row per conversation in SQLite (`linkroast`), so it survives a restart. Each person is roasted at most once every 45 seconds in that conversation (`linkroast_cooldown`). A skipped reply is silent, and the mode stays on through that pause. The bot ignores its own messages. A replay of the same Chat message does not roast again, because the existing dedupe runs first.
 
@@ -741,7 +747,7 @@ src/bot/video.ts        # API video client (IMAGINE_BACKEND=api) and !video chec
 scripts/imagine-browser.ts # one-shot check of the same Chrome worker (`npm run imagine:browser`)
 src/bot/voice.ts        # xAI text-to-speech client and !voice checks
 src/bot/troll.ts        # !troll and !roast copy, roast prompts, and reply cleanup
-src/bot/linkroast.ts    # !linkroast copy, status-link detection, and reply cleanup
+src/bot/linkroast.ts    # !linkroast copy, link detection, and reply cleanup
 src/bot/recent-images.ts # last 8 posted URLs and hashes, in memory
 src/bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure bing
 src/chat/listen.ts      # CHAT_LISTEN all | allowlist | off

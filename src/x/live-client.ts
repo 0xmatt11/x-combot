@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { classicDmLinkSignals } from "../bot/linkroast.js";
 import { log } from "../log.js";
 import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
 import type { RawChatConversationsPage, RawChatEventsPage } from "../chat/http.js";
@@ -707,10 +708,11 @@ interface RawDmEvent {
   text?: string;
   entities?: {
     mentions?: { username: string; id?: string }[];
+    urls?: { url?: string; expanded_url?: string; display_url?: string }[];
   };
   /**
-   * Post ids linked in the message text. Not a reply-to DM author.
-   * Present so callers can see the field and still leave `replyToSenderId` unset.
+   * Post ids linked in the message, including a shared post whose text has no URL.
+   * Not a reply-to DM author. Copied onto `linkSignals` and never onto `replyToSenderId`.
    */
   referenced_tweets?: { id?: string }[];
 }
@@ -738,6 +740,7 @@ export function normalizeClassicDmEvent(raw: RawDmEvent, users: Map<string, XUse
     username: mention.username,
     id: mention.id,
   }));
+  const linkSignals = classicDmLinkSignals(raw);
   return {
     id: raw.id,
     eventType: raw.event_type,
@@ -751,6 +754,7 @@ export function normalizeClassicDmEvent(raw: RawDmEvent, users: Map<string, XUse
       .filter((user): user is XUser => Boolean(user)),
     text: raw.text,
     mentions,
+    ...(linkSignals ? { linkSignals } : {}),
   };
 }
 
