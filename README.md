@@ -657,6 +657,51 @@ The file and the POST use the same body:
 
 A copy of the same JSON is also stored in SQLite `feature_requests`. Chief of Staff polls the pending folder, not that table. An unfinished Q&A is kept in memory; a restart drops it, and the requester can send `!request` again. Filed files and SQLite rows stay.
 
+When that idea is built and deployed, Chief of Staff drops a file so this process tags the requester in the same chat. See [Ready notifications](#ready-notifications).
+
+## Ready notifications
+
+After a `!request` feature is deployed, Chief of Staff tells the requester in the group chat where they asked. This process does that from a file drop. There is no public command and no `!notify`.
+
+The folder sits next to the SQLite file, the same way feature requests do. Default `DATABASE_PATH` (`data/bot.sqlite`) means:
+
+| Directory | Who writes it | What it means |
+| --- | --- | --- |
+| `data/notifications/pending/` | Chief of Staff | One JSON file per person to tag |
+| `data/notifications/processing/` | This process | Claimed, send in progress |
+| `data/notifications/done/` | This process | Posted in that chat |
+| `data/notifications/failed/` | This process | Not posted. `reason` says why |
+
+The bot creates all four directories on its poll. If Chief of Staff drops a file first, create `pending/` (the parent `data/` directory already exists on the live box).
+
+Write the body to `pending/.<id>.json.tmp`, then rename it to `pending/<id>.json`. The name is a safe token such as a UUID. The rename is the signal that the JSON is complete. Files that start with `.` or do not end in `.json` are left alone.
+
+The poll runs every 5 seconds. Each tick renames a pending file into `processing/` before reading it, so two polls cannot send it twice. A successful send renames that file into `done/` and leaves the original JSON. Anything that cannot be posted is rewritten into `failed/` with `reason` and `failedAt` added. The original fields stay, so copying that file back to `pending/` retries it (`reason` and `failedAt` are ignored on the way in). A file left in `processing/` by a crash is tried again on the next tick. If that send had already reached the chat, the retry posts the same line again.
+
+`userId` is resolved with `GET /2/users/:id` (`getUserById`). The chat line is `@handle your !command is live` when `text` is omitted. When `text` is set, that string is the body and the handle is still prefixed, unless the body already starts with that `@handle`. The post goes through Chat `sendMessage`. The mention entity covers the `@handle` bytes only, the same range other outbound mentions use. The default line does not say Telegram. Do not put that word in `text`.
+
+If the Chat identity is not open, the file is not sent. It moves to `failed/` with `reason` `Chat is unavailable.` A lookup or send that throws, a user with no @handle, or a file that is not the schema below also moves to `failed/` with its own `reason`.
+
+Schema Chief of Staff writes:
+
+```json
+{
+  "conversationId": "g2029561975647150382",
+  "userId": "1577700998226890753",
+  "command": "!undertow",
+  "text": "your !undertow is live — try !undertow"
+}
+```
+
+| Field | Required | |
+| --- | --- | --- |
+| `conversationId` | yes | Encrypted Chat group id: `g` plus digits. The chat where `!request` was filed |
+| `userId` | yes | Numeric X user id of the requester. The bot looks up the @handle. It does not read a username from this file |
+| `command` | one of these | Bang that shipped, such as `!undertow`. Used only when `text` is omitted. The posted line is `@handle your !undertow is live` |
+| `text` | one of these | Body after the @handle. When set, this is the line (the bot still prefixes `@handle`). Max 500 characters |
+
+`text` wins when both are set. Other fields are ignored. `command` is a letter, then letters, digits, or underscores, with an optional leading `!`.
+
 ## Public timelines, web search, and workers
 
 `!ask`, `@bot`, `!summarize`, and `!analyze` can use two tools: `lookup_user_timeline` and `web_search`. The same timeline cache feeds `!troll`, `!roast`, and `!linkroast`. This does not call api.x.ai image or video generation, and it does not open grok.com/imagine.
