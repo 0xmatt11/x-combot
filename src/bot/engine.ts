@@ -1275,9 +1275,10 @@ export class ModerationEngine {
   }
 
   /**
-   * Reply in this chat when the troll target speaks.
-   * Replays never reach here: `alreadyHandled` claims the event first.
-   * Muted, filtered, and flood-stopped messages return before this runs.
+   * Reply in this chat when someone on the troll list speaks.
+   * Each person has their own cooldown. Replays never reach here:
+   * `alreadyHandled` claims the event first. Muted, filtered, and
+   * flood-stopped messages return before this runs.
    */
   private async trollIfTarget(
     event: DmEvent,
@@ -1287,8 +1288,8 @@ export class ModerationEngine {
   ): Promise<void> {
     const latest = event.text?.trim() ?? "";
     if (!latest || senderId === this.config.botUserId) return;
-    const target = this.store.getTrollTarget(event.conversationId);
-    if (!target || target.userId !== senderId) return;
+    const target = this.store.getTrollTarget(event.conversationId, senderId);
+    if (!target) return;
     if (target.lastMs > 0 && nowMs - target.lastMs < TROLL_COOLDOWN_MS) return;
 
     const wantRoast = target.roastNext === 1;
@@ -1301,7 +1302,7 @@ export class ModerationEngine {
       reply = momJoke(label, () => this.nextRandom());
     }
     reply = sanitizeTrollReply(reply, label, [target.userId], () => this.nextRandom());
-    this.store.markTrollSent(event.conversationId, nowMs, wantRoast ? 0 : 1);
+    this.store.markTrollSent(event.conversationId, senderId, nowMs, wantRoast ? 0 : 1);
     await this.reply(event.conversationId, reply, actions);
   }
 
@@ -1534,7 +1535,12 @@ export class ModerationEngine {
   ): Promise<void> {
     const conversationId = event.conversationId;
     if (command.off) {
-      await this.clearTroll(conversationId, actions);
+      await this.replyTrollHeld(conversationId, actions);
+      return;
+    }
+    if (!command.target && !this.trollReplySenderId(event)) {
+      const list = await this.trollListSentence(conversationId);
+      await this.reply(conversationId, list.text, actions);
       return;
     }
     const user = await this.resolveTrollUser(command.target, event, actions);
@@ -1552,50 +1558,33 @@ export class ModerationEngine {
       conversationId,
       user,
     );
-    const existing = this.store.getTrollTarget(conversationId);
-    if (existing?.userId === user.id) {
-      await this.reply(
-        conversationId,
-        `Already trolling ${label}. That stays on until !untroll ${untrollHint(label)}.`,
-        actions,
-      );
-      return;
-    }
+    const existing = this.store.getTrollTarget(conversationId, user.id);
     if (existing) {
-      const current = await this.trollLabel(existing, conversationId);
-      await this.reply(
-        conversationId,
-        `Already trolling ${current}. !untroll ${untrollHint(current)} before starting someone else.`,
-        actions,
-      );
+      const list = await this.trollListSentence(conversationId);
+      await this.reply(conversationId, `Already trolling ${label}. ${list.text}`, actions);
       return;
     }
-    this.store.setTrollTarget(conversationId, user.id, storedHandle);
+    this.store.addTrollTarget(conversationId, user.id, storedHandle);
+    const list = await this.trollListSentence(conversationId);
     await this.reply(
       conversationId,
-      `Troll mode on for ${label}. I'll reply when they talk in this chat. !untroll ${untrollHint(label)} to stop.`,
+      `Troll mode on for ${label}. I'll reply when they talk in this chat. ${list.text}`,
       actions,
     );
   }
 
   /**
-   * `!troll off` does not clear the target. Only `!untroll` naming that
-   * same person does.
+   * `!troll off` does not clear anyone. Only `!untroll` naming that person does.
    */
-  private async clearTroll(conversationId: string, actions: EngineActions): Promise<void> {
-    const existing = this.store.getTrollTarget(conversationId);
-    if (!existing) {
-      await this.reply(
-        conversationId,
-        "Troll mode is not on. `!troll @user` starts it. `!untroll @user` stops it.",
-        actions,
-      );
+  private async replyTrollHeld(conversationId: string, actions: EngineActions): Promise<void> {
+    const list = await this.trollListSentence(conversationId);
+    if (list.empty) {
+      await this.reply(conversationId, list.text, actions);
       return;
     }
-    const label = await this.trollLabel(existing, conversationId);
     await this.reply(
       conversationId,
-      `Troll mode stays on for ${label}. !untroll ${untrollHint(label)} to stop.`,
+      `Troll mode stays on. ${list.text} !untroll @user removes someone.`,
       actions,
     );
   }
@@ -1606,37 +1595,58 @@ export class ModerationEngine {
     actions: EngineActions,
   ): Promise<void> {
     const conversationId = event.conversationId;
-    const existing = this.store.getTrollTarget(conversationId);
-    if (!command.target) {
-      if (!existing) {
-        await this.reply(conversationId, "Troll mode is not on.", actions);
-        return;
-      }
-      const label = await this.trollLabel(existing, conversationId);
+    if (!command.target && !this.trollReplySenderId(event)) {
+      const list = await this.trollListSentence(conversationId);
       await this.reply(
         conversationId,
-        `Still trolling ${label}. !untroll ${untrollHint(label)} to stop.`,
+        list.empty ? list.text : `Still trolling. ${list.text} !untroll @user removes someone.`,
         actions,
       );
       return;
     }
     const user = await this.resolveTrollUser(command.target, event, actions, "untroll");
     if (!user?.id) return;
+    const existing = this.store.getTrollTarget(conversationId, user.id);
+    const storedHandle =
+      existing?.username ??
+      (user.username && !isNumericUserId(user.username)
+        ? user.username.replace(/^@/, "")
+        : undefined);
+    const label = await this.trollLabel(
+      { userId: user.id, username: storedHandle },
+      conversationId,
+      user,
+    );
     if (!existing) {
-      await this.reply(conversationId, "Troll mode is not on.", actions);
-      return;
-    }
-    const label = await this.trollLabel(existing, conversationId);
-    if (existing.userId !== user.id) {
+      const list = await this.trollListSentence(conversationId);
       await this.reply(
         conversationId,
-        `Still trolling ${label}. !untroll ${untrollHint(label)} to stop.`,
+        `${label} is not on the troll list. ${list.text}`,
         actions,
       );
       return;
     }
-    this.store.clearTrollTarget(conversationId);
-    await this.reply(conversationId, `Troll mode off for ${label}.`, actions);
+    this.store.removeTrollTarget(conversationId, user.id);
+    const list = await this.trollListSentence(conversationId);
+    await this.reply(conversationId, `Troll mode off for ${label}. ${list.text}`, actions);
+  }
+
+  /** "Enabled: @a, @b." or "Troll list is empty." */
+  private async trollListSentence(
+    conversationId: string,
+  ): Promise<{ empty: boolean; text: string }> {
+    const targets = this.store.listTrollTargets(conversationId);
+    if (targets.length === 0) return { empty: true, text: "Troll list is empty." };
+    const labels: string[] = [];
+    for (const target of targets) {
+      labels.push(await this.trollLabel(target, conversationId));
+    }
+    return { empty: false, text: `Enabled: ${labels.join(", ")}.` };
+  }
+
+  /** Reply sender for a bare `!troll` / `!untroll`, when this message is a reply. */
+  private trollReplySenderId(event: DmEvent): string | undefined {
+    return event.replyToSenderId ?? this.resolveReplyUserId(event);
   }
 
   private statusReport(
@@ -1644,7 +1654,7 @@ export class ModerationEngine {
     settings: ResolvedConversationConfig,
     nowMs: number,
   ): string {
-    const troll = this.store.getTrollTarget(conversationId);
+    const troll = this.store.listTrollTargets(conversationId);
     const build = this.deps.buildVersion ?? readBuildVersion();
     const imagine = imagineModeLabel(this.deps);
     return formatStatusReport({
@@ -1657,7 +1667,7 @@ export class ModerationEngine {
       llm: this.deps.llmMode ?? (this.llmClient ? "on" : "off"),
       imagine,
       welcome: settings.welcomeEnabled,
-      troll: troll ? trollHandle(troll.username) : "off",
+      troll: trollStatusLabel(troll),
       linkroast: this.store.isLinkroastEnabled(conversationId),
       media: statusMediaCounts(this.deps.imaginePublic),
       version: build.version,
@@ -1686,7 +1696,8 @@ export class ModerationEngine {
    * `@handle` and numeric ids use the same lookup as moderation.
    * Anything else is matched against a display name already on the event
    * or a name this process has resolved.
-   * A bare `!troll` can target the sender of a reply.
+   * A bare `!troll` or `!untroll` can target the sender of a reply.
+   * With no reply, those commands list who is enabled instead.
    */
   private async resolveTrollUser(
     target: UserRef | undefined,
@@ -1708,24 +1719,22 @@ export class ModerationEngine {
       if (named) return named;
     }
     if (!target) {
-      if (purpose === "troll" || purpose === "roast") {
-        const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
-        if (replyId) {
-          try {
-            return (await this.client.getUserById(replyId)) ?? { id: replyId };
-          } catch (error) {
-            log.warn(`Could not resolve troll reply target conversation=${event.conversationId}`, error);
-            return { id: replyId };
-          }
+      const replyId = event.replyToSenderId ?? this.resolveReplyUserId(event);
+      if (replyId && (purpose === "troll" || purpose === "roast" || purpose === "untroll")) {
+        try {
+          return (await this.client.getUserById(replyId)) ?? { id: replyId };
+        } catch (error) {
+          log.warn(`Could not resolve troll reply target conversation=${event.conversationId}`, error);
+          return { id: replyId };
         }
       }
       await this.reply(
         event.conversationId,
         purpose === "untroll"
-          ? "Who? `!untroll @user` stops trolling that person."
+          ? "Who? `!untroll @user` removes that person. Bare `!untroll` lists who is enabled."
           : purpose === "roast"
             ? "Who? `!roast @user` dunks that person once. Reply to their message or name them."
-            : "Who? `!troll @user` starts it. `!untroll @user` stops it.",
+            : "Who? `!troll @user` adds someone. Bare `!troll` lists who is enabled.",
         actions,
       );
       return undefined;
@@ -3954,13 +3963,6 @@ export function eventReplayKeys(
   return keys;
 }
 
-/** How to name the current target in `!untroll`. A display name is used as typed. */
-function untrollHint(label: string): string {
-  if (label.startsWith("@")) return label;
-  if (label === "someone") return "@handle";
-  return label;
-}
-
 /** `{username}` is the @handle when known, otherwise the display name or "someone". */
 export function leaveAnnouncementText(user: XUser, template = DEFAULT_LEAVE_TEXT): string {
   return membershipText(template, user);
@@ -4050,6 +4052,12 @@ function trollHandle(username: string | undefined): string {
   const name = username?.replace(/^@/, "").trim();
   if (name && /^[A-Za-z0-9_]{1,15}$/.test(name) && !/^\d+$/.test(name)) return `@${name}`;
   return "on";
+}
+
+/** `off` when nobody is enabled, otherwise each handle (or `on`) in list order. */
+function trollStatusLabel(targets: readonly { username?: string }[]): string {
+  if (targets.length === 0) return "off";
+  return targets.map((target) => trollHandle(target.username)).join(", ");
 }
 
 function formatFloodSetting(settings: ResolvedConversationConfig): string {

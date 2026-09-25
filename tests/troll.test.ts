@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { momJoke, sanitizeTrollReply, TROLL_COOLDOWN_MS } from "../src/bot/troll.js";
@@ -88,14 +89,14 @@ describe("troll mode", () => {
     await engine.processEvent(
       message({ id: "on", senderId: alice.id, text: "!troll @bob" }),
     );
-    expect(store.getTrollTarget(groupId)).toMatchObject({
+    expect(store.getTrollTarget(groupId, bob.id)).toMatchObject({
       userId: bob.id,
       username: "bob",
       lastMs: 0,
       roastNext: 0,
     });
     expect(client.sent.map((row) => row.text)).toEqual([
-      "@alice Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
+      "@alice Troll mode on for @bob. I'll reply when they talk in this chat. Enabled: @bob.",
     ]);
 
     await engine.processEvent(
@@ -108,7 +109,7 @@ describe("troll mode", () => {
       1_000,
     );
     expect(client.sent.map((row) => row.text)).toEqual([
-      "@alice Troll mode on for @bob. I'll reply when they talk in this chat. !untroll @bob to stop.",
+      "@alice Troll mode on for @bob. I'll reply when they talk in this chat. Enabled: @bob.",
       FIRST_JOKE,
     ]);
     expect(client.sent.some((row) => row.text.includes(bob.id))).toBe(false);
@@ -126,10 +127,12 @@ describe("troll mode", () => {
 
     const file = path.join(os.tmpdir(), `x-combot-troll-${process.pid}.sqlite`);
     const disk = new Store(file);
-    disk.setTrollTarget(groupId, bob.id, "bob");
+    disk.addTrollTarget(groupId, bob.id, "bob");
+    disk.addTrollTarget(groupId, alice.id, "alice");
     disk.close();
     const opened = new Store(file);
-    expect(opened.getTrollTarget(groupId)).toMatchObject({ userId: bob.id, username: "bob" });
+    expect(opened.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id, alice.id]);
+    expect(opened.listTrollTargets("other-chat")).toEqual([]);
     opened.close();
     fs.rmSync(file, { force: true });
     fs.rmSync(`${file}-wal`, { force: true });
@@ -142,7 +145,7 @@ describe("troll mode", () => {
     await engine.processEvent(message({ id: "off", senderId: alice.id, text: "!troll off" }));
     await engine.processEvent(message({ id: "bare", senderId: alice.id, text: "!untroll" }));
     await engine.processEvent(message({ id: "wrong", senderId: alice.id, text: "!untroll @alice" }));
-    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
+    expect(store.getTrollTarget(groupId, bob.id)?.userId).toBe(bob.id);
     await engine.processEvent(
       message({ id: "b1", senderId: bob.id, text: "still targeted" }),
       1_000_000,
@@ -150,34 +153,40 @@ describe("troll mode", () => {
     expect(client.sent.at(-1)?.text).toBe(FIRST_JOKE);
 
     await engine.processEvent(message({ id: "stop", senderId: alice.id, text: "!untroll @bob" }));
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
+    expect(store.listTrollTargets(groupId)).toEqual([]);
     await engine.processEvent(
       message({ id: "b2", senderId: bob.id, text: "no roast" }),
       1_000_000 + TROLL_COOLDOWN_MS,
     );
-    expect(client.sent.at(-1)?.text).toBe("@alice Troll mode off for @bob.");
-    expect(client.sent.some((row) => row.text.includes("Troll mode stays on for @bob"))).toBe(true);
-    expect(client.sent.some((row) => row.text.includes("Still trolling @bob"))).toBe(true);
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll mode off for @bob. Troll list is empty.");
+    expect(client.sent.some((row) => row.text.includes("Troll mode stays on."))).toBe(true);
+    expect(client.sent.some((row) => row.text.includes("Still trolling."))).toBe(true);
+    expect(client.sent.some((row) => row.text.includes("Enabled: @bob."))).toBe(true);
+    expect(client.sent.some((row) => row.text.includes("@alice is not on the troll list."))).toBe(
+      true,
+    );
   });
 
-  it("does not toggle off or reset the cooldown when !troll names the current target again", async () => {
+  it("does not reset the cooldown when !troll names someone again, and adding someone else keeps them", async () => {
     const { engine, client, store } = setup();
     const start = 4_000_000;
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!troll @bob" }));
     await engine.processEvent(message({ id: "b1", senderId: bob.id, text: "one" }), start);
     await engine.processEvent(message({ id: "again", senderId: alice.id, text: "!troll @bob" }));
-    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
-    expect(store.getTrollTarget(groupId)?.lastMs).toBe(start);
+    expect(store.getTrollTarget(groupId, bob.id)?.userId).toBe(bob.id);
+    expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(start);
     await engine.processEvent(
       message({ id: "b2", senderId: bob.id, text: "two" }),
       start + 1_000,
     );
     expect(client.sent.filter((row) => row.text === FIRST_JOKE)).toHaveLength(1);
-    expect(client.sent.at(-1)?.text).toBe(
-      "@alice Already trolling @bob. That stays on until !untroll @bob.",
-    );
+    expect(client.sent.at(-1)?.text).toBe("@alice Already trolling @bob. Enabled: @bob.");
     await engine.processEvent(message({ id: "switch", senderId: alice.id, text: "!troll @alice" }));
-    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id, alice.id]);
+    expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(start);
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice Troll mode on for @alice. I'll reply when they talk in this chat. Enabled: @bob, @alice.",
+    );
   });
 
   it("accepts a display name and a reply the bot can already resolve", async () => {
@@ -190,8 +199,8 @@ describe("troll mode", () => {
         participants: [{ id: bob.id, name: "Bobby Tables" }],
       }),
     );
-    expect(store.getTrollTarget(groupId)?.userId).toBe(bob.id);
-    expect(store.getTrollTarget(groupId)?.username).toBeUndefined();
+    expect(store.getTrollTarget(groupId, bob.id)?.userId).toBe(bob.id);
+    expect(store.getTrollTarget(groupId, bob.id)?.username).toBeUndefined();
 
     await engine.processEvent(
       message({
@@ -201,7 +210,7 @@ describe("troll mode", () => {
         participants: [{ id: bob.id, name: "Bobby Tables" }],
       }),
     );
-    expect(store.getTrollTarget(groupId)).toBeUndefined();
+    expect(store.listTrollTargets(groupId)).toEqual([]);
     await engine.processEvent(
       message({
         id: "reply",
@@ -210,7 +219,7 @@ describe("troll mode", () => {
         replyToSenderId: bob.id,
       }),
     );
-    expect(store.getTrollTarget(groupId)).toMatchObject({ userId: bob.id, username: "bob" });
+    expect(store.getTrollTarget(groupId, bob.id)).toMatchObject({ userId: bob.id, username: "bob" });
   });
 
   it("does not roast a replay of the same message", async () => {
@@ -310,7 +319,7 @@ describe("troll mode", () => {
     await engine.processEvent(
       message({ id: "on", senderId: alice.id, text: `!troll ${snowflake}` }),
     );
-    expect(store.getTrollTarget(groupId)?.userId).toBe(snowflake);
+    expect(store.getTrollTarget(groupId, snowflake)?.userId).toBe(snowflake);
     const start = 9_000_000;
     await engine.processEvent(
       message({
@@ -359,7 +368,111 @@ describe("troll mode", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!troll @user/);
     expect(loaded.help).toMatch(/!untroll @user/);
+    expect(loaded.help).toMatch(/who is enabled/);
     expect(loaded.help).not.toMatch(/!troll off/);
+  });
+
+  it("adds a second target without clearing the first and roasts each on their own cooldown", async () => {
+    const { engine, client, store } = setup();
+    await engine.processEvent(message({ id: "on-bob", senderId: alice.id, text: "!troll @bob" }));
+    await engine.processEvent(message({ id: "on-alice", senderId: alice.id, text: "!troll @alice" }));
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id, alice.id]);
+
+    const start = 6_000_000;
+    await engine.processEvent(message({ id: "b1", senderId: bob.id, text: "bob talks" }), start);
+    await engine.processEvent(
+      message({ id: "a1", senderId: alice.id, text: "alice talks" }),
+      start + 1_000,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@bob", () => 0))).toHaveLength(1);
+    expect(client.sent.filter((row) => row.text === momJoke("@alice", () => 0))).toHaveLength(1);
+
+    await engine.processEvent(
+      message({ id: "b2", senderId: bob.id, text: "bob again" }),
+      start + 2_000,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@bob", () => 0))).toHaveLength(1);
+    await engine.processEvent(
+      message({ id: "a2", senderId: alice.id, text: "alice again" }),
+      start + 1_000 + TROLL_COOLDOWN_MS,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@alice", () => 0))).toHaveLength(2);
+
+    await engine.processEvent(message({ id: "stop-bob", senderId: alice.id, text: "!untroll @bob" }));
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([alice.id]);
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll mode off for @bob. Enabled: @alice.");
+
+    await engine.processEvent(message({ id: "list", senderId: alice.id, text: "!troll" }));
+    expect(client.sent.at(-1)?.text).toBe("@alice Enabled: @alice.");
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([alice.id]);
+
+    await engine.processEvent(
+      message({
+        id: "stop-reply",
+        senderId: owner.id,
+        text: "!untroll",
+        replyToSenderId: alice.id,
+      }),
+    );
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(client.sent.at(-1)?.text).toBe("@owner Troll mode off for @alice. Troll list is empty.");
+
+    await engine.processEvent(message({ id: "empty", senderId: alice.id, text: "!troll" }));
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
+    await engine.processEvent(message({ id: "empty-untroll", senderId: alice.id, text: "!untroll" }));
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
+  });
+
+  it("keeps a migrated single-target row and still accepts another person", () => {
+    const file = path.join(os.tmpdir(), `x-combot-troll-migrate-${process.pid}.sqlite`);
+    const legacy = new Database(file);
+    legacy.exec(`
+      CREATE TABLE troll_targets (
+        conversation_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        username TEXT,
+        last_ms INTEGER NOT NULL DEFAULT 0,
+        roast_next INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO troll_targets (conversation_id, user_id, username, last_ms, roast_next)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(groupId, bob.id, "bob", 5_000, 1);
+    legacy.close();
+
+    try {
+      const store = new Store(file);
+      try {
+        expect(store.listTrollTargets(groupId)).toEqual([
+          { userId: bob.id, username: "bob", lastMs: 5_000, roastNext: 1 },
+        ]);
+        store.addTrollTarget(groupId, alice.id, "alice");
+        expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([
+          bob.id,
+          alice.id,
+        ]);
+        expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(5_000);
+      } finally {
+        store.close();
+      }
+
+      const reopened = new Store(file);
+      try {
+        expect(reopened.listTrollTargets(groupId).map((row) => row.userId)).toEqual([
+          bob.id,
+          alice.id,
+        ]);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      fs.rmSync(file, { force: true });
+      fs.rmSync(`${file}-wal`, { force: true });
+      fs.rmSync(`${file}-shm`, { force: true });
+    }
   });
 });
 
