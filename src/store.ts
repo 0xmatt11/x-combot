@@ -154,6 +154,20 @@ CREATE TABLE IF NOT EXISTS troll_targets (
   PRIMARY KEY (conversation_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS troll_all (
+  conversation_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS troll_all_cooldown (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  username TEXT,
+  last_ms INTEGER NOT NULL DEFAULT 0,
+  roast_next INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (conversation_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS linkroast (
   conversation_id TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL
@@ -890,19 +904,21 @@ export class Store {
 
   /**
    * Add someone to this conversation's list. A person already on it keeps
-   * their cooldown and roast turn. Other people on the list stay.
+   * their cooldown and roast turn. Other people on the list stay. A person
+   * who was only covered by troll-all keeps that cooldown on the new row.
    */
   addTrollTarget(conversationId: string, userId: string, username?: string): void {
     const handle = username?.replace(/^@/, "").trim();
     const safe = handle && !/^\d+$/.test(handle) ? handle : null;
+    const prior = this.getTrollAllState(conversationId, userId);
     this.db
       .prepare(
         `INSERT INTO troll_targets (conversation_id, user_id, username, last_ms, roast_next)
-         VALUES (?, ?, ?, 0, 0)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(conversation_id, user_id) DO UPDATE SET
            username = COALESCE(excluded.username, troll_targets.username)`,
       )
-      .run(conversationId, userId, safe);
+      .run(conversationId, userId, safe, prior?.lastMs ?? 0, prior?.roastNext ?? 0);
   }
 
   /** Remove one person. Everyone else in the conversation stays enabled. */
@@ -915,6 +931,73 @@ export class Store {
   /** Remove every person on this conversation's list. Other conversations stay. */
   clearTrollTargets(conversationId: string): void {
     this.db.prepare("DELETE FROM troll_targets WHERE conversation_id = ?").run(conversationId);
+  }
+
+  /** Whether `!troll all` is on for this conversation. The flag covers every speaker. */
+  isTrollAllEnabled(conversationId: string): boolean {
+    const row = this.db
+      .prepare("SELECT enabled FROM troll_all WHERE conversation_id = ?")
+      .get(conversationId) as { enabled: number } | undefined;
+    return row?.enabled === 1;
+  }
+
+  /** Turn troll-all on or off. Off deletes the flag. Cooldown rows stay. */
+  setTrollAllEnabled(conversationId: string, enabled: boolean): void {
+    if (!enabled) {
+      this.db.prepare("DELETE FROM troll_all WHERE conversation_id = ?").run(conversationId);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO troll_all (conversation_id, enabled) VALUES (?, 1)
+         ON CONFLICT(conversation_id) DO UPDATE SET enabled = 1`,
+      )
+      .run(conversationId);
+  }
+
+  /**
+   * Cooldown for someone roasted because troll-all is on, when they are not
+   * on the named list. Missing means they have not been roasted that way yet.
+   */
+  getTrollAllState(conversationId: string, userId: string): TrollTarget | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, username, last_ms, roast_next
+         FROM troll_all_cooldown
+         WHERE conversation_id = ? AND user_id = ?`,
+      )
+      .get(conversationId, userId) as
+      | {
+          user_id: string;
+          username: string | null;
+          last_ms: number;
+          roast_next: number;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return this.trollTargetFromRow(row);
+  }
+
+  /** Record a troll-all roast and which style comes next (0 mom joke, 1 roast). */
+  markTrollAllSent(
+    conversationId: string,
+    userId: string,
+    username: string | undefined,
+    nowMs: number,
+    roastNext: 0 | 1,
+  ): void {
+    const handle = username?.replace(/^@/, "").trim();
+    const safe = handle && !/^\d+$/.test(handle) ? handle : null;
+    this.db
+      .prepare(
+        `INSERT INTO troll_all_cooldown (conversation_id, user_id, username, last_ms, roast_next)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+           last_ms = excluded.last_ms,
+           roast_next = excluded.roast_next,
+           username = COALESCE(excluded.username, troll_all_cooldown.username)`,
+      )
+      .run(conversationId, userId, safe, nowMs, roastNext);
   }
 
   /** Record a posted troll and which style comes next (0 mom joke, 1 roast). */

@@ -60,7 +60,7 @@ export type ParsedCommand =
   | { name: "ship"; args: string }
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
-  | { name: "troll"; off?: boolean; target?: UserRef }
+  | { name: "troll"; off?: boolean; target?: UserRef; all?: boolean }
   | { name: "untroll"; target?: UserRef; all?: boolean }
   | { name: "roast"; target?: UserRef }
   | { name: "linkroast"; action?: "on" | "off" }
@@ -424,14 +424,16 @@ export function parseUserRef(raw: string): UserRef | undefined {
 }
 
 /**
- * `!troll @user` adds that person. `off` is recognized so it is not a
- * username, but it does not stop troll mode. A bare `!troll` lists who is
- * enabled. A display name that is not a single @handle is kept raw so the
- * engine can match a known name.
+ * `!troll @user` adds that person. `!troll all` turns on troll-all for this
+ * conversation. `off` is recognized so it is not a username, but it does not
+ * stop troll mode. A bare `!troll` lists troll-all and who is named. A display
+ * name that is not a single @handle is kept raw so the engine can match a
+ * known name.
  */
 function parseTroll(rest: string): ParsedCommand {
   if (!rest) return { name: "troll" };
   if (/^off$/i.test(rest)) return { name: "troll", off: true };
+  if (/^all$/i.test(rest)) return { name: "troll", all: true };
   return { name: "troll", target: trollTarget(rest) };
 }
 
@@ -446,7 +448,7 @@ function parseRoast(rest: string): ParsedCommand {
 
 /**
  * `!untroll @user` removes that person. `!untroll all` and `!untroll clear`
- * drop everyone in this conversation. A bare `!untroll` lists who is enabled.
+ * drop the named list and turn troll-all off. A bare `!untroll` lists who is named.
  */
 function parseUntroll(rest: string): ParsedCommand {
   if (!rest) return { name: "untroll" };

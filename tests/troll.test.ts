@@ -367,6 +367,7 @@ describe("troll mode", () => {
   it("is listed in the default help text", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!troll @user/);
+    expect(loaded.help).toMatch(/!troll all/);
     expect(loaded.help).toMatch(/!untroll @user/);
     expect(loaded.help).toMatch(/!untroll all/);
     expect(loaded.help).toMatch(/!untroll clear/);
@@ -405,7 +406,7 @@ describe("troll mode", () => {
     expect(client.sent.at(-1)?.text).toBe("@alice Troll mode off for @bob. Enabled: @alice.");
 
     await engine.processEvent(message({ id: "list", senderId: alice.id, text: "!troll" }));
-    expect(client.sent.at(-1)?.text).toBe("@alice Enabled: @alice.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: off. Enabled: @alice.");
     expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([alice.id]);
 
     await engine.processEvent(
@@ -420,7 +421,7 @@ describe("troll mode", () => {
     expect(client.sent.at(-1)?.text).toBe("@owner Troll mode off for @alice. Troll list is empty.");
 
     await engine.processEvent(message({ id: "empty", senderId: alice.id, text: "!troll" }));
-    expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: off. Troll list is empty.");
     await engine.processEvent(message({ id: "empty-untroll", senderId: alice.id, text: "!untroll" }));
     expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
   });
@@ -434,8 +435,11 @@ describe("troll mode", () => {
 
     await engine.processEvent(message({ id: "clear", senderId: alice.id, text: "!untroll all" }));
     expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.isTrollAllEnabled(groupId)).toBe(false);
     expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
-    expect(client.sent.at(-1)?.text).toBe("@alice Troll list cleared. Troll list is empty.");
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice Troll list cleared. Troll all: off. Troll list is empty.",
+    );
 
     const start = 8_000_000;
     await engine.processEvent(message({ id: "b1", senderId: bob.id, text: "no roast" }), start);
@@ -443,10 +447,12 @@ describe("troll mode", () => {
       message({ id: "a1", senderId: alice.id, text: "no roast either" }),
       start + 1_000,
     );
-    expect(client.sent.at(-1)?.text).toBe("@alice Troll list cleared. Troll list is empty.");
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice Troll list cleared. Troll all: off. Troll list is empty.",
+    );
 
     await engine.processEvent(message({ id: "empty-all", senderId: alice.id, text: "!UNTROLL ALL" }));
-    expect(client.sent.at(-1)?.text).toBe("@alice Troll list is empty.");
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: off. Troll list is empty.");
     expect(store.listTrollTargets(groupId)).toEqual([]);
     expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
 
@@ -464,7 +470,9 @@ describe("troll mode", () => {
     expect(store.getTrollTarget(groupId, bob.id)).toBeUndefined();
     expect(store.getTrollTarget(groupId, alice.id)).toBeUndefined();
     expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
-    expect(client.sent.at(-1)?.text).toBe("@owner Troll list cleared. Troll list is empty.");
+    expect(client.sent.at(-1)?.text).toBe(
+      "@owner Troll list cleared. Troll all: off. Troll list is empty.",
+    );
 
     await engine.processEvent(message({ id: "on-bob-3", senderId: alice.id, text: "!troll @bob" }));
     await engine.processEvent(message({ id: "on-alice-3", senderId: alice.id, text: "!troll @alice" }));
@@ -482,6 +490,140 @@ describe("troll mode", () => {
     expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
     store.clearTrollTargets(groupId);
     expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
+  });
+
+  it("roasts any speaker while !troll all is on, and !untroll all turns the flag off", async () => {
+    const carol: XUser = { id: "u-carol", username: "carol", name: "Carol" };
+    const { engine, client, store } = setup();
+    client.addUser(carol);
+    store.addTrollTarget("other-chat", bob.id, "bob");
+
+    await engine.processEvent(
+      message({
+        id: "all",
+        senderId: alice.id,
+        text: "!troll all",
+        replyToSenderId: bob.id,
+      }),
+    );
+    expect(store.isTrollAllEnabled(groupId)).toBe(true);
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice Troll all: on. I'll reply when anyone talks in this chat. Troll list is empty.",
+    );
+    expect(client.sent.some((row) => row.text === momJoke("@alice", () => 0))).toBe(false);
+
+    const start = 9_000_000;
+    await engine.processEvent(
+      message({ id: "c1", senderId: carol.id, sender: carol, text: "new here" }),
+      start,
+    );
+    expect(client.sent.at(-1)?.text).toBe(momJoke("@carol", () => 0));
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.getTrollAllState(groupId, carol.id)?.lastMs).toBe(start);
+
+    await engine.processEvent(
+      message({ id: "c2", senderId: carol.id, sender: carol, text: "still talking" }),
+      start + 1_000,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@carol", () => 0))).toHaveLength(1);
+
+    await engine.processEvent(
+      message({ id: "a1", senderId: alice.id, text: "alice too" }),
+      start + 1_000,
+    );
+    expect(client.sent.at(-1)?.text).toBe(momJoke("@alice", () => 0));
+
+    await engine.processEvent(
+      message({
+        id: "bot",
+        senderId: "bot-1",
+        sender: { id: "bot-1", username: "modbot" },
+        text: "I am the bot",
+      }),
+      start + 2_000,
+    );
+    expect(client.sent.at(-1)?.text).toBe(momJoke("@alice", () => 0));
+
+    await engine.processEvent(
+      message({
+        id: "elsewhere",
+        conversationId: "other-chat",
+        senderId: carol.id,
+        sender: carol,
+        text: "different chat",
+      }),
+      start + 2_000,
+    );
+    expect(client.sent.at(-1)?.text).toBe(momJoke("@alice", () => 0));
+    expect(store.isTrollAllEnabled("other-chat")).toBe(false);
+
+    await engine.processEvent(
+      message({ id: "c3", senderId: carol.id, sender: carol, text: "after the pause" }),
+      start + TROLL_COOLDOWN_MS,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@carol", () => 0))).toHaveLength(2);
+
+    await engine.processEvent(message({ id: "status", senderId: alice.id, text: "!troll" }));
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: on. Troll list is empty.");
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+
+    await engine.processEvent(message({ id: "name-bob", senderId: alice.id, text: "!troll @bob" }));
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id]);
+    expect(store.isTrollAllEnabled(groupId)).toBe(true);
+    await engine.processEvent(message({ id: "status-named", senderId: alice.id, text: "!TROLL" }));
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: on. Enabled: @bob.");
+
+    await engine.processEvent(message({ id: "again", senderId: owner.id, text: "/troll ALL" }));
+    expect(store.isTrollAllEnabled(groupId)).toBe(true);
+    expect(store.listTrollTargets(groupId).map((row) => row.userId)).toEqual([bob.id]);
+    expect(client.sent.at(-1)?.text).toBe(
+      "@owner Troll all: on. Already enabled. Enabled: @bob.",
+    );
+
+    const later = start + TROLL_COOLDOWN_MS * 2;
+    await engine.processEvent(message({ id: "b1", senderId: bob.id, text: "bob talks" }), later);
+    expect(client.sent.at(-1)?.text).toBe(momJoke("@bob", () => 0));
+    expect(client.sent.filter((row) => row.text === momJoke("@bob", () => 0))).toHaveLength(1);
+
+    await engine.processEvent(message({ id: "drop-bob", senderId: alice.id, text: "!untroll @bob" }));
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.isTrollAllEnabled(groupId)).toBe(true);
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice @bob is off the named list. Troll all: on, so they still get replies. Troll list is empty.",
+    );
+    await engine.processEvent(
+      message({ id: "b2", senderId: bob.id, text: "still in cooldown" }),
+      later + 1_000,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@bob", () => 0))).toHaveLength(1);
+    await engine.processEvent(
+      message({ id: "b3", senderId: bob.id, text: "still covered" }),
+      later + TROLL_COOLDOWN_MS,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@bob", () => 0))).toHaveLength(2);
+
+    await engine.processEvent(
+      message({ id: "owner-status", senderId: owner.id, text: "!status" }),
+      later + TROLL_COOLDOWN_MS + 1_000,
+    );
+    expect(client.sent.some((row) => /This chat:.*troll all/.test(row.text))).toBe(true);
+
+    store.setTrollAllEnabled("other-chat", true);
+    await engine.processEvent(message({ id: "stop", senderId: alice.id, text: "!untroll all" }));
+    expect(store.isTrollAllEnabled(groupId)).toBe(false);
+    expect(store.listTrollTargets(groupId)).toEqual([]);
+    expect(store.isTrollAllEnabled("other-chat")).toBe(true);
+    expect(store.listTrollTargets("other-chat").map((row) => row.userId)).toEqual([bob.id]);
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: off. Troll list is empty.");
+
+    const after = later + TROLL_COOLDOWN_MS * 2;
+    await engine.processEvent(
+      message({ id: "c4", senderId: carol.id, sender: carol, text: "quiet now" }),
+      after,
+    );
+    await engine.processEvent(message({ id: "b4", senderId: bob.id, text: "also quiet" }), after);
+    expect(client.sent.at(-1)?.text).toBe("@alice Troll all: off. Troll list is empty.");
   });
 
   it("keeps a migrated single-target row and still accepts another person", () => {
