@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { ChatMessage } from "../llm/client.js";
 import { containsBannedAgeTerm, containsGenitalTerm, redactSecrets } from "./adult-filter.js";
+import { CHAT_COPY_RULE } from "./user-copy.js";
 
 /**
  * xAI Grok Imagine. Used by `!imagine`. Adult commands (`!boobs`, `!ass`,
@@ -290,13 +291,15 @@ export function imagineGenerationsUrl(baseUrl = IMAGINE_API_BASE): string {
 const SUGGESTION_MAX_CHARS = 180;
 export const IMAGINE_SUGGESTION_TIMEOUT_MS = 8_000;
 
-const SUGGESTION_SYSTEM = [
+export const SUGGESTION_SYSTEM = [
   "An image prompt was rejected by content moderation.",
   "Reply with exactly 5 alternative prompts, one per line, numbered 1. through 5.",
   "Each line is only the prompt text, under 160 characters.",
   "Stay on the same subject, but softer and more likely to pass moderation:",
   "less explicit, less extreme, fully clothed, no nudity, no gore, no minors, no sexual content.",
   "Do not escalate. Do not add explanations, JSON, or a !imagine prefix.",
+  CHAT_COPY_RULE,
+  "Do not copy that instruction into a prompt line.",
 ].join(" ");
 
 /**

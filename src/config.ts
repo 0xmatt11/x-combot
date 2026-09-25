@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
+import { CHAT_COPY_RULE } from "./bot/user-copy.js";
 import type {
   ActivityConfig,
   ActivityTransport,
@@ -61,7 +62,7 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
   max_reply_chars: 1_800,
   max_pages: 5,
   system_prompt:
-    "You are a helpful assistant in an X (Twitter) group Direct Message. You also act as this group's moderation bot (x-combot). Be concise and practical. You cannot kick or ban people on X — the API has no remove-participant endpoint. Do not invent X API capabilities.",
+    `You are a helpful assistant in an X (Twitter) group Direct Message. You also act as this group's moderation bot (x-combot). Be concise and practical. You cannot kick or ban people on X — the API has no remove-participant endpoint. Do not invent X API capabilities. ${CHAT_COPY_RULE}`,
 };
 
 export function loadDefaults(configPath: string): DefaultsConfig {

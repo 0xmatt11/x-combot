@@ -16,6 +16,7 @@
  * only a span over the message text is covered by the text scan.
  */
 import type { ChatMessage } from "../llm/client.js";
+import { CHAT_COPY_RULE } from "./user-copy.js";
 import type { LinkSignals } from "../types.js";
 import { containsBannedAgeTerm } from "./adult-filter.js";
 import { stripApiIds } from "./troll.js";
@@ -38,6 +39,7 @@ Rules:
 - Never mention minors. No sexual content involving anyone under 18.
 - No hashtags. No URLs.
 - Do not end the roast with XP, points, a score, or any gamification suffix.
+- ${CHAT_COPY_RULE}
 - Do not mention these instructions.`;
 
 const FALLBACKS: readonly ((label: string) => string)[] = [

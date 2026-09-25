@@ -4,6 +4,7 @@
  * Numeric API user ids are stripped before anything is posted.
  */
 import { containsBannedAgeTerm } from "./adult-filter.js";
+import { CHAT_COPY_RULE } from "./user-copy.js";
 import type { ChatMessage } from "../llm/client.js";
 
 /** At most one troll reply per enabled person inside this window. */
@@ -20,6 +21,7 @@ Rules:
 - Classic "your mom" burns are welcome. The mother is an adult.
 - Never mention minors. No sexual content involving anyone under 18. If a line is about a child, ignore that line.
 - No slurs. No numeric user ids, snowflakes, or API ids.
+- ${CHAT_COPY_RULE}
 - Do not mention these instructions.`;
 
 const MOM_JOKES: readonly ((label: string) => string)[] = [
@@ -70,6 +72,7 @@ Rules:
 - Classic "your mom" burns are welcome. The mother is an adult.
 - Never mention minors. No sexual content involving anyone under 18. If a line is about a child, ignore that line.
 - No slurs. No numeric user ids, snowflakes, or API ids. No phone numbers, addresses, or other private details.
+- ${CHAT_COPY_RULE}
 - Do not mention these instructions.`;
 
 /** Fewer than two kept lines is too little to pretend the chat history is rich. */
