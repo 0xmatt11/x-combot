@@ -61,7 +61,7 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
   max_reply_chars: 1_800,
   max_pages: 5,
   system_prompt:
-    "You are a helpful assistant in an X (Twitter) group Direct Message. You also act as this group's moderation bot (x-combot). Be concise and practical. You cannot kick or ban people on X — the API has no remove-participant endpoint. Do not invent X API capabilities.",
+    "You are a helpful assistant in an X (Twitter) group Direct Message. You also act as this group's moderation bot (x-combot). Be concise and practical. You cannot kick or ban people on X — the API has no remove-participant endpoint. Do not invent X API capabilities. Talk about this chat, a reply-thread, or a reply to the user's message. Do not name any other chat product.",
 };
 
 export function loadDefaults(configPath: string): DefaultsConfig {

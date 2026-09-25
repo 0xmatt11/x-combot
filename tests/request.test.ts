@@ -672,6 +672,39 @@ describe("!request", () => {
     expect(headersOf(calls[0]?.init).Authorization).toBe("Bearer hook-secret");
   });
 
+  it("rewrites a model MVP blurb that names another chat product before anyone sees it", async () => {
+    const calls: FetchCall[] = [];
+    const { engine, client } = setup({
+      replies: [
+        ask("Want that as a Telegram reply?"),
+        finalize({
+          summary: "Thread answer",
+          detail: "Post it as a Telegram reply.",
+          mvp_scope: "Telegram reply",
+        }),
+        safety({ risk: "benign", reasons: ["Ordinary Telegram reply."] }),
+      ],
+      webhookUrl: "https://hooks.example/request",
+      fetchImpl: recordingFetch(calls),
+    });
+    await engine.processEvent(
+      message({ id: "g1", senderId: alice.id, text: "!request answer in the thread" }),
+    );
+    const filed = await engine.processEvent(
+      message({ id: "g2", senderId: alice.id, text: "MVP is fine" }),
+    );
+    const shown = [...client.sent.map((row) => row.text), ...filed.replies].join("\n");
+    expect(shown).not.toMatch(/telegram/i);
+    expect(shown).toMatch(/reply-thread/);
+    expect(filed.replies[0]).toMatch(/MVP: reply-thread/);
+    const body = bodyOf(calls[0]?.init);
+    expect(JSON.stringify(body)).not.toMatch(/telegram/i);
+    expect(body.mvp_scope).toBe("reply-thread");
+    expect(body.detail).toBe("Post it as a reply-thread.");
+    expect(body.safety.reasons).toEqual(["Ordinary reply-thread."]);
+    expect(client.direct).toEqual([]);
+  });
+
   it("still notifies when the safety review is unusable and marks it unknown", async () => {
     const calls: FetchCall[] = [];
     const { engine } = setup({

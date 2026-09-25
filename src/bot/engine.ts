@@ -26,6 +26,7 @@ import {
 } from "../x/client.js";
 import type { ChatMessage, LlmClient } from "../llm/client.js";
 import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, splitReply } from "../llm/context.js";
+import { asChatCopy } from "./user-copy.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
   buildRoastMessages,
@@ -4085,7 +4086,7 @@ export class ModerationEngine {
     text: string,
     actions: EngineActions,
   ): Promise<void> {
-    const addressed = await this.addressText(text);
+    const addressed = await this.addressText(asChatCopy(text));
     await this.client.sendMessage(conversationId, addressed.text, addressed.caption);
     actions.replies.push(addressed.text);
   }
@@ -4095,7 +4096,8 @@ export class ModerationEngine {
     text: string,
     actions: EngineActions,
   ): Promise<void> {
-    actions.notifies.push(text);
+    const clean = asChatCopy(text);
+    actions.notifies.push(clean);
     const recipients = new Set<string>([
       this.config.ownerId,
       ...this.config.globalAdminIds,
@@ -4103,10 +4105,10 @@ export class ModerationEngine {
     for (const userId of recipients) {
       if (!userId || userId === this.config.botUserId) continue;
       try {
-        await this.client.sendDirectMessage(userId, `[x-combot] ${text}`);
+        await this.client.sendDirectMessage(userId, `[x-combot] ${clean}`);
       } catch (error) {
         log.warn(`Failed to notify admin ${userId}`, error);
-        await this.reply(conversationId, text, actions);
+        await this.reply(conversationId, clean, actions);
       }
     }
   }

@@ -206,4 +206,6 @@ llm:
     Be concise and practical. You cannot kick or ban people on X — the public
     API has no remove-participant endpoint. Do not invent X API capabilities.
     When using conversation context, stick to what appears in the thread.
+    Talk about this chat, a reply-thread, or a reply to the user's message.
+    Do not name any other chat product.
 

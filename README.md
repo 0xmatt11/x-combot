@@ -4,7 +4,7 @@ ComBot-style moderation for **classic X group DMs** and **encrypted X Chat group
 
 The live bot account is **@miladybot669**. The handle is not hardcoded: startup calls `GET /2/users/me` and uses that account. Authorize that account. `BOT_USER_ID`, when set, must be the same numeric id as the token.
 
-Telegram's ComBot can kick and delete anyone's messages because Telegram exposes those actions. X does not. This bot implements the closest documented calls and is explicit about the rest.
+A group-chat moderation bot can kick and delete anyone's messages when that app exposes those actions. X does not. This bot implements the closest documented calls and is explicit about the rest.
 
 ## What it actually does
 

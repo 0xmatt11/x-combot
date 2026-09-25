@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ChatMessage } from "../llm/client.js";
 import { log } from "../log.js";
+import { asChatCopy } from "./user-copy.js";
 
 /** Clarifying questions before a request is filed. The next answer finalizes. */
 export const FEATURE_REQUEST_MAX_QUESTIONS = 3;
@@ -52,7 +53,9 @@ If the request is clear enough, the user said to just build it or that the MVP i
 {"action":"ask","question":"..."}
 {"action":"finalize","summary":"one line","detail":"what they want and what you learned","mvp_scope":"smallest useful version","complexity_hint":"simple"}
 
-complexity_hint is only a guess: simple, medium, or large. summary is shown in chat.`;
+complexity_hint is only a guess: simple, medium, or large.
+summary, question, and mvp_scope are shown in this X chat.
+This bot is an X group chat. Describe a response as a reply-thread or a reply to the user's message. Say this chat or X. Do not name any other chat product.`;
 
 const SAFETY_REVIEW_SYSTEM = `You review a feature request for the x-combot chat bot before it is sent to Chief of Staff. You do not implement the request.
 Reply with one JSON object and no other text.
@@ -62,7 +65,8 @@ Reply with one JSON object and no other text.
 risk is benign, suspicious, malicious, or unknown.
 reasons is one to three short lines saying why.
 categories may only include: auth_bypass, secrets, exfil, spam, billing_abuse, harassment, prompt_injection, illegal.
-Use benign for an ordinary product idea. Use suspicious when it could be abused or the intent is unclear. Use malicious when it asks to break access, steal secrets, exfiltrate data, harass, spam, abuse billing, inject prompts, or do something illegal. Use unknown when you cannot tell.`;
+Use benign for an ordinary product idea. Use suspicious when it could be abused or the intent is unclear. Use malicious when it asks to break access, steal secrets, exfiltrate data, harass, spam, abuse billing, inject prompts, or do something illegal. Use unknown when you cannot tell.
+reasons are shown to the owner. Say this chat, X, or a reply-thread. Do not name any other chat product.`;
 
 export type ComplexityHint = "simple" | "medium" | "large";
 
@@ -203,17 +207,19 @@ export function parseFeatureRequestModel(raw: string): FeatureRequestModelAction
   if (record.action === "ask") {
     const question = typeof record.question === "string" ? record.question.trim() : "";
     if (!question) return undefined;
-    return { action: "ask", question: clip(question, QUESTION_MAX) };
+    return { action: "ask", question: clip(shownCopy(question), QUESTION_MAX) };
   }
   if (record.action === "finalize") {
-    const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+    const summary = shownCopy(typeof record.summary === "string" ? record.summary.trim() : "");
     if (!summary) return undefined;
-    const detail =
-      typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : summary;
-    const mvp =
+    const detail = shownCopy(
+      typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : summary,
+    );
+    const mvp = shownCopy(
       typeof record.mvp_scope === "string" && record.mvp_scope.trim()
         ? record.mvp_scope.trim()
-        : summary;
+        : summary,
+    );
     return {
       action: "finalize",
       summary,
@@ -226,7 +232,7 @@ export function parseFeatureRequestModel(raw: string): FeatureRequestModelAction
 }
 
 export function unknownFeatureSafety(reason: string): FeatureRequestSafety {
-  const why = clip(reason, 180) || "The model did not return a safety review.";
+  const why = clip(shownCopy(reason), 180) || "The model did not return a safety review.";
   return { risk: "unknown", reasons: [why], categories: [] };
 }
 
@@ -273,13 +279,13 @@ export function parseFeatureRequestSafety(raw: string): FeatureRequestSafety {
 export function fallbackFeatureFiling(transcript: ClarificationTurn[]): FeatureRequestFiling {
   const body = substantiveRequestText(transcript);
   const first = body.split("\n")[0]?.trim() || "Feature request";
-  const summary = clip(first, SUMMARY_MAX) || "Feature request";
+  const summary = clip(shownCopy(first), SUMMARY_MAX) || "Feature request";
   const hint: ComplexityHint =
     body.length > 400 ? "large" : body.length > 160 ? "medium" : "simple";
   return {
     summary,
-    detail: clip(body, DETAIL_MAX) || summary,
-    mvp_scope: clip(summary, MVP_MAX),
+    detail: clip(shownCopy(body), DETAIL_MAX) || summary,
+    mvp_scope: clip(shownCopy(summary), MVP_MAX),
     complexity_hint: hint,
   };
 }
@@ -292,9 +298,9 @@ export function buildFeatureRequestPayload(input: {
   safety: FeatureRequestSafety;
   timestamp: string;
 }): FeatureRequestPayload {
-  const summary = clip(input.filing.summary, SUMMARY_MAX) || "Feature request";
-  const detail = clip(input.filing.detail, DETAIL_MAX) || summary;
-  const mvp = clip(input.filing.mvp_scope, MVP_MAX) || summary;
+  const summary = clip(shownCopy(input.filing.summary), SUMMARY_MAX) || "Feature request";
+  const detail = clip(shownCopy(input.filing.detail), DETAIL_MAX) || summary;
+  const mvp = clip(shownCopy(input.filing.mvp_scope), MVP_MAX) || summary;
   return {
     type: "feature_request",
     summary,
@@ -310,7 +316,7 @@ export function buildFeatureRequestPayload(input: {
     safety: {
       risk: normalizeSafetyRisk(input.safety.risk),
       reasons: input.safety.reasons.length
-        ? input.safety.reasons
+        ? input.safety.reasons.map((reason) => shownCopy(reason))
         : unknownFeatureSafety("The model did not explain the safety review.").reasons,
       categories: normalizeSafetyCategories(input.safety.categories),
     },
@@ -351,7 +357,7 @@ export function featureRequestConfirmation(input: {
   saved: boolean;
   webhook: FeatureRequestDelivery;
 }): string {
-  const lead = `Filed: ${input.summary}\nMVP: ${input.mvpScope}`;
+  const lead = `Filed: ${shownCopy(input.summary)}\nMVP: ${shownCopy(input.mvpScope)}`;
   if (input.saved && input.webhook !== "webhook_failed") {
     return `${lead}\nSent that to Chief of Staff.`;
   }
@@ -369,14 +375,16 @@ export function featureRequestOwnerDm(payload: FeatureRequestPayload): string {
     ? `@${payload.requester.username} (${payload.requester.id})`
     : payload.requester.id;
   const name = payload.requester.displayName ? ` ${payload.requester.displayName}` : "";
-  const text = [
-    `[x-combot] Feature request from ${who}${name} in ${payload.conversationId}`,
-    payload.summary,
-    `MVP: ${payload.mvp_scope}`,
-    payload.detail,
-    `Guess: ${payload.complexity_hint}`,
-    `Safety: ${payload.safety.risk}${payload.safety.reasons[0] ? ` — ${payload.safety.reasons[0]}` : ""}`,
-  ].join("\n");
+  const text = shownCopy(
+    [
+      `[x-combot] Feature request from ${who}${name} in ${payload.conversationId}`,
+      payload.summary,
+      `MVP: ${payload.mvp_scope}`,
+      payload.detail,
+      `Guess: ${payload.complexity_hint}`,
+      `Safety: ${payload.safety.risk}${payload.safety.reasons[0] ? ` — ${payload.safety.reasons[0]}` : ""}`,
+    ].join("\n"),
+  );
   if (text.length <= OWNER_DM_MAX) return text;
   return `${text.slice(0, OWNER_DM_MAX - 1)}…`;
 }
@@ -476,7 +484,7 @@ function normalizeSafetyReasons(value: unknown): string[] {
   const reasons: string[] = [];
   for (const item of raw) {
     if (typeof item !== "string") continue;
-    const text = clip(item, 180);
+    const text = clip(shownCopy(item), 180);
     if (!text || reasons.includes(text)) continue;
     reasons.push(text);
     if (reasons.length === 4) break;
@@ -498,6 +506,10 @@ function normalizeSafetyCategories(value: unknown): SafetyCategory[] {
 
 function isSafetyCategory(value: string): value is SafetyCategory {
   return (SAFETY_CATEGORIES as readonly string[]).includes(value);
+}
+
+function shownCopy(text: string): string {
+  return asChatCopy(text);
 }
 
 function clip(text: string, max: number): string {
