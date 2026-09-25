@@ -22,70 +22,59 @@ rules: |
   3. Follow X's rules: https://help.x.com/rules-and-policies
 
 help: |
-  Public commands. Every reply tags you and, in encrypted Chat, replies to your message. User command messages auto-delete after 15 minutes when the API allows. That covers every public command on this list, including !help. Bot replies stay: help text, pictures, video, voice, games, !ask answers, and roasts stay in chat. Deleting your command leaves that reply up. The quote of your command can show that message as deleted. Admin commands are not on this list. Admins and the owner use !admin.
-    !help — this message
-    !rules — group rules
-    !boobs — chest / cleavage photo or clip from the saved imagine-public bank, then search if that bank is empty. Tags you and replies to your command (off unless enabled; does not open grok.com/imagine)
-    !ass / !booty / !booties — butt photo or clip from that same saved bank. Same tag and reply (same switch as !boobs; does not open grok.com/imagine)
-    !imagine <prompt> — image from grok.com/imagine in the signed-in Chrome session (not the xAI API)
-    !video <prompt> — short video from grok.com/imagine in that same Chrome session (takes a few minutes)
-    !voice — pick a persona, then a line. Bare !voice lists them: 1 Girl 1, 2 regular dude, 3 Girl 2, 4 Girl 3 (!voice girl1 hello, !voice 2 what's up)
-    !troll @user — roast that person in this chat until !untroll @user. A second !troll @user does not turn it off
-    !roast @user — one dunk from their lines in this chat and their public posts. Does not turn on !troll. Reply to them with no @user, or use a display name. /roast works too
-    !linkroast on — roast people who drop X status links in this chat until !linkroast off
-    !xp — your level, XP, and rank (!level and !rank; !xp @user for someone else)
-    !top — level leaderboard (!toplvl)
-    Reply + or - to a message — give or take one level (not your own)
-    !ask <question> — ask the LLM (or @botname …)
-    !summarize [focus] — summarize the group thread (loads history)
-    !analyze [prompt] — answer about the whole conversation
-    !notacommand — unknown bang commands get a short LLM joke when the LLM is on (quiet if it is off)
-    !admin — admin command list. Admins and the owner only
+  Commands. / works like !. Your command deletes after 15 minutes; the reply stays. Admin commands: !admin.
+
+  Fun
+  !troll @user — roast them until !untroll @user
+  !roast @user — one dunk. Does not turn on !troll
+  !linkroast on — roast X status links (!linkroast off)
+  !xp — your level. !top — leaderboard. Reply + or - on a message
+
+  Chat
+  !rules — group rules
+  !ask <question> — ask the bot
+  !summarize — recap this chat
+  !analyze — ask about this chat
+
+  Media
+  !imagine <prompt> — image on grok.com/imagine
+  !video <prompt> — short video on grok.com/imagine
+  !voice — speak a line: Girl 1, regular dude, Girl 2, Girl 3
+  !boobs — chest photo from the saved imagine-public bank (off until enabled). Does not open grok.com/imagine
+  !ass / !booty — butt photo, same switch (!booties)
 
   Games:
-    !dice [NdM] — roll dice (default 1d6; also !dice 2d20, !dice d20, !dice 1d6+2)
-    !rps rock|paper|scissors — rock-paper-scissors
-    !coinflip [heads|tails] — flip a coin (!flip)
-    !8ball <question> — magic 8-ball (!eightball)
-    !minesweeper [easy|medium] — text minesweeper (5×5 or 7×7). Full catalog: !games
-    !tictactoe [@user] — tic-tac-toe; reply or @ to challenge, 1-9 to move
-    !connect4 [@user] — connect four; columns 1-7
-    !duel [@user] — turn-based HP duel (attack or defend)
-    !hangman [start|@user] — solo or challenge; guess a letter
-    !story start|stop|status — one sentence each
-    !slots [bet|xp bet] — slot machine (default 10 fun chips)
-    !blackjack [bet] — hit/stand vs the dealer (!hit, !stand, !bj)
-    !poker [bet] — 5-card draw vs the bot (one draw)
-    !roulette <red|black|number> [bet] — spin
-    !crash [bet] — cash out with !crash out, or !crash auto 2.5
-    !trivia — multiple choice; !trivia a to answer, !trivia score
-    !wordle [word] — daily 5-letter puzzle, then a practice round; marks are correct, present, or absent
-    !anagram [word] — unscramble a longer word; score drops on each miss
-    !scramble [word] — short-word streak; different list and score from !anagram
-    !guess [n] — the bot picks the range, then says higher or lower
-    !higherlower [higher|lower] — card streak
-    !wouldyourather [A|B] — vote; the tally stays in this chat until it expires
-    !truthordare [truth|dare] — PG-13 prompt; refuses minors
-    !games — grouped catalog of the games above
+  !games — full list
+  !dice — roll (1d6, or 2d20). !rps — rock-paper-scissors. !coinflip — coin (!flip). !8ball — magic 8-ball (!eightball)
+  !minesweeper — 5×5 or 7×7. Full list: !games
+  !wordle — daily word (correct, present, or absent). !anagram — unscramble. !scramble — short words. !guess — higher or lower
+  !higherlower — cards. !wouldyourather — vote. !truthordare — a prompt
+  !tictactoe !connect4 !duel !hangman !story — play with someone
+  !slots !blackjack !poker !roulette !crash !trivia — casino and quiz
 
 admin_help: |
-  Admin commands. !help does not list these. Bare !admin shows this list to admins and the owner. Anyone else is told the command is limited to configured admins.
-    !auth — owner only (BOT_OWNER_ID). A new encrypted Chat group stays silent until that account sends exact !auth (any case, optional surrounding spaces). !auth please does not count. Other people are ignored. Groups already watermarked before this rule are already authorized. Classic group DMs do not need it
-    !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health snapshot: uptime, chat, public_keys backoff, LLM, Imagine (browser or api), and this chat's toggles
-    Reply to someone's message with !warn, !kick, !mute, !unmute, !warns, !unwarn, or !admin add|remove (or /warn, /kick, …) to target that sender. An explicit @user or id still wins. With neither, the bot asks who.
-    !warn @user [reason] — add a warning
-    !warns @user — show warning count
-    !unwarn @user — remove one warning
-    !kick @user [reason] — mute + notify (X has no kick API)
-    !mute @user [minutes] — local soft-mute
-    !unmute @user
-    !del [event_id] — try to delete (classic DM: only the bot's own event; Chat: delete-for-all if this account sent it or is a group admin)
-    !note [key] [text] — save or list admin notes
-    !get <key> — read a note
-    !set <key> <value> — per-conversation setting. flood_max_messages 0 (or negative) disables flood; flood_window_ms 0 does too
-    !settings — show this conversation's settings (0 disables flood)
-    !admin add|remove @user — conversation admin allowlist
-    !admins — list admins
+  Admin commands. Not on !help. Reply to someone, or pass @user.
+
+  Owner only
+  !auth — exact !auth unlocks a new encrypted group
+  !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health: uptime, public_keys backoff, Imagine (browser or api)
+
+  Moderation
+  !warn @user [reason] — add a warning
+  !warns @user — warning count
+  !unwarn @user — remove one
+  !kick @user [reason] — warn and mute. No real kick
+  !mute @user [minutes] — soft-mute
+  !unmute @user — clear a mute
+  !del [id] — delete a message when the API allows
+
+  Notes and settings
+  !note [key] [text] — save or list notes
+  !get <key> — read a note
+  !settings — this chat's settings
+  !set <key> <value> — change a setting. flood_max_messages 0 (or negative) disables flood; flood_window_ms 0 does too
+  !admin add|remove @user — who can run these
+  !admins — list admins
 
 # Off by default. Flood runs only when max_messages and window_ms are both
 # above 0. 0 or a negative max_messages disables it, and so does window_ms: 0,

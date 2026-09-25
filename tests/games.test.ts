@@ -329,6 +329,6 @@ describe("instant game commands", () => {
     expect(loaded.help).toMatch(/!8ball/);
     expect(loaded.help).toMatch(/!eightball/);
     expect(loaded.help).toMatch(/!minesweeper/);
-    expect(loaded.help).toMatch(/grouped catalog of the games above/);
+    expect(loaded.help).toMatch(/!games — full list/);
   });
 });

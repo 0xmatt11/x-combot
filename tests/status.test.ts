@@ -375,7 +375,7 @@ describe("!status command", () => {
     expect(loaded.help).not.toMatch(/!status — owner only/);
     expect(loaded.help).not.toMatch(/!warn @user/);
     expect(loaded.help).not.toMatch(/!auth — owner only/);
-    expect(loaded.help).toMatch(/!admin — admin command list/);
+    expect(loaded.help).toMatch(/Admin commands: !admin/);
     expect(loaded.help).toMatch(/!linkroast/);
     expect(loaded.admin_help).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
     expect(loaded.admin_help).toMatch(/same gate as !auth/);
@@ -392,7 +392,7 @@ describe("!status command", () => {
     const help = client.sent.at(-1)?.text ?? "";
     expect(help).not.toMatch(/!status — owner only/);
     expect(help).not.toMatch(/!warn @user/);
-    expect(help).toMatch(/!admin — admin command list/);
+    expect(help).toMatch(/Admin commands: !admin/);
     expect(help).toMatch(/grok.com\/imagine/);
     await engine.processEvent(message({ id: "denied", senderId: alice.id, text: "!admin" }), nowMs);
     expect(client.sent.at(-1)?.text).toMatch(/limited to configured admins/);

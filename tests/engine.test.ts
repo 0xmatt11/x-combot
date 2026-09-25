@@ -599,7 +599,6 @@ describe("leave announcement text", () => {
     expect(loaded.help).not.toMatch(/flood_max_messages 0/);
     expect(loaded.admin_help).toMatch(/flood_max_messages 0 \(or negative\) disables flood/);
     expect(loaded.admin_help).toMatch(/flood_window_ms 0 does too/);
-    expect(loaded.admin_help).toMatch(/0 disables flood/);
   });
 });
 

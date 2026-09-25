@@ -9,7 +9,7 @@ Telegram's ComBot can kick and delete anyone's messages because Telegram exposes
 ## What it actually does
 
 - Welcomes joins and announces leaves (`@{username} has left`). A voluntary leave and a remove look the same to the API.
-- Public commands: `!help`, `!rules`, `!dice`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack` / `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!games`, `!xp` / `!top`, reply `+` / `-`, `!ask` / `!summarize` / `!analyze`, `!imagine`, `!video`, `!voice`, `!troll` / `!untroll`, `!roast`, `!linkroast`, `!admin` (the admin list, for admins and the owner), and a short LLM joke for an unknown `!name`.
+- Public `!help` is a short menu: fun, chat, media, and games. One line per idea, not a writeup of every alias. Admin commands are `!admin` only.
 - Admin commands: warn, kick (soft-mute only), mute, delete, notes, per-group settings, admin allowlist. They are listed by `!admin`, not by `!help`. `!auth` and `!status` are owner-only (`BOT_OWNER_ID`). Admins cannot run them. `!auth` unlocks a new encrypted Chat group; until that account sends it, the group stays silent. `!status` is the health snapshot.
 - Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. They use the saved imagine-public bank (`BOOBS_IMAGINE_APP` and the `BOOBS_IMAGINE_PUBLIC_*` URL lists), including each command's mp4 bank. `!ass` / `!booty` stills rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. If that bank is empty or exhausted, image search runs. They do not open grok.com/imagine and they do not call api.x.ai image generation. `!imagine` and `!video` still use the Chrome session.
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
@@ -245,54 +245,52 @@ User command messages auto-delete after 15 minutes when the API allows. Bot repl
 
 Encrypted Chat still posts the bot reply immediately as an `encryptReply` under the command, with the `@handle` mention. Fifteen minutes later the cleanup calls `POST /2/chat/conversations/:id/messages/delete` with `delete_for_all` and only that command's `sequence_id`. The body does not include the reply's sequence id and does not send `media_hash_keys`. Chat delete removes the listed sequences only. The reply is its own message: `encryptReply` copies a `replying_to_preview` into the reply when it is sent, and the reply keeps its own text, mention entity, and media. Deleting the command does not delete or hide that reply. After the parent sequence is gone, the quote strip on the reply can show the command as deleted. The reply bubble stays in the chat with its text, pictures, and `@mention`. A command with no sequence id is skipped and logged. The `!auth` bang is deleted on that timer. The confirmation stays in the chat. The `chat_authorizations` row is what keeps the group unlocked.
 
-Public:
+In chat, `!help` is the short menu below. Later sections are the full behavior. `!set help` replaces that public text only.
 
-| Command | Behavior |
+**Fun**
+
+| Command | |
 | --- | --- |
-| `!help` | Public commands from YAML, or the per-group `!set help` override. Does not list admin commands |
-| `!admin` | Admin command list for the owner, `ADMIN_IDS`, and per-group admins. Anyone else gets the same deny as other mod commands. `/admin` is the same. `!admin add` and `!admin remove` still change the allowlist |
-| `!rules` | Group rules |
-| `!dice [NdM]` | Roll. Default 1d6. See [Games](#games) |
-| `!rps rock\|paper\|scissors` | Rock-paper-scissors against the bot. `r`, `p`, and `s` work |
-| `!coinflip [heads\|tails]` | Flip a coin. A call is optional. `!flip` is the same command |
-| `!8ball <question>` | Magic 8-ball. The question is required. `!eightball` is the same command |
-| `!minesweeper [easy\|medium]` | Text minesweeper on a 5×5 or 7×7 board. Reveal with `r B3`, flag with `f B3`. See [Games](#games). Full catalog: `!games` |
-| `!wordle [word]` | Daily 5-letter puzzle for this chat, then a practice round. Marks are correct, present, or absent |
-| `!anagram [word]` | Unscramble a longer word. Score starts at 10 per letter and drops 5 per miss |
-| `!scramble [word]` | Short-word letter round. A solve builds a streak; a miss resets it |
-| `!guess [n]` | The bot picks the range. Guesses get higher or lower |
-| `!higherlower [higher\|lower]` | Card streak. A tie keeps it; a miss ends it |
-| `!wouldyourather [A\|B]` | Vote on two options. The tally stays in this chat until the round expires |
-| `!truthordare [truth\|dare]` | PG-13 prompt. Refuses anything about minors |
-| `!tictactoe [@user]` | Tic-tac-toe. Reply to someone or `@user` to challenge. See [Games](#games) |
-| `!connect4 [@user]` | Connect four. Same challenge. Columns 1–7 |
-| `!duel [@user]` | Turn-based HP duel. Attack or defend |
-| `!hangman [start\|@user]` | Solo hangman, or a challenge. Guess a letter or the word |
-| `!story start\|stop\|status` | One-sentence-each story in this conversation |
-| `!slots [bet]` | Three-reel slots. Default bet is 10 fun chips. `!slots xp 10` wagers XP. See [Games](#games) |
-| `!blackjack [bet]` | Hit/stand vs the dealer. `!bj`, `!hit`, and `!stand` too |
-| `!poker [bet]` | 5-card draw vs the bot. One draw, then showdown |
-| `!roulette <red\|black\|number> [bet]` | European wheel. Color pays 1:1, a number pays 35:1 |
-| `!crash [bet]` | Climbing multiplier. `!crash out` cashes out. `!crash auto 2.5` settles immediately |
-| `!trivia` | Multiple choice. `!trivia a` answers. `!trivia score` shows this chat |
-| `!games` | Grouped catalog of every playable game: instant, board, word/solo, multiplayer, and XP/casino |
-| `!xp` | Your level, XP, and rank. `!level` and `!rank` are the same. `!xp @user` looks up someone else |
-| `!top` | Leaderboard. `!toplvl` and `!leaderboard` too. Default 10 rows |
-| Reply `+` or `-` | Give or take one level. See [XP](#xp-and-levels) |
-| `!ask <question>` | LLM reply. Also `@botname …` and the wake prefixes in YAML |
-| `!summarize [focus]` | Load history and summarize |
-| `!analyze [prompt]` | Load history and answer about the thread |
-| `!boobs` | One chest / cleavage photo or clip from the saved imagine-public bank. Off unless enabled. Tags the requester and replies to their command. Does not open grok.com/imagine. No extra arguments. See [Adult photos](#adult-photos) |
-| `!ass` / `!booty` / `!booties` | One butt photo or clip from that same saved bank. Same switch, rate limit, mention, and reply as `!boobs`. No other caption |
-| `!imagine <prompt>` | One image from that prompt on grok.com/imagine (Chrome session). Stays on when `!boobs` is off. See [Imagine](#imagine) |
-| `!video <prompt>` | One short video from that prompt on grok.com/imagine. Takes a few minutes. See [Video](#video) |
-| `!voice` | Menu of four personas. `!voice girl1 <text>` (or `1`, `dude` / `2`, `girl2` / `3`, `girl3` / `4`) speaks that line. See [Voice](#voice) |
-| `!troll @user` | Roast that person in this chat until `!untroll @user` names the same person. A second `!troll @user` does not turn it off. See [Troll mode](#troll-mode) |
-| `!roast @user` | One dunk. Uses their recent lines in this chat and up to five public posts (`GET /2/users/:id/tweets`). Does not turn on `!troll`. `@handle`, a known display name, or a reply with no name. `/roast` is the same. See [Roast](#roast) |
-| `!linkroast on` | Roast people who paste an X/Twitter status link in this chat until `!linkroast off`. One roast per person about every 45 seconds. See [Link roast](#link-roast) |
-| `!<made-up>` | One- or two-sentence witty LLM line when the LLM is allowed. Silent when it is off, unconfigured, admin-only, rate-limited, or the completion fails. `!status`, `!auth`, `!admin`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!rps`, `!coinflip`, `!8ball`, `!minesweeper`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!games`, `!slots`, `!blackjack`, `!bj`, `!hit`, `!stand`, `!poker`, `!roulette`, `!crash`, and `!trivia` are real commands and do not take this path |
+| `!troll @user` | Roast them until `!untroll @user`. See [Troll mode](#troll-mode) |
+| `!roast @user` | One dunk. Does not turn on `!troll`. See [Roast](#roast) |
+| `!linkroast on` | Roast X status links (`!linkroast off`). See [Link roast](#link-roast) |
+| `!xp` / `!top` | Your level, or the leaderboard. Reply `+` or `-` on a message. See [XP](#xp-and-levels) |
 
-Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself. `!help` does not list the commands below. Bare `!admin` shows that list to an admin or the owner. Anyone else gets `That command is limited to configured admins.` `!auth` and `!status` are owner-only: only `BOT_OWNER_ID` can send them. Anyone else, including `ADMIN_IDS` and per-group admins, is ignored.
+**Chat**
+
+| Command | |
+| --- | --- |
+| `!rules` | Group rules |
+| `!ask <question>` | Ask the bot. Also `@botname …` |
+| `!summarize` | Recap this chat |
+| `!analyze` | Ask about this chat |
+| `!<made-up>` | Short LLM joke when the model is on. Real commands, including `!admin`, do not take this path |
+
+**Media**
+
+| Command | |
+| --- | --- |
+| `!imagine <prompt>` | Image on grok.com/imagine. See [Imagine](#imagine) |
+| `!video <prompt>` | Short video on grok.com/imagine. See [Video](#video) |
+| `!voice` | Speak a line: Girl 1, regular dude, Girl 2, Girl 3. See [Voice](#voice) |
+| `!boobs` | Chest photo from the saved bank (off until enabled). Does not open grok.com/imagine. See [Adult photos](#adult-photos) |
+| `!ass` / `!booty` | Butt photo, same switch (`!booties`) |
+
+**Games** — `!games` prints how to play. Aliases such as `!flip`, `!eightball`, and `!bj` stay live and are not repeated here.
+
+| Command | |
+| --- | --- |
+| `!dice` | Roll (1d6, or `2d20`). See [Games](#games) |
+| `!rps` / `!coinflip` / `!8ball` | Rock-paper-scissors, a coin, a magic 8-ball |
+| `!minesweeper` | 5×5 or 7×7 |
+| `!wordle` / `!anagram` / `!scramble` / `!guess` | Word and number rounds |
+| `!higherlower` / `!wouldyourather` / `!truthordare` | Cards, a vote, a prompt |
+| `!tictactoe` / `!connect4` / `!duel` / `!hangman` / `!story` | Play with someone |
+| `!slots` / `!blackjack` / `!poker` / `!roulette` / `!crash` / `!trivia` | Casino and quiz |
+
+`!admin` is the admin list for the owner, `ADMIN_IDS`, and per-group admins. Anyone else gets the same deny as other mod commands. `/admin` is the same. `!admin add` and `!admin remove` still change the allowlist.
+
+Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin add` for that group. `BOT_USER_ID` is not an admin by itself. `!help` does not list the commands below. Bare `!admin` shows a short list to an admin or the owner. Anyone else gets `That command is limited to configured admins.` This table is the full reference. `!auth` and `!status` are owner-only: only `BOT_OWNER_ID` can send them. Anyone else, including `ADMIN_IDS` and per-group admins, is ignored.
 
 | Command | Behavior |
 | --- | --- |

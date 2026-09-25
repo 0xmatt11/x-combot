@@ -429,7 +429,7 @@ describe("!minesweeper command", () => {
     expect(loaded.help).toMatch(/!minesweeper/);
     expect(loaded.help).toMatch(/5×5/);
     expect(loaded.help).toMatch(/7×7/);
-    expect(loaded.help).toMatch(/Full catalog: !games/);
+    expect(loaded.help).toMatch(/Full list: !games/);
     expect(loaded.help).toMatch(/!dice/);
     expect(loaded.help).toMatch(/!rps/);
   });
