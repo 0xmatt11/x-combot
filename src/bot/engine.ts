@@ -4275,11 +4275,12 @@ export class ModerationEngine {
   }
 
   /**
-   * Recent `MessageCreate` events in this conversation, newest first.
-   * Skips the `!purge` line itself. Uses the same history read as
-   * `!summarize` (`listConversationDmEvents`, which is Chat history for `g…`).
-   * Stops at `count` (already capped) or after a few pages, so one command
-   * cannot walk the whole archive.
+   * The last `count` messages in this conversation, newest first.
+   * Deletes start at the most recent message and walk backward. This does not
+   * reverse the page the way `!summarize` does (that path wants oldest-first
+   * context). Skips the `!purge` line itself. Same history read as
+   * `!summarize` (`listConversationDmEvents`, Chat history for `g…` groups).
+   * Stops at `count` (already capped) or after a few pages.
    */
   private async listPurgeTargets(
     conversationId: string,
@@ -4867,7 +4868,7 @@ const PURGE_PAGE_SIZE = 100;
 const PURGE_MAX_PAGES = 5;
 
 function purgeUsage(): string {
-  return `Usage: !purge <n>. n is how many of the last messages to delete: any positive integer, hard cap ${PURGE_MAX}. Newest first. The !purge line is not included. X only deletes events this account can remove.`;
+  return `Usage: !purge <n>. n is how many of the last messages to delete: any positive integer, hard cap ${PURGE_MAX}. Starts at the most recent message and walks backward, not oldest-first. The !purge line is not included. X only deletes events this account can remove.`;
 }
 
 function formatPurgeReply(input: {
@@ -4889,10 +4890,42 @@ function formatPurgeReply(input: {
   return `${capNote}${counts} ${why}`;
 }
 
-/** Keep API order when any row has no timestamp. Otherwise newest `createdAt` first. */
+/**
+ * Newest message first, then older ones. Timestamp, then Chat sequence id,
+ * then a numeric event id. Ties keep API order, which is already newest first.
+ * A page that arrives oldest-first is still walked backward from the newest.
+ */
 function newestFirst(events: DmEvent[]): DmEvent[] {
-  if (events.some((event) => !event.createdAt)) return events;
-  return [...events].sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+  return [...events].sort(compareNewestFirst);
+}
+
+function compareNewestFirst(a: DmEvent, b: DmEvent): number {
+  const byTime = compareDesc(timeMillis(a.createdAt), timeMillis(b.createdAt));
+  if (byTime !== 0) return byTime;
+  const bySequence = compareDesc(numericKey(a.sequenceId), numericKey(b.sequenceId));
+  if (bySequence !== 0) return bySequence;
+  return compareDesc(numericKey(a.id), numericKey(b.id));
+}
+
+function compareDesc(a: bigint | undefined, b: bigint | undefined): number {
+  if (a === undefined || b === undefined || a === b) return 0;
+  return a > b ? -1 : 1;
+}
+
+function timeMillis(value: string | undefined): bigint | undefined {
+  if (!value) return undefined;
+  if (/^[0-9]+$/.test(value)) return numericKey(value);
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? BigInt(Math.trunc(ms)) : undefined;
+}
+
+function numericKey(value: string | undefined): bigint | undefined {
+  if (!value || !/^[0-9]+$/.test(value)) return undefined;
+  try {
+    return BigInt(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function emptyActions(): EngineActions {

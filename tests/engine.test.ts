@@ -565,6 +565,59 @@ describe("ModerationEngine", () => {
     expect(client.sent.at(-1)?.text).not.toMatch(/Capped at/);
   });
 
+  it("walks backward from the newest message when history arrives oldest-first", async () => {
+    const { engine, client } = setup();
+    client.allowDeleteOthers = true;
+    client.listConversationDmEvents = async () => ({
+      events: ["1", "2", "3", "4", "5"].map((id) =>
+        message({ id, senderId: bob.id, text: `m${id}` }),
+      ),
+    });
+
+    await engine.processEvent(message({ id: "purge-order", senderId: owner.id, text: "!purge 2" }));
+
+    expect(client.deleted).toEqual(["5", "4"]);
+  });
+
+  it("walks Chat sequence ids backward when timestamps are missing", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    client.allowDeleteOthers = true;
+    client.listConversationDmEvents = async () => ({
+      events: [
+        message({ id: "msg-a", senderId: bob.id, text: "a", conversationId: chatId, sequenceId: "1" }),
+        message({ id: "msg-b", senderId: bob.id, text: "b", conversationId: chatId, sequenceId: "2" }),
+        message({ id: "msg-c", senderId: alice.id, text: "c", conversationId: chatId, sequenceId: "10" }),
+      ],
+    });
+
+    await engine.processEvent(
+      message({
+        id: "purge-seq",
+        senderId: owner.id,
+        text: "!purge 2",
+        conversationId: chatId,
+      }),
+    );
+
+    expect(client.deleted).toEqual(["msg-c", "msg-b"]);
+  });
+
+  it("keeps a newest-first page in that order instead of reversing it", async () => {
+    const { engine, client } = setup();
+    client.allowDeleteOthers = true;
+    client.listConversationDmEvents = async () => ({
+      events: ["5", "4", "3", "2", "1"].map((id) =>
+        message({ id, senderId: bob.id, text: `m${id}` }),
+      ),
+    });
+
+    await engine.processEvent(message({ id: "purge-keep", senderId: owner.id, text: "!purge 2" }));
+
+    expect(client.deleted).toEqual(["5", "4"]);
+  });
+
   it("purges encrypted Chat with sequence ids and states the delete-for-all limit", async () => {
     const { engine, client, store } = setup();
     const chatId = "g2029561975647150382";
@@ -696,6 +749,7 @@ describe("ModerationEngine", () => {
     expect(loaded.admin_help).toMatch(/!purge <n>/);
     expect(loaded.admin_help).toMatch(/hard cap 100/);
     expect(loaded.admin_help).toMatch(/the last n messages/);
+    expect(loaded.admin_help).toMatch(/not oldest-first/);
     expect(loaded.admin_help).toMatch(/not a fixed size/);
     expect(loaded.admin_help).toMatch(/this account's events only/);
   });
