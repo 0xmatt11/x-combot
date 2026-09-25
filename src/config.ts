@@ -18,6 +18,10 @@ import type {
 
 export const DEFAULT_LEAVE_TEXT = "@{username} has left";
 
+/** Used when YAML omits `admin_help`. The shipped file replaces this. */
+export const DEFAULT_ADMIN_HELP =
+  "Admin commands. Send !admin for this list. Admins and the owner only.";
+
 export const DEFAULT_LEAVE_CONFIG: LeaveConfig = {
   enabled: true,
   text: DEFAULT_LEAVE_TEXT,
@@ -77,6 +81,7 @@ export function loadDefaults(configPath: string): DefaultsConfig {
     attempt_on_mute: true,
   };
   parsed.help ??= "Type !help";
+  parsed.admin_help = parsed.admin_help?.trim() ? parsed.admin_help : DEFAULT_ADMIN_HELP;
   parsed.rules ??= "Be respectful.";
   parsed.llm = { ...DEFAULT_LLM_CONFIG, ...parsed.llm };
   parsed.llm.wake_prefixes = parsed.llm.wake_prefixes?.length
@@ -102,6 +107,7 @@ export function resolveConversationConfig(
     leaveText: override?.leave_text?.trim() ? override.leave_text : leave.text,
     rules: override?.rules ?? defaults.rules,
     help: override?.help ?? defaults.help,
+    adminHelp: defaults.admin_help?.trim() || DEFAULT_ADMIN_HELP,
     floodMaxMessages: override?.flood_max_messages ?? defaults.flood.max_messages,
     floodWindowMs: override?.flood_window_ms ?? defaults.flood.window_ms,
     floodMuteMs: override?.flood_mute_ms ?? defaults.flood.mute_ms,

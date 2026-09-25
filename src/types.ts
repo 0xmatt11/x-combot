@@ -95,6 +95,8 @@ export interface DefaultsConfig {
   leave?: LeaveConfig;
   rules: string;
   help: string;
+  /** Shown by bare `!admin`. Omitted configs use the built-in fallback. */
+  admin_help?: string;
   flood: {
     max_messages: number;
     window_ms: number;
@@ -163,6 +165,8 @@ export interface ResolvedConversationConfig {
   leaveText: string;
   rules: string;
   help: string;
+  /** Admin command list from `!admin`. Not the public `!help` text. */
+  adminHelp: string;
   floodMaxMessages: number;
   floodWindowMs: number;
   floodMuteMs: number;

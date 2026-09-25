@@ -370,24 +370,40 @@ describe("!status command", () => {
     expect(client.sent[0]?.text).toContain("@0xMatt66");
   });
 
-  it("lists !status as owner-only in the default !help reply", async () => {
+  it("keeps !status on !admin and out of public !help", async () => {
     const loaded = loadDefaults("config/default.yaml");
-    expect(loaded.help).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
-    expect(loaded.help).toMatch(/same gate as !auth/);
-    expect(loaded.help).toMatch(/ADMIN_IDS and per-group admins are ignored/);
-    expect(loaded.help).toMatch(/public_keys/);
-    expect(loaded.help).toMatch(/browser or api/);
+    expect(loaded.help).not.toMatch(/!status — owner only/);
+    expect(loaded.help).not.toMatch(/!warn @user/);
+    expect(loaded.help).not.toMatch(/!auth — owner only/);
+    expect(loaded.help).toMatch(/!admin — admin command list/);
     expect(loaded.help).toMatch(/!linkroast/);
+    expect(loaded.admin_help).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
+    expect(loaded.admin_help).toMatch(/same gate as !auth/);
+    expect(loaded.admin_help).toMatch(/ADMIN_IDS and per-group admins are ignored/);
+    expect(loaded.admin_help).toMatch(/public_keys/);
+    expect(loaded.admin_help).toMatch(/browser or api/);
     const store = new Store(":memory:");
     stores.push(store);
     const client = new MockXClient();
     client.addUser(alice);
+    client.addUser(owner);
     const engine = new ModerationEngine(store, client, { ...runtime(), defaults: loaded });
     await engine.processEvent(message({ id: "help", text: "!HELP" }), nowMs);
-    expect(client.sent.at(-1)?.text).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
-    expect(client.sent.at(-1)?.text).toMatch(/public_keys backoff/);
-    expect(client.sent.at(-1)?.text).toMatch(/browser or api/);
-    expect(client.sent.at(-1)?.text).toMatch(/grok.com\/imagine/);
+    const help = client.sent.at(-1)?.text ?? "";
+    expect(help).not.toMatch(/!status — owner only/);
+    expect(help).not.toMatch(/!warn @user/);
+    expect(help).toMatch(/!admin — admin command list/);
+    expect(help).toMatch(/grok.com\/imagine/);
+    await engine.processEvent(message({ id: "denied", senderId: alice.id, text: "!admin" }), nowMs);
+    expect(client.sent.at(-1)?.text).toMatch(/limited to configured admins/);
+    await engine.processEvent(
+      message({ id: "menu", senderId: owner.id, sender: owner, text: "!admin" }),
+      nowMs,
+    );
+    const menu = client.sent.at(-1)?.text ?? "";
+    expect(menu).toMatch(/!status — owner only \(BOT_OWNER_ID\)/);
+    expect(menu).toMatch(/public_keys backoff/);
+    expect(menu).toMatch(/browser or api/);
   });
 });
 

@@ -2040,6 +2040,10 @@ export class ModerationEngine {
         return;
       }
       case "admin": {
+        if (!command.action) {
+          await this.reply(conversationId, settings.adminHelp.trim(), actions);
+          return;
+        }
         const target = await this.resolveModerationUser(command.target, event, actions);
         if (!target) return;
         if (command.action === "add") {

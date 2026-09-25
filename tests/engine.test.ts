@@ -361,6 +361,46 @@ describe("ModerationEngine", () => {
     expect(store.getWarnCount(groupId, bob.id)).toBe(0);
   });
 
+  it("shows the admin list to admins and denies everyone else", async () => {
+    const adminHelp = "Admin commands.\n!warn @user — add a warning";
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(bob);
+    client.addUser(owner);
+    const engine = new ModerationEngine(store, client, {
+      ...runtime(),
+      globalAdminIds: [bob.id],
+      defaults: { ...defaults, admin_help: adminHelp },
+    });
+
+    await engine.processEvent(message({ id: "a1", senderId: alice.id, text: "!admin" }));
+    expect(client.sent.at(-1)?.text).toBe(
+      "@alice That command is limited to configured admins.",
+    );
+
+    await engine.processEvent(message({ id: "a2", senderId: owner.id, text: "/admin" }));
+    expect(client.sent.at(-1)?.text).toBe(`@owner ${adminHelp}`);
+
+    await engine.processEvent(message({ id: "a3", senderId: bob.id, text: "!ADMIN help" }));
+    expect(client.sent.at(-1)?.text).toBe(`@bob ${adminHelp}`);
+
+    store.addConversationAdmin(groupId, alice.id);
+    await engine.processEvent(message({ id: "a4", senderId: alice.id, text: "!admin" }));
+    expect(client.sent.at(-1)?.text).toBe(`@alice ${adminHelp}`);
+
+    await engine.processEvent(
+      message({
+        id: "a5",
+        senderId: owner.id,
+        text: "!admin add @bob",
+        mentions: [{ username: "bob", id: bob.id }],
+      }),
+    );
+    expect(client.sent.at(-1)?.text).toMatch(/@bob can now run mod commands/);
+  });
+
   it("tracks warns and auto-mutes at the limit", async () => {
     const { engine, client, store } = setup();
     await engine.processEvent(
@@ -556,9 +596,10 @@ describe("leave announcement text", () => {
     expect(loaded.flood.max_messages).toBe(0);
     expect(loaded.flood.window_ms).toBe(8000);
     expect(loaded.flood.mute_ms).toBe(300_000);
-    expect(loaded.help).toMatch(/flood_max_messages 0 \(or negative\) disables flood/);
-    expect(loaded.help).toMatch(/flood_window_ms 0 does too/);
-    expect(loaded.help).toMatch(/0 disables flood/);
+    expect(loaded.help).not.toMatch(/flood_max_messages 0/);
+    expect(loaded.admin_help).toMatch(/flood_max_messages 0 \(or negative\) disables flood/);
+    expect(loaded.admin_help).toMatch(/flood_window_ms 0 does too/);
+    expect(loaded.admin_help).toMatch(/0 disables flood/);
   });
 });
 

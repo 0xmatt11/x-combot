@@ -18,7 +18,7 @@ export type ParsedCommand =
   | { name: "get"; key: string }
   | { name: "set"; key: string; value: string }
   | { name: "settings" }
-  | { name: "admin"; action: "add" | "remove"; target?: UserRef }
+  | { name: "admin"; action?: "add" | "remove"; target?: UserRef }
   | { name: "admins" }
   | { name: "ask"; prompt: string }
   | { name: "summarize"; prompt?: string }
@@ -264,8 +264,9 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "set", key: head, value: tail };
     }
     case "admin": {
+      if (!rest) return { name: "admin" };
       const { head, tail } = splitHead(rest);
-      if (head !== "add" && head !== "remove") return undefined;
+      if (head !== "add" && head !== "remove") return { name: "admin" };
       if (!tail) return { name: "admin", action: head };
       const { target } = splitTarget(tail);
       if (!target) return undefined;
