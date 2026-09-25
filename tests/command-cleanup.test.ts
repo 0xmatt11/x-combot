@@ -94,6 +94,14 @@ describe("command cleanup", () => {
           };
         },
       },
+      undertow: {
+        async randomImage() {
+          return {
+            slug: "ndrtw",
+            url: "https://i2c.seadn.io/ethereum/dc888e7cb1c247dfac930b0718e5854b/ndrtw.gif",
+          };
+        },
+      },
       fetchImage: async (url) =>
         url.includes("seadn.io")
           ? { bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/png" }
@@ -251,6 +259,7 @@ describe("command cleanup", () => {
       "!boobs",
       "!cheese",
       "!milady",
+      "!undertow",
       "!imagine a red boat",
     ];
     for (const [index, text] of commands.entries()) {
