@@ -27,7 +27,7 @@ help: |
   Fun
   !troll @user — roast them until !untroll @user
   !roast @user — one dunk. Does not turn on !troll
-  !linkroast on — roast any link or shared post (!linkroast off)
+  !linkroast on — roast any link or a shared post, including Sent a post (!linkroast off)
   !xp — your level. !top — leaderboard. Reply + or - on a message
 
   Chat

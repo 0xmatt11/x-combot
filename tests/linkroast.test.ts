@@ -551,6 +551,62 @@ describe("link roast mode", () => {
     expect(client.sent.some((row) => row.text.includes(snowflake))).toBe(false);
   });
 
+  it("roasts a Sent a post card when the text has no URL", async () => {
+    // chat-xdk decrypt of a share-sheet post. The chat UI labels this
+    // "Sent a post" and draws the tweet preview from restId. message_text
+    // is empty, and the ciphertext often has no http URL.
+    const sentAPost = {
+      type: "message",
+      id: "msg-sent-a-post",
+      senderId: alice.id,
+      sequenceId: "9001",
+      content: {
+        contentType: "text",
+        text: "",
+        sentFrom: "shareSheet",
+        attachments: [{ post: { restId: snowflake } }],
+      },
+      attachments: [{ attachmentType: "post", restId: snowflake }],
+    };
+    expect(chatLinkSignals({ content: sentAPost.content })).toEqual({
+      urls: [],
+      statusIds: [snowflake],
+    });
+    expect(chatLinkSignals({ attachments: sentAPost.attachments })).toEqual({
+      urls: [],
+      statusIds: [snowflake],
+    });
+    const event = chatEventToDm(
+      groupId,
+      { id: "evt-sent-a-post", sender_id: alice.id, sequence_id: "9001" },
+      sentAPost,
+    );
+    expect(event?.text).toBe("");
+    expect(containsLink(event?.text)).toBe(false);
+    expect(event?.linkSignals).toEqual({ urls: [], statusIds: [snowflake] });
+
+    const roast = "@alice that preview is not a conversation.";
+    const llm = new MockLlmClient(roast);
+    const { engine, client } = setup(llm);
+    await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
+    await engine.processEvent(
+      message({
+        id: event?.id ?? "evt-sent-a-post",
+        senderId: alice.id,
+        text: event?.text ?? "",
+        linkSignals: event?.linkSignals,
+      }),
+      9_000_000,
+    );
+    expect(client.sent.map((row) => row.text)).toEqual([
+      `@alice ${LINKROAST_ON_ACK}`,
+      roast,
+    ]);
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0]?.[1]?.content).toContain("(just the link)");
+    expect(llm.calls[0]?.[1]?.content ?? "").not.toContain(snowflake);
+  });
+
   it("does not roast a bang command that includes a URL", async () => {
     const { engine, client } = setup();
     await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!linkroast on" }));
@@ -600,9 +656,10 @@ describe("link roast mode", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).toMatch(/!linkroast on/);
     expect(loaded.help).toMatch(/!linkroast off/);
-    expect(loaded.help).toMatch(/roast any link or shared post/);
+    expect(loaded.help).toMatch(/Sent a post/);
     const readme = fs.readFileSync("README.md", "utf8");
     expect(readme).toMatch(/\| `!linkroast on` \| Roast any link or shared post/);
+    expect(readme).toMatch(/Sent a post/);
     expect(readme).toMatch(/t\.co/);
     expect(readme).toMatch(/referenced_tweets/);
   });

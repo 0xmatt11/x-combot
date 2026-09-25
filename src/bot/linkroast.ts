@@ -4,11 +4,15 @@
  * Numeric API user ids are stripped before anything is posted.
  *
  * A message is a link when the text has an http(s) or www URL, or when the
- * inbound payload carries a URL or a shared-post id (classic `entities.urls`
- * and `referenced_tweets`, or a Chat url/post card). Media attachments are
- * not links. A url entity that is only a span over the message text is
- * covered by the text scan. A native share with no URL, no post id, and no
- * url/post card is not visible here.
+ * inbound payload carries a URL or a shared-post id.
+ *
+ * The chat "Sent a post" card is an encrypted text message with empty text.
+ * chat-xdk puts the tweet on `content.attachments` as `{ post: { restId, postUrl } }`
+ * and on the event `attachments` list as `{ attachmentType: "post", restId, postUrl }`.
+ * `restId` alone is enough: the client hydrates the preview, so the body often
+ * has no http URL. The words "Sent a post" are the notification label, not
+ * a field on the event. Media attachments are not links. A url entity that is
+ * only a span over the message text is covered by the text scan.
  */
 import type { ChatMessage } from "../llm/client.js";
 import type { LinkSignals } from "../types.js";
