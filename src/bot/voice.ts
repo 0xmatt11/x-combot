@@ -30,17 +30,35 @@ export type VoicePersonaId =
   | "girl10";
 
 /**
- * Girl 1–10. Labels stay "Girl N". Higher numbers wrap the line in stronger
- * delivery tags so the words themselves get louder, faster, and more stressed.
- * Inline sounds (`[breath]`, `[sigh]`, …) vocalize on their own; they are never
- * stacked in front of the line. A single cue, when used, sits after the first
- * word. Tags do not add words. rex, sal, and leo are unused.
+ * Girl 1–10. Labels stay "Girl N". Each tier wraps the whole line in one
+ * delivery style, so the first word and the last word are spoken the same way.
+ * xAI has no separate emotion control. Inline sounds (`[sigh]`, `[breath]`,
+ * `[exhale]`) vocalize where they sit, so they are woven between words — never
+ * stacked before the line, and never two in a row. Higher tiers gasp more
+ * often. Tags do not add words. rex, sal, and leo are unused.
  * dude, guy, and regular are not voices.
  *
- * `<build-intensity>` ramps across its span, so the peak tier does not use it:
- * that ramp leaves the opening words quiet. Girl 10 holds loud, fast, high,
- * stressed delivery for the whole line.
+ * `<build-intensity>` and `<fast>` are not used. The ramp changes tone across
+ * the line; fast makes the words come out cleanly.
  */
+const GIRL_DELIVERY: readonly {
+  tags: readonly string[];
+  /** 0 = no inline sounds. Otherwise one sound after every Nth word that still has a word after it. */
+  every: number;
+  cues: readonly ("[sigh]" | "[breath]" | "[exhale]")[];
+}[] = [
+  { tags: ["whisper"], every: 0, cues: [] },
+  { tags: ["whisper", "soft"], every: 8, cues: ["[sigh]"] },
+  { tags: ["whisper", "soft", "higher-pitch"], every: 5, cues: ["[sigh]"] },
+  { tags: ["whisper", "higher-pitch", "slow"], every: 4, cues: ["[sigh]"] },
+  { tags: ["soft", "higher-pitch", "slow"], every: 3, cues: ["[sigh]", "[breath]"] },
+  { tags: ["whisper", "higher-pitch", "slow", "emphasis"], every: 3, cues: ["[sigh]", "[breath]"] },
+  { tags: ["higher-pitch", "slow", "emphasis"], every: 2, cues: ["[sigh]", "[breath]"] },
+  { tags: ["loud", "higher-pitch", "slow", "emphasis"], every: 2, cues: ["[breath]", "[sigh]"] },
+  { tags: ["loud", "higher-pitch", "slow", "emphasis"], every: 1, cues: ["[breath]", "[sigh]"] },
+  { tags: ["loud", "higher-pitch", "slow", "emphasis"], every: 1, cues: ["[sigh]", "[breath]", "[exhale]"] },
+];
+
 export const VOICE_PERSONAS: readonly {
   id: VoicePersonaId;
   label: string;
@@ -56,7 +74,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl1",
     aliases: ["girl1", "1", "sexy", "sexygirl"],
     voiceId: "ara",
-    deliver: (text) => wrapSpoken(text, ["whisper"]),
+    deliver: (text) => deliverGirl(0, text),
   },
   {
     id: "girl2",
@@ -64,7 +82,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl2",
     aliases: ["girl2", "2", "scared", "scaredgirl"],
     voiceId: "eve",
-    deliver: (text) => wrapSpoken(text, ["whisper", "soft"]),
+    deliver: (text) => deliverGirl(1, text),
   },
   {
     id: "girl3",
@@ -72,7 +90,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl3",
     aliases: ["girl3", "3"],
     voiceId: "ara",
-    deliver: (text) => wrapSpoken(text, ["whisper", "soft", "slow"]),
+    deliver: (text) => deliverGirl(2, text),
   },
   {
     id: "girl4",
@@ -80,7 +98,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl4",
     aliases: ["girl4", "4"],
     voiceId: "eve",
-    deliver: (text) => wrapSpoken(text, ["whisper", "higher-pitch", "slow"]),
+    deliver: (text) => deliverGirl(3, text),
   },
   {
     id: "girl5",
@@ -88,7 +106,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl5",
     aliases: ["girl5", "5"],
     voiceId: "ara",
-    deliver: (text) => wrapSpoken(text, ["soft", "higher-pitch", "slow", "emphasis"]),
+    deliver: (text) => deliverGirl(4, text),
   },
   {
     id: "girl6",
@@ -96,7 +114,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl6",
     aliases: ["girl6", "6", "horny", "hornygirl"],
     voiceId: "eve",
-    deliver: (text) => wrapSpoken(text, ["whisper", "higher-pitch", "build-intensity"]),
+    deliver: (text) => deliverGirl(5, text),
   },
   {
     id: "girl7",
@@ -104,7 +122,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl7",
     aliases: ["girl7", "7"],
     voiceId: "ara",
-    deliver: (text) => wrapSpoken(text, ["higher-pitch", "fast", "build-intensity"]),
+    deliver: (text) => deliverGirl(6, text),
   },
   {
     id: "girl8",
@@ -112,8 +130,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl8",
     aliases: ["girl8", "8"],
     voiceId: "eve",
-    deliver: (text) =>
-      wrapSpoken(cueAfterFirstWord(text, "[sigh]"), ["loud", "higher-pitch", "fast", "build-intensity"]),
+    deliver: (text) => deliverGirl(7, text),
   },
   {
     id: "girl9",
@@ -121,14 +138,7 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl9",
     aliases: ["girl9", "9"],
     voiceId: "ara",
-    deliver: (text) =>
-      wrapSpoken(cueAfterFirstWord(text, "[breath]"), [
-        "loud",
-        "higher-pitch",
-        "fast",
-        "emphasis",
-        "build-intensity",
-      ]),
+    deliver: (text) => deliverGirl(8, text),
   },
   {
     id: "girl10",
@@ -136,12 +146,17 @@ export const VOICE_PERSONAS: readonly {
     menuAlias: "girl10",
     aliases: ["girl10", "10"],
     voiceId: "eve",
-    deliver: (text) =>
-      wrapSpoken(cueAfterFirstWord(text, "[breath]"), ["loud", "fast", "higher-pitch", "emphasis"]),
+    deliver: (text) => deliverGirl(9, text),
   },
 ];
 
-/** Outer tag first. Wrappers change how the enclosed words are spoken. */
+function deliverGirl(index: number, text: string): string {
+  const delivery = GIRL_DELIVERY[index];
+  if (!delivery) return text;
+  return wrapSpoken(weaveCues(text, delivery.every, delivery.cues), delivery.tags);
+}
+
+/** Outer tag first. The same wrappers enclose every word of the line. */
 function wrapSpoken(text: string, tags: readonly string[]): string {
   let spoken = text;
   for (let index = tags.length - 1; index >= 0; index -= 1) {
@@ -152,13 +167,30 @@ function wrapSpoken(text: string, tags: readonly string[]): string {
 }
 
 /**
- * One inline vocalization after speech has already started.
- * A lone word is left as-is so the clip still opens on that word.
+ * One inline vocalization between words, repeated through the line.
+ * Nothing is inserted before the first word or after the last. A single word
+ * stays bare so the clip still opens on that word.
  */
-function cueAfterFirstWord(text: string, cue: "[sigh]" | "[breath]"): string {
-  const split = text.match(/^(\S+)(\s+)([\s\S]+)$/);
-  if (!split) return text;
-  return `${split[1]} ${cue}${split[2]}${split[3]}`;
+function weaveCues(text: string, every: number, cues: readonly string[]): string {
+  if (every <= 0 || cues.length === 0) return text;
+  const tokens = text.split(/(\s+)/);
+  const wordIndexes: number[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    if (token.length > 0 && !/^\s+$/.test(token)) wordIndexes.push(index);
+  }
+  if (wordIndexes.length < 2) return text;
+  let cueAt = 0;
+  for (let word = 0; word < wordIndexes.length - 1; word += 1) {
+    if ((word + 1) % every !== 0) continue;
+    const cue = cues[cueAt % cues.length]!;
+    cueAt += 1;
+    const at = wordIndexes[word]!;
+    const gap = tokens[at + 1];
+    if (gap !== undefined && /^\s+$/.test(gap)) tokens[at + 1] = ` ${cue}${gap}`;
+    else tokens[at] = `${tokens[at]} ${cue}`;
+  }
+  return tokens.join("");
 }
 /** Default MP3 is 128 kbps. Used only to fill duration_millis on the Chat attachment. */
 export const VOICE_MP3_BIT_RATE = 128_000;

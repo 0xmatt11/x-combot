@@ -140,9 +140,10 @@ describe("voice request checks", () => {
     });
     if (horny.ok) {
       expect(horny.spoken).toBe(
-        "<whisper><higher-pitch><build-intensity>hello there</build-intensity></higher-pitch></whisper>",
+        "<whisper><higher-pitch><slow><emphasis>hello there</emphasis></slow></higher-pitch></whisper>",
       );
       expect(horny.spoken).not.toMatch(/horny|nsfw|sexy/i);
+      expect(horny.spoken).not.toMatch(/build-intensity|<fast>/);
       expect(horny.spoken.trimStart()).not.toMatch(/^\[/);
     }
     expect(parseVoiceRequest("6 hello")).toMatchObject({ personaId: "girl6", voiceId: "eve" });
@@ -180,15 +181,56 @@ describe("voice request checks", () => {
     if (peak.ok) {
       expect(peak.voiceId).toBe("eve");
       expect(peak.spoken).toBe(
-        "<loud><fast><higher-pitch><emphasis>say [breath] this</emphasis></higher-pitch></fast></loud>",
+        "<loud><higher-pitch><slow><emphasis>say [sigh] this</emphasis></slow></higher-pitch></loud>",
       );
-      expect(peak.spoken).not.toMatch(/\[breath\]\s+\[inhale\]/);
-      expect(peak.spoken).toMatch(/<loud>.*<fast>.*<higher-pitch>.*<emphasis>say \[breath\] this<\/emphasis>/);
+      expect(peak.spoken.startsWith("<loud>")).toBe(true);
+      expect(peak.spoken.endsWith("</loud>")).toBe(true);
+      expect(peak.spoken).not.toMatch(/\[breath\]\s+\[inhale\]|build-intensity|<fast>/);
     }
     const oneWord = parseVoiceRequest("girl10 yes");
     if (oneWord.ok) {
-      expect(oneWord.spoken).toBe("<loud><fast><higher-pitch><emphasis>yes</emphasis></higher-pitch></fast></loud>");
+      expect(oneWord.spoken).toBe(
+        "<loud><higher-pitch><slow><emphasis>yes</emphasis></slow></higher-pitch></loud>",
+      );
       expect(oneWord.spoken).not.toMatch(/\[[a-z-]+\]/i);
+    }
+    const words = Array.from({ length: 12 }, (_, index) => `w${index + 1}`);
+    const sentence = words.join(" ");
+    const cueCounts: number[] = [];
+    for (let n = 1; n <= 10; n += 1) {
+      const parsed = parseVoiceRequest(`girl${n} ${sentence}`);
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) continue;
+      expect(parsed.spoken.trimStart()).not.toMatch(/^\[/);
+      expect(parsed.spoken).not.toMatch(/\[[a-z-]+\]\s+\[[a-z-]+\]/);
+      expect(parsed.spoken.replace(/<[^>]+>/g, "").replace(/\[[a-z-]+\]/gi, "").replace(/\s+/g, " ").trim()).toBe(
+        sentence,
+      );
+      const cues = parsed.spoken.match(/\[[a-z-]+\]/gi) ?? [];
+      cueCounts.push(cues.length);
+      if (cues.length > 0) {
+        expect(parsed.spoken.indexOf(words[0]!)).toBeLessThan(parsed.spoken.indexOf(cues[0]!));
+        expect(parsed.spoken.lastIndexOf(words[words.length - 1]!)).toBeGreaterThan(
+          parsed.spoken.lastIndexOf(cues[cues.length - 1]!),
+        );
+      }
+    }
+    expect(cueCounts).toEqual([0, 1, 2, 2, 3, 3, 5, 5, 11, 11]);
+    for (let index = 1; index < cueCounts.length; index += 1) {
+      expect(cueCounts[index]).toBeGreaterThanOrEqual(cueCounts[index - 1]!);
+    }
+    const moaned = parseVoiceRequest(`girl10 ${sentence}`);
+    if (moaned.ok) {
+      const gasped = words
+        .map((word, index) => {
+          if (index === 0) return word;
+          const cue = ["[sigh]", "[breath]", "[exhale]"][(index - 1) % 3];
+          return `${cue} ${word}`;
+        })
+        .join(" ");
+      expect(moaned.spoken).toBe(
+        `<loud><higher-pitch><slow><emphasis>${gasped}</emphasis></slow></higher-pitch></loud>`,
+      );
     }
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
     const longLine = "a".repeat(20_000);
@@ -461,7 +503,7 @@ describe("!voice command", () => {
     );
     expect(peak.voice.prompts).toEqual([
       {
-        text: "<loud><fast><higher-pitch><emphasis>say [breath] this</emphasis></higher-pitch></fast></loud>",
+        text: "<loud><higher-pitch><slow><emphasis>say [sigh] this</emphasis></slow></higher-pitch></loud>",
         voiceId: "eve",
       },
     ]);
