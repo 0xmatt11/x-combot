@@ -30,16 +30,9 @@ export type VoicePersonaId =
   | "girl10";
 
 /**
- * Named personas. `voiceId` is always a built-in xAI id already used here.
- * ara is "warm and friendly", eve is "energetic and upbeat".
- * Girls alternate ara and eve. rex, sal, and leo are unused.
- * Numeric aliases 1–10 are the girls. `dude`, `guy`, and `regular` are not voices.
- * Older aliases: `sexy` / `sexygirl` are Girl 1, `scared` / `scaredgirl` are Girl 2,
- * `horny` / `hornygirl` are Girl 6 (the first build-intensity tier).
- * Delivery uses documented speech tags only. xAI has no moan tag; breath, sigh,
- * inhale, and exhale are the pleasure sounds. Tags do not add words to the line.
- * Girl 1 is a mild whisper. Each later girl adds breath, pitch, or intensity.
- * Girl 10 is the peak: gasping breaths around loud, fast, high, building delivery.
+ * Girl 1–10. Labels stay "Girl N". Higher numbers use stronger speech tags.
+ * Tags wrap the line and do not add words. rex, sal, and leo are unused.
+ * dude, guy, and regular are not voices.
  */
 export const VOICE_PERSONAS: readonly {
   id: VoicePersonaId;

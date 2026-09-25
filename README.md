@@ -606,7 +606,7 @@ When the clip is ready, encrypted Chat uploads the mp4 the same way as a photo (
 9. Girl 9 — `!voice girl9 <text>`
 10. Girl 10 — `!voice girl10 <text>`
 
-The bot waits for the clip and posts it in one reply that tags the requester and, in encrypted Chat, replies to the command. The audio caption is only that `@handle`. Synthesis is usually a few seconds, so there is no separate "Speaking…" line. It uses an xAI key (`XAI_API_KEY`, or the grok LLM key stack). With no key the bot says voice needs `XAI_API_KEY`. Browser Imagine does not move `!voice` off that API. It does not use image search, the adult-command switch, or the adult rate limit, and it stays available when `!boobs` is off.
+The bot waits for the clip and posts it in one reply that tags the requester and, in encrypted Chat, replies to the command. The audio caption is only that `@handle`. Synthesis is usually a few seconds, so there is no separate "Speaking…" line. It uses an xAI key (`XAI_API_KEY`, or the grok LLM key stack). With no key the bot says voice needs `XAI_API_KEY`. Browser Imagine does not move `!voice` off that API. It does not use image search or the `!boobs` switch, and it stays available when `!boobs` is off.
 
 The client `POST`s `https://api.x.ai/v1/tts` with `{ "text", "voice_id", "language" }`. `language` is required. The response is raw MP3 bytes. `with_timestamps` is not set. `VOICE_TTS_LANGUAGE` defaults to `en` (a BCP-47 tag such as `pt-BR`, or `auto`). A bad value fails startup. The line is trimmed and sent as written. The bot does not cap its length. Lines that mention minors are refused and are not sent to the API. If synthesis rejects the text for length or moderation, the bot says so in a short line. The spoken text is not written to the log.
 

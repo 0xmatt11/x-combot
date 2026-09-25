@@ -525,7 +525,20 @@ describe("!voice command", () => {
     expect(loaded.help).toMatch(/!voice/);
     expect(loaded.help).toMatch(/Girl 1 through Girl 10/);
     expect(loaded.help).not.toMatch(/regular dude|\bdude\b|\bguy\b|\brex\b/i);
-    expect(loaded.help).not.toMatch(/horny|sexy|scared|orgasm|moan|whisper|intensity|breath/i);
+    const voiceCopy = [
+      VOICE_MENU_MESSAGE,
+      VOICE_TOO_LONG_MESSAGE,
+      VOICE_UNAVAILABLE_MESSAGE,
+      VOICE_FAILED_MESSAGE,
+      VOICE_TOO_LARGE_MESSAGE,
+      VOICE_CHAT_REQUIRED_MESSAGE,
+      VOICE_ATTACH_FAILED_MESSAGE,
+      VOICE_MODERATED_MESSAGE,
+      loaded.help,
+    ].join("\n");
+    expect(voiceCopy).not.toMatch(
+      /horny|sexy|scared|orgasm|pound|moan|whisper|intensity|breath|spicy|erotic|\badult\b/i,
+    );
     expect(loaded.help).not.toMatch(/1500/);
     expect(loaded.welcome.text).not.toMatch(/1500/);
 
@@ -536,7 +549,9 @@ describe("!voice command", () => {
       expect(voice).toContain(`${n}. Girl ${n} —`);
       expect(voice).toContain(`!voice girl${n} <text>`);
     }
-    expect(voice).not.toMatch(/horny|sexy|scared|orgasm|moan|whisper|intensity|breath|sigh|dude|guy|\brex\b/i);
+    expect(voice).not.toMatch(
+      /horny|sexy|scared|orgasm|pound|moan|whisper|intensity|breath|sigh|spicy|erotic|\badult\b|dude|guy|\brex\b/i,
+    );
   });
 
   it("posts the client error line and does not include the API payload", async () => {
