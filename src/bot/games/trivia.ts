@@ -1,45 +1,41 @@
 /**
  * Multiple-choice trivia. One open question per conversation, so anyone
  * in the chat can answer the question that was just posted. The score stays
- * per player, in memory, and is printed with labels, never ids.
+ * per player. The difficulty stays with the conversation: one shared
+ * question cannot be a different tier for each player. Both live in memory
+ * until the process restarts.
+ *
+ * The first `!trivia` in a chat asks for a tier before it deals. After that,
+ * a new round uses the saved tier. `!trivia` while a question is open
+ * reprints it. `!trivia difficulty` asks again. `!trivia hard` switches the
+ * tier for the next question.
  */
 import { pickIndex, playerName } from "./random.js";
 import type { SessionMap } from "./session.js";
 import { joinLines, playerKey, wordsOf, type CasinoContext } from "./stake.js";
+import {
+  TRIVIA_DIFFICULTIES,
+  TRIVIA_DIFFICULTY_WORDS,
+  TRIVIA_QUESTIONS,
+  triviaDifficultyByRank,
+  triviaDifficultyLabel,
+  type TriviaDifficulty,
+  type TriviaQuestion,
+} from "./trivia-bank.js";
+
+export {
+  TRIVIA_DIFFICULTIES,
+  TRIVIA_DIFFICULTY_WORDS,
+  TRIVIA_QUESTIONS,
+  triviaDifficultyByRank,
+  triviaDifficultyLabel,
+};
+export type { TriviaDifficulty, TriviaQuestion };
 
 export const TRIVIA_TTL_MS = 2 * 60 * 1000;
 
 export const TRIVIA_HELP =
-  "Ask with !trivia. One question is open for the chat, and anyone can answer with a, !a, !trivia c, or a short phrase. !trivia score shows the score for this chat.";
-
-export type TriviaQuestion = {
-  prompt: string;
-  choices: readonly [string, string, string, string];
-  answer: 0 | 1 | 2 | 3;
-};
-
-export const TRIVIA_QUESTIONS: readonly TriviaQuestion[] = [
-  { prompt: "How many sides does a standard die have?", choices: ["4", "6", "8", "12"], answer: 1 },
-  { prompt: "What is 2 + 2?", choices: ["3", "4", "5", "22"], answer: 1 },
-  { prompt: "Which planet is closest to the sun?", choices: ["Venus", "Mars", "Mercury", "Earth"], answer: 2 },
-  { prompt: "How many minutes are in an hour?", choices: ["30", "60", "90", "100"], answer: 1 },
-  { prompt: "What color is a clear daytime sky?", choices: ["Green", "Blue", "Red", "Yellow"], answer: 1 },
-  { prompt: "How many letters are in the English alphabet?", choices: ["24", "25", "26", "27"], answer: 2 },
-  { prompt: "Which month has 28 days in a common year?", choices: ["January", "February", "April", "June"], answer: 1 },
-  { prompt: "What is the boiling point of water in Celsius?", choices: ["0", "32", "100", "212"], answer: 2 },
-  { prompt: "How many degrees are in a right angle?", choices: ["45", "90", "180", "360"], answer: 1 },
-  { prompt: "Which animal says meow?", choices: ["Dog", "Cow", "Cat", "Duck"], answer: 2 },
-  { prompt: "What is the capital of France?", choices: ["Lyon", "Paris", "Nice", "Lille"], answer: 1 },
-  { prompt: "How many cards are in a standard deck?", choices: ["36", "48", "52", "54"], answer: 2 },
-  { prompt: "Which way does a compass needle point?", choices: ["South", "East", "West", "North"], answer: 3 },
-  { prompt: "What is 10 × 10?", choices: ["20", "100", "1000", "110"], answer: 1 },
-  { prompt: "How many wheels does a bicycle have?", choices: ["1", "2", "3", "4"], answer: 1 },
-  {
-    prompt: "Which gas do plants take in for photosynthesis?",
-    choices: ["Oxygen", "Nitrogen", "Carbon dioxide", "Helium"],
-    answer: 2,
-  },
-];
+  "Ask with !trivia. The first time in a chat, pick Easy, Medium, Hard, Expert, Master, or Insane (1–6 or !trivia hard). One question is open for the chat, and anyone can answer with a, !a, !trivia c, or a short phrase. !trivia score shows the score. !trivia difficulty changes the tier.";
 
 const LETTERS = ["a", "b", "c", "d"] as const;
 
@@ -56,8 +52,21 @@ export type TriviaScore = {
   lastIndex?: number;
 };
 
+type TriviaChat = {
+  difficulty?: TriviaDifficulty;
+  awaiting: boolean;
+  lastIndex?: number;
+};
+
+type TriviaAction =
+  | { kind: "ask" | "score" | "help" | "menu" }
+  | { kind: "answer"; choice: number }
+  | { kind: "digit"; digit: number }
+  | { kind: "difficulty"; difficulty: TriviaDifficulty };
+
 export class TriviaBook {
   private readonly scores = new Map<string, TriviaScore>();
+  private readonly chats = new Map<string, TriviaChat>();
 
   get(key: string): TriviaScore | undefined {
     return this.scores.get(key);
@@ -73,6 +82,46 @@ export class TriviaBook {
     }
   }
 
+  difficultyOf(conversationId: string): TriviaDifficulty | undefined {
+    return this.chats.get(conversationId)?.difficulty;
+  }
+
+  /** True after the bot asked for a tier and nobody has picked yet. */
+  awaitingDifficulty(conversationId: string): boolean {
+    return this.chats.get(conversationId)?.awaiting === true;
+  }
+
+  lastIndex(conversationId: string): number | undefined {
+    return this.chats.get(conversationId)?.lastIndex;
+  }
+
+  markAwaiting(conversationId: string): void {
+    const prior = this.chats.get(conversationId);
+    this.putChat(conversationId, {
+      difficulty: prior?.difficulty,
+      awaiting: true,
+      lastIndex: prior?.lastIndex,
+    });
+  }
+
+  setDifficulty(conversationId: string, difficulty: TriviaDifficulty): void {
+    const prior = this.chats.get(conversationId);
+    this.putChat(conversationId, {
+      difficulty,
+      awaiting: false,
+      lastIndex: prior?.lastIndex,
+    });
+  }
+
+  rememberQuestion(conversationId: string, index: number): void {
+    const prior = this.chats.get(conversationId);
+    this.putChat(conversationId, {
+      difficulty: prior?.difficulty,
+      awaiting: false,
+      lastIndex: index,
+    });
+  }
+
   /** Scores in one conversation, highest correct first. Skips anyone still at 0–0. */
   board(conversationId: string): { label: string; correct: number; wrong: number }[] {
     const prefix = `${conversationId}\u0000`;
@@ -84,6 +133,16 @@ export class TriviaBook {
     }
     rows.sort((a, b) => b.correct - a.correct || a.wrong - b.wrong || a.label.localeCompare(b.label));
     return rows.slice(0, 8);
+  }
+
+  private putChat(conversationId: string, chat: TriviaChat): void {
+    this.chats.delete(conversationId);
+    this.chats.set(conversationId, chat);
+    while (this.chats.size > 2_000) {
+      const oldest = this.chats.keys().next().value;
+      if (oldest === undefined) break;
+      this.chats.delete(oldest);
+    }
   }
 }
 
@@ -100,6 +159,26 @@ export function playTrivia(
 
   const sessionKey = ctx.conversationId;
   const existing = sessions.take(sessionKey, ctx.nowMs);
+
+  if (action.kind === "menu") {
+    book.markAwaiting(ctx.conversationId);
+    return difficultyMenu(book.difficultyOf(ctx.conversationId));
+  }
+
+  if (action.kind === "digit") {
+    if (existing.status === "live" && action.digit <= 4) {
+      sessions.delete(sessionKey);
+      return answer(book, ctx, scoreKey, existing.value.index, action.digit - 1);
+    }
+    const difficulty = triviaDifficultyByRank(action.digit);
+    if (!difficulty) return TRIVIA_HELP;
+    return applyDifficulty(sessions, book, ctx, scoreKey, sessionKey, existing, difficulty);
+  }
+
+  if (action.kind === "difficulty") {
+    return applyDifficulty(sessions, book, ctx, scoreKey, sessionKey, existing, action.difficulty);
+  }
+
   if (action.kind === "answer") {
     if (existing.status === "expired") {
       return "That question expired. Ask again with !trivia.";
@@ -113,11 +192,43 @@ export function playTrivia(
     sessions.touch(sessionKey, ctx.nowMs);
     return askText(existing.value.askerLabel, existing.value.index);
   }
-  const last = book.get(scoreKey)?.lastIndex;
-  let index = pickIndex(TRIVIA_QUESTIONS.length, ctx.rng);
-  if (last !== undefined && index === last && TRIVIA_QUESTIONS.length > 1) {
-    index = (index + 1) % TRIVIA_QUESTIONS.length;
+
+  const saved = book.difficultyOf(ctx.conversationId);
+  if (!saved) {
+    book.markAwaiting(ctx.conversationId);
+    const expired = existing.status === "expired" ? "That question expired." : undefined;
+    return joinLines([expired, difficultyMenu()]);
   }
+  return deal(sessions, book, ctx, scoreKey, sessionKey, existing, saved);
+}
+
+function applyDifficulty(
+  sessions: SessionMap<TriviaRound>,
+  book: TriviaBook,
+  ctx: CasinoContext,
+  scoreKey: string,
+  sessionKey: string,
+  existing: ReturnType<SessionMap<TriviaRound>["take"]>,
+  difficulty: TriviaDifficulty,
+): string {
+  book.setDifficulty(ctx.conversationId, difficulty);
+  if (existing.status === "live") {
+    const label = triviaDifficultyLabel(difficulty);
+    return `This chat is now on ${label}. The next question uses it.`;
+  }
+  return deal(sessions, book, ctx, scoreKey, sessionKey, existing, difficulty);
+}
+
+function deal(
+  sessions: SessionMap<TriviaRound>,
+  book: TriviaBook,
+  ctx: CasinoContext,
+  scoreKey: string,
+  sessionKey: string,
+  existing: ReturnType<SessionMap<TriviaRound>["take"]>,
+  difficulty: TriviaDifficulty,
+): string {
+  const index = pickQuestionIndex(difficulty, ctx, book.lastIndex(ctx.conversationId));
   const prior = book.get(scoreKey);
   book.put(scoreKey, {
     correct: prior?.correct ?? 0,
@@ -125,9 +236,25 @@ export function playTrivia(
     label: ctx.label,
     lastIndex: index,
   });
+  book.rememberQuestion(ctx.conversationId, index);
   sessions.set(sessionKey, { index, askerLabel: ctx.label }, ctx.nowMs);
   const expired = existing.status === "expired" ? "That question expired." : undefined;
   return joinLines([expired, askText(ctx.label, index)]);
+}
+
+function pickQuestionIndex(difficulty: TriviaDifficulty, ctx: CasinoContext, last?: number): number {
+  const pool: number[] = [];
+  TRIVIA_QUESTIONS.forEach((question, index) => {
+    if (question.difficulty === difficulty) pool.push(index);
+  });
+  if (pool.length === 0) return 0;
+  let index = pool[pickIndex(pool.length, ctx.rng)]!;
+  if (last !== undefined && index === last && pool.length > 1) {
+    const at = pool.indexOf(last);
+    const from = at >= 0 ? at : 0;
+    index = pool[(from + 1) % pool.length]!;
+  }
+  return index;
 }
 
 function answer(
@@ -159,11 +286,24 @@ function answer(
 
 function askText(label: string, index: number): string {
   const question = TRIVIA_QUESTIONS[index] ?? TRIVIA_QUESTIONS[0]!;
-  const lines = [`❓ ${playerName(label)}`, question.prompt];
+  const tier = triviaDifficultyLabel(question.difficulty);
+  const lines = [`❓ ${playerName(label)} · ${tier}`, question.prompt];
   question.choices.forEach((choice, i) => {
     lines.push(`${LETTERS[i]}) ${choice}`);
   });
   lines.push("Reply a, !a, or a short phrase.");
+  return lines.join("\n");
+}
+
+function difficultyMenu(current?: TriviaDifficulty): string {
+  const lead = current
+    ? `This chat is on ${triviaDifficultyLabel(current)}. Pick a tier. The next question uses it.`
+    : "How hard? This chat keeps the tier.";
+  const lines = [lead];
+  for (const row of TRIVIA_DIFFICULTIES) {
+    lines.push(`${row.rank} ${row.label}`);
+  }
+  lines.push("Reply 1–6, a name, or !trivia easy.");
   return lines.join("\n");
 }
 
@@ -182,17 +322,18 @@ function scoreText(book: TriviaBook, ctx: CasinoContext, key: string): string {
   return lines.join("\n");
 }
 
-function parseTriviaArgs(
-  args: string,
-): { kind: "ask" | "score" | "help" } | { kind: "answer"; choice: number } {
+function parseTriviaArgs(args: string): TriviaAction {
   const words = wordsOf(args);
   if (words.length === 0) return { kind: "ask" };
   if (words.length !== 1) return { kind: "help" };
   const word = words[0]!.toLowerCase();
   if (word === "help") return { kind: "help" };
   if (word === "score" || word === "scores") return { kind: "score" };
+  if (word === "difficulty" || word === "level" || word === "diff") return { kind: "menu" };
   const letter = LETTERS.indexOf(word as (typeof LETTERS)[number]);
   if (letter >= 0) return { kind: "answer", choice: letter };
-  if (/^[1-4]$/.test(word)) return { kind: "answer", choice: Number(word) - 1 };
+  if (/^[1-6]$/.test(word)) return { kind: "digit", digit: Number(word) };
+  const named = TRIVIA_DIFFICULTY_WORDS[word];
+  if (named) return { kind: "difficulty", difficulty: named };
   return { kind: "help" };
 }

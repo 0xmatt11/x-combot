@@ -2,9 +2,11 @@
  * Cheap reads of a chat line as a move in an open game.
  * Deterministic forms stay here. The engine calls the chat LLM only when
  * a trivia question is open and the line looks like an answer but is not
- * one of these forms.
+ * one of these forms. A pending difficulty prompt is also read here, and
+ * that read never calls the model.
  */
 import type { ChatMessage } from "../../llm/client.js";
+import { TRIVIA_DIFFICULTY_WORDS, type TriviaDifficulty } from "./trivia-bank.js";
 
 const LETTERS = ["a", "b", "c", "d"] as const;
 
@@ -44,6 +46,35 @@ export function deterministicTriviaChoice(text: string): number | undefined {
   );
   if (go?.[1]) return LETTERS.indexOf(go[1].toLowerCase() as (typeof LETTERS)[number]);
 
+  return undefined;
+}
+
+/**
+ * A trivia tier, or undefined.
+ * Used while the chat is waiting on a difficulty: `3`, `!hard`, `!triviaeasy`,
+ * `go with expert`. Digits 1–4 are still answers when a question is open;
+ * the engine checks that first.
+ */
+export function deterministicTriviaDifficulty(text: string): TriviaDifficulty | undefined {
+  const line = normalize(text);
+  if (!line || line.length > 80) return undefined;
+
+  const direct = line.match(/^[!/]?([a-z0-9]+)[.!?]*$/i);
+  if (direct?.[1]) {
+    const hit = TRIVIA_DIFFICULTY_WORDS[direct[1].toLowerCase()];
+    if (hit) return hit;
+  }
+
+  const glued = line.match(/^[!/]?(?:trivia|quiz)\s*([a-z0-9]+)[.!?]*$/i);
+  if (glued?.[1]) {
+    const hit = TRIVIA_DIFFICULTY_WORDS[glued[1].toLowerCase()];
+    if (hit) return hit;
+  }
+
+  const phrase = line.match(
+    /^(?:i\s+)?(?:think|guess|want|say|pick|choose|go with|going with|i(?:'ll| will) go with|let'?s do|make it|set(?: it)? to)\s+(?:it'?s\s+|its\s+)?([a-z0-9]+)\b[.!?]*$/i,
+  );
+  if (phrase?.[1]) return TRIVIA_DIFFICULTY_WORDS[phrase[1].toLowerCase()];
   return undefined;
 }
 
