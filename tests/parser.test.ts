@@ -275,6 +275,8 @@ describe("parseCommand", () => {
     expect(parseCommand("!crash auto 2.5")).toEqual({ name: "crash", args: "auto 2.5" });
     expect(parseCommand("!trivia")).toEqual({ name: "trivia", args: "" });
     expect(parseCommand("/quiz b")).toEqual({ name: "trivia", args: "b" });
+    expect(parseCommand("!ship @alice @bob")).toEqual({ name: "ship", args: "@alice @bob" });
+    expect(parseCommand("!ship Matt Milady")).toEqual({ name: "ship", args: "Matt Milady" });
     expect(parseCommand("!hit")).toEqual({ name: "hit", args: "" });
     expect(parseCommand("!stand")).toEqual({ name: "stand", args: "" });
     expect(parseUnknownBang("!blackjack")).toBeUndefined();
@@ -283,6 +285,7 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!roulette 17")).toBeUndefined();
     expect(parseUnknownBang("!crash")).toBeUndefined();
     expect(parseUnknownBang("!trivia a")).toBeUndefined();
+    expect(parseUnknownBang("!ship @alice")).toBeUndefined();
     expect(parseUnknownBang("!hit")).toBeUndefined();
     expect(parseUnknownBang("!stand")).toBeUndefined();
   });

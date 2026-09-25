@@ -51,6 +51,7 @@ help: |
   !higherlower — cards. !wouldyourather — vote. !truthordare — a prompt
   !tictactoe !connect4 !duel !hangman !story — play with someone
   !slots !blackjack !poker !roulette !crash !trivia — casino and quiz
+  Open round: a letter, !a, or a short phrase. !ship — @handle or a name in this chat.
 
 admin_help: |
   Admin commands. Not on !help. Reply to someone, or pass @user.

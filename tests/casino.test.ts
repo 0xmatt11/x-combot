@@ -419,6 +419,28 @@ describe("!trivia", () => {
     expect(score).not.toContain(snowflake);
     expect(playTrivia(sessions, book, ctx, "maybe")).toBe(TRIVIA_HELP);
   });
+
+  it("lets anyone in the chat answer the open question", () => {
+    const sessions = new CasinoTable().trivia;
+    const book = new TriviaBook();
+    const bank = wallet();
+    const asker = context(bank.xp, { userId: "u-alice", label: "@alice", rng: () => 0 });
+    const other = context(bank.xp, {
+      userId: "u-bob",
+      label: "@bob",
+      rng: () => 0,
+    });
+    const asked = playTrivia(sessions, book, asker, "");
+    expect(asked).toContain("❓ @alice");
+    const reprint = playTrivia(sessions, book, other, "");
+    expect(reprint).toContain(TRIVIA_QUESTIONS[0]!.prompt);
+    expect(reprint).toContain("❓ @alice");
+    const answered = playTrivia(sessions, book, other, "b");
+    expect(answered).toContain("@bob — correct.");
+    expect(answered).toContain("@bob: 1 right, 0 wrong.");
+    expect(playTrivia(sessions, book, asker, "score")).toContain("@alice: 0 right, 0 wrong.");
+    expect(playTrivia(sessions, book, other, "score")).toContain("@bob: 1 right, 0 wrong.");
+  });
 });
 
 describe("casino commands", () => {

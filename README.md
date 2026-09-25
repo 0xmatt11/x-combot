@@ -286,7 +286,8 @@ In chat, `!help` is the short menu below. Later sections are the full behavior. 
 | `!wordle` / `!anagram` / `!scramble` / `!guess` | Word and number rounds |
 | `!higherlower` / `!wouldyourather` / `!truthordare` | Cards, a vote, a prompt |
 | `!tictactoe` / `!connect4` / `!duel` / `!hangman` / `!story` | Play with someone |
-| `!slots` / `!blackjack` / `!poker` / `!roulette` / `!crash` / `!trivia` | Casino and quiz |
+| `!slots` / `!blackjack` / `!poker` / `!roulette` / `!crash` / `!trivia` | Casino and quiz. An open round also takes a letter, `!a`, or a short phrase |
+| `!ship` | Two people in this chat. `@handle` or a display name |
 
 `!admin` is the admin list for the owner, `ADMIN_IDS`, and per-group admins. Anyone else gets the same deny as other mod commands. `/admin` is the same. `!admin add` and `!admin remove` still change the allowlist.
 
@@ -356,7 +357,9 @@ The same giver can change the same target only once per `xp.level_grant_cooldown
 
 ## Games
 
-Anyone can play. There is no admin gate. `!games` prints the catalog in groups: instant (`!dice`, `!rps`, `!coinflip`, `!8ball`), board (`!minesweeper`), word/solo (`!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`), multiplayer (`!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`), and XP/casino (`!slots`, `!blackjack` / `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`). Every command in that catalog is playable. `!hit` draws on an open blackjack hand. `!stand` holds an open blackjack or poker hand, and asks which one when both are open. `/games` works the same way. A minesweeper board expires after 15 minutes without a move. The word and solo rounds stay in memory for this process and drop after 30 minutes of quiet.
+Anyone can play. There is no admin gate. `!games` prints the catalog in groups: instant (`!dice`, `!rps`, `!coinflip`, `!8ball`), board (`!minesweeper`), word/solo (`!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`), multiplayer (`!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`), XP/casino (`!slots`, `!blackjack` / `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`), and social (`!ship`). Every command in that catalog is playable. `!hit` draws on an open blackjack hand. `!stand` holds an open blackjack or poker hand, and asks which one when both are open. `/games` works the same way. A minesweeper board expires after 15 minutes without a move. The word and solo rounds stay in memory for this process and drop after 30 minutes of quiet.
+
+While a round is open, a move does not need the full bang. Trivia comes first: `a`, `A`, `!a`, `!A`, `!trivia c`, and glued `!triviac` are answers, and so is a short phrase such as `I think it's A` or `go with b`. A bare letter is read directly. A short line that is clearly an answer but not one of those forms can use the chat LLM, and only then. Other messages in the chat are not sent to the model for this. The same idea covers an open would-you-rather vote (`a` / `b`), a higher-or-lower call (`higher`, `h`), a bare `hit` or `stand` on your open hand, and a tic-tac-toe, connect-four, duel, or hangman turn when it is your move (`5`, `attack`, `e`). Trivia wins when a letter could be either. `!games` repeats the short version of this.
 
 `!dice` rolls **1d6** and replies `🎲 @handle rolled a 4` (or `an 8`). The name is `@username` when a handle is known, otherwise the display name. Encrypted Chat events often carry only a numeric sender id, so the bot looks that id up (`GET /2/users/:id`) before choosing the name, the same lookup leave announcements use. With neither a handle nor a display name, the reply says `someone` and never prints the raw user id. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice, 100 sides, and a modifier of 1000. Anything else gets a one-line usage reply. `/dice` works the same way.
 
@@ -396,7 +399,7 @@ Names in these replies are `@handle`, a display name, or `someone`, using the sa
 
 Bets are **1–100**. Leave the amount off and the bet is **10 fun chips**. Fun chips start at **100** for each player in a conversation, live only in this process, and refill to 100 after they hit 0. Say `xp` to wager XP instead: `!slots xp 10`, `!blackjack 10 xp`. That debit happens only when XP is on and the balance covers the whole bet, so a wallet cannot go negative. The reply shows the balance before the bet and after the payout. A win that crosses a level adds the usual level-up line. XP that is off refuses the XP bet and leaves fun chips available.
 
-Open hands (`!blackjack`, `!poker`, `!crash`) and trivia questions are in-memory sessions keyed by conversation and player. They are swept when they expire or when the map is past its cap. A blackjack, poker, or crash bet that expires is lost. Trivia has no bet.
+Open hands (`!blackjack`, `!poker`, `!crash`) are in-memory sessions keyed by conversation and player. A trivia question is one session for the conversation, so anyone in the chat can answer the question that was posted. Scores stay per player. They are swept when they expire or when the map is past its cap. A blackjack, poker, or crash bet that expires is lost. Trivia has no bet.
 
 `!slots` spins three reels (cherry, lemon, orange, grape, diamond, seven). A pair returns the bet. Three of a kind pays 4×, grapes 5×, diamonds 8×, sevens 10×.
 
@@ -408,7 +411,9 @@ Open hands (`!blackjack`, `!poker`, `!crash`) and trivia questions are in-memory
 
 `!crash` hides a crash point and starts at 1.00×. The shown multiplier climbs with time (`e^(seconds/8)`, capped at 100×). `!crash out` wins when that multiplier is still below the crash point; landing on it or after it loses. Winnings are the bet times the multiplier, rounded down to an integer. `!crash auto 2.5` picks the cash-out in one message (1.01× through 100×, at most two decimals). A round expires after 10 minutes.
 
-`!trivia` asks a multiple-choice question. `!trivia a` (or `b`, `c`, `d`, or `1`–`4`) answers. `!trivia score` prints that player's score and up to eight labeled rows for the conversation. Questions expire after 2 minutes. Scores stay in memory until the process restarts.
+`!trivia` asks a multiple-choice question for the whole chat. `!trivia` again, from anyone, reprints that question instead of replacing it. Anyone can answer with `!trivia a` (or `b`, `c`, `d`, or `1`–`4`), or, while it is open, with `a`, `!a`, `!triviac`, or a short phrase. The player who answers gets the point. `!trivia score` prints that player's score and up to eight labeled rows for the conversation. Questions expire after 2 minutes. Scores stay in memory until the process restarts.
+
+`!ship @0xMatt66 @miladybot669` pairs two people who are in this chat. `!ship Matt Milady` does the same when those display names, or a unique first name or other substring, match one member each. A leading `@` and letter case are ignored. One name ships you with that person. The percent is stable for the pair. Names that match more than one member are asked again. Someone who has not been seen in this conversation is not shipped.
 
 ## Adult photos
 
@@ -596,7 +601,7 @@ Independent of the X API tier. The bot calls OpenAI-compatible **Chat Completion
 
 **Grok.** `Authorization: Bearer $XAI_API_KEY` against `https://api.x.ai/v1/chat/completions`. Create a key at [console.x.ai](https://console.x.ai). xAI also documents a Responses API; this bot stays on Chat Completions so every provider shares one client. Default model is `grok-4.6`. `LLM_PROVIDER=grok` or `openai` without a key exits at startup. Leaving the provider unset and omitting keys still starts the bot; `!ask` then explains how to configure it. Local providers do not require a cloud key. `127.0.0.1` only works when the bot process can open that port.
 
-Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!hit`, `!stand`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
+Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!troll`, `!untroll`, `!roast`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!ship`, `!hit`, `!stand`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
 
 | `llm.context_mode` | What is sent | Reads |
 | --- | --- | --- |

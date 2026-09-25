@@ -137,6 +137,29 @@ export class GameRoom {
     return [...this.sessions.keys()];
   }
 
+  /**
+   * A bare move for a game where this player can act.
+   * The whole message has to be the move. Sentences are left alone.
+   * Story lines are not taken this way.
+   */
+  looseCommand(
+    conversationId: string,
+    userId: string,
+    text: string,
+    nowMs: number,
+  ): { kind: Exclude<MultiplayerKind, "story">; args: string } | undefined {
+    const args = text.trim().replace(/^[!/]\s*/, "");
+    if (!this.looseShape(args)) return undefined;
+    const order = ["tictactoe", "connect4", "duel", "hangman"] as const;
+    for (const kind of order) {
+      const session = this.current(conversationId, kind);
+      if (!session) continue;
+      if (nowMs - session.updatedAt >= ttl(session)) continue;
+      if (this.looseFits(session, userId, args)) return { kind, args };
+    }
+    return undefined;
+  }
+
   play(kind: MultiplayerKind, input: PlayInput): string {
     const actor = namedPlayer(input.actor.id, input.actor.label);
     const challenged = input.challenged
@@ -626,6 +649,39 @@ export class GameRoom {
     if (nowMs - session.updatedAt < ttl(session)) return false;
     this.remove(session);
     return true;
+  }
+
+  private looseShape(args: string): boolean {
+    if (!args || args.length > 20) return false;
+    if (!/\s/.test(args)) return true;
+    return /^(?:play|move|square|drop|col|column)\s+\S+$/i.test(args);
+  }
+
+  /** True when this player may make this move right now. Does not change the session. */
+  private looseFits(session: LiveSession, userId: string, args: string): boolean {
+    if (session.kind === "tictactoe") {
+      if (parseTictactoeSquare(args) === undefined) return false;
+      if (session.phase === "pending") return session.opponent.id === userId;
+      return session.turn !== undefined && seatOf(session, userId) === session.turn;
+    }
+    if (session.kind === "connect4") {
+      if (parseConnect4Column(args) === undefined) return false;
+      if (session.phase === "pending") return session.opponent.id === userId;
+      return session.turn !== undefined && seatOf(session, userId) === session.turn;
+    }
+    if (session.kind === "duel") {
+      if (!parseDuelAction(args)) return false;
+      if (session.phase === "pending") return session.opponent.id === userId;
+      return session.turn !== undefined && seatOf(session, userId) === session.turn;
+    }
+    if (session.kind !== "hangman") return false;
+    const guess = parseHangmanGuess(args);
+    if (!guess || guess.kind !== "letter") return false;
+    const seat = hangmanSeat(session, userId);
+    if (!seat) return false;
+    if (session.phase === "pending") return seat === "opponent";
+    if (session.mode === "solo") return seat === "challenger";
+    return session.turn === seat;
   }
 
   private current(conversationId: string, kind: MultiplayerKind): LiveSession | undefined {
