@@ -77,6 +77,14 @@ import {
   type MiladyLookup,
 } from "./milady.js";
 import {
+  createUndertowLookup,
+  isSafeUndertowImageUrl,
+  UNDERTOW_UNAVAILABLE,
+  UndertowLookupError,
+  type UndertowLookup,
+  type UndertowPiece,
+} from "./undertow.js";
+import {
   formatImagineModerationReply,
   imaginePromptRejection,
   ImagineError,
@@ -282,7 +290,13 @@ export interface EngineDeps {
    * This command does not call Imagine or api.x.ai.
    */
   milady?: MiladyLookup;
-  /** Optional `OPENSEA_API_KEY`. Unused when `milady` is injected. */
+  /**
+   * OpenSea Created-tab lookup for `!undertow`. Absent means the engine builds
+   * the default client on first use. Same `openseaApiKey` as `!milady`.
+   * This command does not call Imagine or api.x.ai.
+   */
+  undertow?: UndertowLookup;
+  /** Optional `OPENSEA_API_KEY` for the default `!milady` and `!undertow` clients. */
   openseaApiKey?: string;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
@@ -412,6 +426,8 @@ export class ModerationEngine {
   private ownedCheeseSearch?: CheeseImageSearch;
   /** Built on the first `!milady` when `deps.milady` was not injected. */
   private ownedMilady?: MiladyLookup;
+  /** Built on the first `!undertow` when `deps.undertow` was not injected. */
+  private ownedUndertow?: UndertowLookup;
   /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
   private readonly featureRequests = new Map<string, FeatureRequestSession>();
   private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -2177,6 +2193,9 @@ export class ModerationEngine {
       case "milady":
         await this.handleMilady(event, command.extra, actions);
         return;
+      case "undertow":
+        await this.handleUndertow(event, command.extra, actions);
+        return;
       case "imagine":
         await this.handleImagine(event, command.prompt, actions);
         return;
@@ -2790,6 +2809,81 @@ export class ModerationEngine {
       random: () => this.nextRandom(),
     });
     return this.ownedMilady;
+  }
+
+  /**
+   * `!undertow` posts one image from the hardcoded OpenSea Created tab.
+   * Extra words are ignored except a banned age term, which is refused.
+   * The lookup is OpenSea only. This does not call Imagine or api.x.ai, and
+   * a failure does not post a link.
+   */
+  private async handleUndertow(
+    event: DmEvent,
+    extra: string | undefined,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (extra && containsBannedAgeTerm(extra)) {
+      log.warn(`Refused !undertow with unsafe extra text conversation=${conversationId}`);
+      await this.reply(conversationId, "Refused. !undertow does not search custom text.", actions);
+      return;
+    }
+
+    const lookup = this.undertowClient();
+    let image: UndertowPiece;
+    try {
+      image = await lookup.randomImage();
+    } catch (error) {
+      const userMessage = error instanceof UndertowLookupError ? error.userMessage : UNDERTOW_UNAVAILABLE;
+      const detail = redactSecrets(error instanceof Error ? error.message : "lookup failed");
+      log.warn(`!undertow lookup failed conversation=${conversationId}: ${detail}`);
+      await this.reply(conversationId, userMessage, actions);
+      return;
+    }
+
+    if (!isSafeUndertowImageUrl(image.url)) {
+      log.warn(`!undertow skipped an unsafe image url conversation=${conversationId}`);
+      await this.reply(conversationId, UNDERTOW_UNAVAILABLE, actions);
+      return;
+    }
+
+    const host = imageHost(image.url);
+    const caption = await this.commandCaption(event);
+    let fetched: AdultVisionImage | undefined;
+    if (this.deps.fetchImage) {
+      try {
+        fetched = await this.deps.fetchImage(image.url);
+      } catch {
+        fetched = undefined;
+      }
+    }
+    if (!fetched || fetched.bytes.byteLength === 0) {
+      log.warn(`!undertow image download failed conversation=${conversationId} host=${host}`);
+      await this.reply(conversationId, UNDERTOW_UNAVAILABLE, actions);
+      return;
+    }
+    try {
+      await this.client.sendImage(conversationId, {
+        url: image.url,
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+        ...(caption ? { caption } : {}),
+      });
+      log.info(`!undertow posted native image conversation=${conversationId} host=${host}`);
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : String(error));
+      log.warn(`!undertow native attach failed conversation=${conversationId} host=${host} (${detail})`);
+      await this.reply(conversationId, UNDERTOW_UNAVAILABLE, actions);
+    }
+  }
+
+  private undertowClient(): UndertowLookup {
+    if (this.deps.undertow) return this.deps.undertow;
+    this.ownedUndertow ??= createUndertowLookup({
+      apiKey: this.deps.openseaApiKey,
+      random: () => this.nextRandom(),
+    });
+    return this.ownedUndertow;
   }
 
   private async handleAdultImage(

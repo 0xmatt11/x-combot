@@ -199,6 +199,19 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!milady please")).toBeUndefined();
   });
 
+  it("parses !undertow and keeps extra text off the lookup", () => {
+    expect(parseCommand("!undertow")).toEqual({ name: "undertow" });
+    expect(parseCommand("!UNDERTOW")).toEqual({ name: "undertow" });
+    expect(parseCommand("  /undertow  ")).toEqual({ name: "undertow" });
+    expect(parseCommand("!undertow please")).toEqual({ name: "undertow", extra: "please" });
+    expect(parseCommand("!undertow background red")).toEqual({
+      name: "undertow",
+      extra: "background red",
+    });
+    expect(parseUnknownBang("!undertow")).toBeUndefined();
+    expect(parseUnknownBang("!undertow please")).toBeUndefined();
+  });
+
   it("parses xp, level, rank, and the leaderboard aliases", () => {
     expect(parseCommand("!xp")).toEqual({ name: "xp" });
     expect(parseCommand("/level")).toEqual({ name: "xp" });
