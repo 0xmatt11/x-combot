@@ -130,7 +130,11 @@ export function buildLlmMessages(params: {
   question: string;
   askerLabel: string;
   kind: "ask" | "summarize" | "analyze";
-}): { role: "system" | "user"; content: string }[] {
+  /** Public timeline notes already fetched for this question. */
+  extraContext?: string;
+  /** Short note that lookup_user_timeline and web_search exist. */
+  toolNote?: string;
+}): ChatMessage[] {
   const instruction =
     params.kind === "summarize"
       ? "Summarize this group Direct Message thread. Call out decisions, open questions, and action items. If a focus was given, weight that."
@@ -141,12 +145,19 @@ export function buildLlmMessages(params: {
   const user = [
     instruction,
     formatContextBlock(params.context),
+    params.extraContext?.trim() || undefined,
     `Current ${params.kind === "ask" ? "question" : "request"} from ${params.askerLabel}:`,
     params.question || "(no extra prompt)",
-  ].join("\n\n");
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+
+  const system = params.toolNote?.trim()
+    ? `${params.systemPrompt.trim()}\n\n${params.toolNote.trim()}`
+    : params.systemPrompt;
 
   return [
-    { role: "system", content: params.systemPrompt },
+    { role: "system", content: system },
     { role: "user", content: user },
   ];
 }

@@ -43,7 +43,19 @@ import {
   linkroastFallback,
   messageHasRoastableLink,
   sanitizeLinkroastReply,
+  statusAuthorHandles,
 } from "./linkroast.js";
+import {
+  formatTimelineContext,
+  formatTimelineResult,
+  PublicTimelineLookup,
+  type PublicTimeline,
+} from "./timeline.js";
+import { prefetchTimelines, subjectsForQuestion } from "./user-context.js";
+import { createWebSearch, formatWebSearchResult, type WebSearch } from "./web-search.js";
+import { runAgent, type AgentTool } from "../llm/agent.js";
+import { USER_CONTEXT_TOOL_NOTE } from "../llm/tools.js";
+import { LlmWorkerPool, MAX_IN_PROCESS_LLM_WORKERS } from "../llm/workers.js";
 import {
   ADULT_IMAGE_RETRY_MESSAGE,
   ADULT_VISION_UNAVAILABLE_MESSAGE,
@@ -330,6 +342,18 @@ export interface EngineDeps {
     /** Clarifying questions before filing. Clamped to 1–3. Default 3. */
     maxQuestions?: number;
   };
+  /**
+   * Public X timeline cache shared by `!ask`, `!troll`, `!roast`, and `!linkroast`.
+   * Absent means one cache for this process, backed by `client`.
+   */
+  timeline?: PublicTimelineLookup;
+  /** Keyless web search for the chat model. Absent means DuckDuckGo HTML. */
+  webSearch?: WebSearch;
+  /**
+   * In-process LLM worker slots for `!ask`. Absent means a pool of 5.
+   * This does not call another assistant.
+   */
+  llmWorkers?: LlmWorkerPool;
 }
 
 /**
@@ -391,6 +415,12 @@ export class ModerationEngine {
   /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
   private readonly featureRequests = new Map<string, FeatureRequestSession>();
   private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Built on first use when `deps.timeline` was not injected. */
+  private ownedTimeline?: PublicTimelineLookup;
+  /** Built on first use when `deps.webSearch` was not injected. */
+  private ownedSearch?: WebSearch;
+  /** Built on first use when `deps.llmWorkers` was not injected. Max 5 slots. */
+  private ownedWorkers?: LlmWorkerPool;
 
   constructor(
     private readonly store: Store,
@@ -908,8 +938,9 @@ export class ModerationEngine {
           ? request.prompt || "What are the main topics, decisions, and unanswered questions?"
           : request.prompt;
 
+    const timelines = await this.timelinesForQuestion(event, question);
     log.info(
-      `LLM ${request.kind} conversation=${conversationId} user=${senderId} mode=${assembled.mode} turns=${assembled.turns.length} truncated=${assembled.truncated} x_pages=${pages}`,
+      `LLM ${request.kind} conversation=${conversationId} user=${senderId} mode=${assembled.mode} turns=${assembled.turns.length} truncated=${assembled.truncated} x_pages=${pages} timelines=${timelines.length}`,
     );
 
     try {
@@ -919,8 +950,16 @@ export class ModerationEngine {
         question,
         askerLabel: await this.chatLabel(event.sender, senderId, conversationId),
         kind: request.kind,
+        extraContext: formatTimelineContext(timelines),
+        toolNote: USER_CONTEXT_TOOL_NOTE,
       });
-      const answer = await this.llmClient.complete(messages);
+      const answer = await runAgent({
+        llm: this.llmClient,
+        pool: this.llmPool(),
+        messages,
+        tools: this.contextTools(),
+        parallelQuestion: request.kind === "ask" ? question : undefined,
+      });
       const chunks = splitReply(answer, settings.llmMaxReplyChars);
       for (const chunk of chunks) {
         await this.reply(conversationId, chunk, actions);
@@ -1378,8 +1417,20 @@ export class ModerationEngine {
       );
       return linkroastFallback(label, rng);
     }
+    const linked = statusAuthorHandles(latest, event.linkSignals?.urls ?? [])[0];
+    let posts: string[] = [];
+    if (linked) {
+      try {
+        const row = await this.publicTimelines().lookup({ username: linked });
+        posts = row.posts;
+      } catch (error) {
+        log.warn(`Link roast timeline fetch failed conversation=${event.conversationId}`, error);
+      }
+    }
     try {
-      const answer = await this.llmClient.complete(buildLinkroastMessages({ label, latest }));
+      const answer = await this.llmClient.complete(
+        buildLinkroastMessages({ label, latest, posts }),
+      );
       return sanitizeLinkroastReply(answer, label, [event.senderId ?? ""], rng);
     } catch (error) {
       log.warn(`Link roast completion failed conversation=${event.conversationId}`, error);
@@ -1484,15 +1535,13 @@ export class ModerationEngine {
 
   private async trollPosts(conversationId: string, userId: string): Promise<string[]> {
     try {
-      const posts = await this.client.listRecentPosts(userId);
-      const kept: string[] = [];
-      for (const post of posts) {
-        const text = stripApiIds(post).replace(/\s+/g, " ").trim();
-        if (!text || containsBannedAgeTerm(text)) continue;
-        kept.push(text.length > 240 ? `${text.slice(0, 237)}...` : text);
-        if (kept.length >= 5) break;
+      const row = await this.publicTimelines().lookup({ userId, resolveProfile: false });
+      if (row.error) {
+        log.warn(
+          `Troll timeline fetch failed conversation=${conversationId}; roasting from chat only`,
+        );
       }
-      return kept;
+      return row.posts;
     } catch (error) {
       log.warn(
         `Troll timeline fetch failed conversation=${conversationId}; roasting from chat only`,
@@ -1500,6 +1549,78 @@ export class ModerationEngine {
       );
       return [];
     }
+  }
+
+  /**
+   * Public posts for people the question names. Cached. A failure is a short
+   * note in the prompt, not a thrown error.
+   */
+  private async timelinesForQuestion(event: DmEvent, question: string): Promise<PublicTimeline[]> {
+    const subjects = subjectsForQuestion({
+      text: question,
+      mentions: event.mentions,
+      replyUserId: event.replyToSenderId ?? this.resolveReplyUserId(event),
+      members: this.membersFor(event.conversationId),
+      botUsername: this.config.botUsername,
+      botUserId: this.config.botUserId,
+    });
+    if (subjects.length === 0) return [];
+    try {
+      return await prefetchTimelines(this.publicTimelines(), subjects);
+    } catch (error) {
+      log.warn(`Timeline prefetch failed conversation=${event.conversationId}`, error);
+      return [];
+    }
+  }
+
+  private contextTools(): AgentTool[] {
+    return [
+      {
+        name: "lookup_user_timeline",
+        description: "Read one X account's recent public posts.",
+        parameters: {
+          type: "object",
+          properties: { username: { type: "string" } },
+          required: ["username"],
+        },
+        run: async (args) => {
+          const username = toolArg(args, "username");
+          if (!username) return "Pass an @handle.";
+          const row = await this.publicTimelines().lookup({ username });
+          return formatTimelineResult(row);
+        },
+      },
+      {
+        name: "web_search",
+        description: "Search the public web for newer information.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+        },
+        run: async (args) => {
+          const query = toolArg(args, "query");
+          if (!query) return "Pass a search query.";
+          const result = await this.publicWebSearch().search(query);
+          return formatWebSearchResult(result);
+        },
+      },
+    ];
+  }
+
+  private publicTimelines(): PublicTimelineLookup {
+    if (this.deps.timeline) return this.deps.timeline;
+    return (this.ownedTimeline ??= new PublicTimelineLookup(this.client));
+  }
+
+  private publicWebSearch(): WebSearch {
+    if (this.deps.webSearch) return this.deps.webSearch;
+    return (this.ownedSearch ??= createWebSearch());
+  }
+
+  private llmPool(): LlmWorkerPool {
+    if (this.deps.llmWorkers) return this.deps.llmWorkers;
+    return (this.ownedWorkers ??= new LlmWorkerPool(MAX_IN_PROCESS_LLM_WORKERS));
   }
 
   private async handleRoast(
@@ -3989,6 +4110,12 @@ export class ModerationEngine {
       }
     }
   }
+}
+
+function toolArg(args: unknown, key: string): string {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const value = (args as Record<string, unknown>)[key];
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /** A cap applies only when some count is positive and the window is positive. `0` is unlimited. */

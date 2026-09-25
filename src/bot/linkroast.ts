@@ -34,6 +34,7 @@ Rules:
 - No slurs. No insults aimed at a protected class. No genuine threats. Do not encourage self-harm or suicide.
 - Address the person with the exact label you are given. That label is an @handle, a display name, or "someone".
 - Do not quote the link. Do not include numeric user ids, snowflakes, or API ids.
+- When public posts from the linked account are included, you may use them. Do not invent posts.
 - Never mention minors. No sexual content involving anyone under 18.
 - No hashtags. No URLs.
 - Do not end the roast with XP, points, a score, or any gamification suffix.
@@ -106,20 +107,64 @@ export function linkroastFallback(label: string, rng: () => number): string {
   return FALLBACKS[index]!(label);
 }
 
-export function buildLinkroastMessages(input: { label: string; latest: string }): ChatMessage[] {
+const RESERVED_STATUS_USERS = new Set([
+  "i",
+  "intent",
+  "share",
+  "search",
+  "home",
+  "explore",
+  "hashtag",
+  "settings",
+  "messages",
+  "compose",
+  "tos",
+  "privacy",
+  "login",
+  "signup",
+]);
+
+/**
+ * Screen name in an X status URL (`/name/status/id`).
+ * `/i/web/status/id` and other reserved first segments are not accounts.
+ * `extraUrls` covers a shared-post card whose text has no URL.
+ */
+export function statusAuthorHandles(
+  text: string | undefined | null,
+  extraUrls: readonly string[] = [],
+): string[] {
+  const handles: string[] = [];
+  for (const link of [...findLinks(text), ...extraUrls]) {
+    const handle = authorFromStatusLink(link);
+    if (!handle) continue;
+    if (handles.some((existing) => existing.toLowerCase() === handle.toLowerCase())) continue;
+    handles.push(handle);
+  }
+  return handles;
+}
+
+export function buildLinkroastMessages(input: {
+  label: string;
+  latest: string;
+  posts?: readonly string[];
+}): ChatMessage[] {
   const latest = clipLine(input.latest);
+  const posts = (input.posts ?? []).map(clipLine).filter(Boolean);
+  const lines = [
+    `Label: ${input.label}`,
+    "They posted a link or shared a post in this group chat without asking.",
+    "What they said (ids removed):",
+    latest || "(just the link)",
+  ];
+  if (posts.length > 0) {
+    lines.push("Public posts from the linked account:", ...posts.map((post) => `- ${post}`));
+  }
+  lines.push(
+    "Write a brutal two-paragraph roast of the unsolicited promo. Address them with the label. Do not include a URL, a numeric id, or an XP, points, or score suffix.",
+  );
   return [
     { role: "system", content: LINKROAST_SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        `Label: ${input.label}`,
-        "They posted a link or shared a post in this group chat without asking.",
-        "What they said (ids removed):",
-        latest || "(just the link)",
-        "Write a brutal two-paragraph roast of the unsolicited promo. Address them with the label. Do not include a URL, a numeric id, or an XP, points, or score suffix.",
-      ].join("\n"),
-    },
+    { role: "user", content: lines.join("\n") },
   ];
 }
 
@@ -388,6 +433,41 @@ function isLinkUrl(raw: string): boolean {
   const host = url.hostname.replace(/\.$/, "");
   if (!host.includes(".") || !/[A-Za-z0-9]/.test(host)) return false;
   return true;
+}
+
+
+function authorFromStatusLink(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let url: URL;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return undefined;
+  }
+  if (!isXHost(url.hostname)) return undefined;
+  let path = url.pathname;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    path = url.pathname;
+  }
+  if (!/\/status\/\d+(?:\/|$)/i.test(path)) return undefined;
+  const segment = path.split("/").filter(Boolean)[0];
+  if (!segment || !/^[A-Za-z0-9_]{1,15}$/.test(segment)) return undefined;
+  if (RESERVED_STATUS_USERS.has(segment.toLowerCase())) return undefined;
+  return segment;
+}
+
+function isXHost(host: string): boolean {
+  const normalized = host.toLowerCase().replace(/\.$/, "");
+  return (
+    normalized === "x.com" ||
+    normalized === "twitter.com" ||
+    normalized.endsWith(".x.com") ||
+    normalized.endsWith(".twitter.com")
+  );
 }
 
 function trimUrlTail(raw: string): string {
