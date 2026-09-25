@@ -38,7 +38,19 @@ export interface DecryptedEvent {
     replyingToPreview?: unknown;
     /** WASM decrypt uses snake_case for the preview object. */
     replying_to_preview?: unknown;
+    /** Rich-text entities. A url entity may carry a URL the text does not. */
+    entities?: unknown;
+    /** Message cards. `post` and `url` attachments are links; media is not. */
+    attachments?: unknown;
+    /** Forwarded message, when decrypt includes one. */
+    forwardedMessage?: unknown;
+    forwarded_message?: unknown;
   };
+  /**
+   * chat-xdk also flattens attachments onto the event (`attachmentType`
+   * `media` | `url` | `post` | `unifiedCard`). Media is not a link.
+   */
+  attachments?: unknown;
   changeType?: string;
   memberIds?: string[];
   change?: { changeType?: string; memberIds?: string[] };

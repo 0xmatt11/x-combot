@@ -170,6 +170,16 @@ interface BangMatch {
   rest: string;
 }
 
+/**
+ * A message the engine treats as a bang command.
+ * It starts with `!` or `/` and a command token. Known and unknown names
+ * both count. Link roast skips these so a command that includes a URL
+ * still runs as that command.
+ */
+export function isCommandMessage(text: string | undefined | null): boolean {
+  return matchBang(text) !== undefined;
+}
+
 function matchBang(text: string | undefined | null): BangMatch | undefined {
   if (!text) return undefined;
   const trimmed = text.trim();
