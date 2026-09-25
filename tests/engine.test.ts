@@ -445,6 +445,315 @@ describe("ModerationEngine", () => {
     expect(client.deleted).toEqual([]);
   });
 
+  it("rejects !purge from non-admins and allows the same admin gate", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(bob);
+    client.addUser(owner);
+    const engine = new ModerationEngine(store, client, {
+      ...runtime(),
+      globalAdminIds: [bob.id],
+    });
+
+    await engine.processEvent(message({ id: "p-deny", senderId: alice.id, text: "!purge 25" }));
+    expect(client.sent.at(-1)?.text).toMatch(/limited to configured admins/);
+    expect(client.deleted).toEqual([]);
+    expect(client.conversationListCalls).toHaveLength(0);
+
+    await engine.processEvent(message({ id: "p-global", senderId: bob.id, text: "/purge 50" }));
+    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
+    expect(client.conversationListCalls).toHaveLength(1);
+
+    store.addConversationAdmin(groupId, alice.id);
+    await engine.processEvent(message({ id: "p-local", senderId: alice.id, text: "!purge 100" }));
+    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
+    expect(client.deleted).toEqual([]);
+  });
+
+  it("purges newest messages and reports classic deletes the bot does not own", async () => {
+    const { engine, client } = setup();
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 1, 0, 0, seconds)).toISOString();
+    client.events.push(
+      message({
+        id: "purge-cmd",
+        senderId: owner.id,
+        text: "!purge 10",
+        createdAt: stamp(50),
+      }),
+      {
+        id: "join-mid",
+        eventType: "ParticipantsJoin",
+        conversationId: groupId,
+        createdAt: stamp(40),
+        participantIds: [alice.id],
+        participants: [alice],
+        mentions: [],
+      },
+      message({
+        id: "bot-new",
+        senderId: "bot-1",
+        text: "newest reply",
+        createdAt: stamp(30),
+      }),
+      message({
+        id: "user-new",
+        senderId: bob.id,
+        text: "member",
+        createdAt: stamp(20),
+      }),
+      message({
+        id: "bot-old",
+        senderId: "bot-1",
+        text: "older reply",
+        createdAt: stamp(10),
+      }),
+      message({
+        id: "user-old",
+        senderId: alice.id,
+        text: "older member",
+        createdAt: stamp(0),
+      }),
+    );
+
+    const actions = await engine.processEvent(
+      message({ id: "purge-cmd", senderId: owner.id, text: "!purge 10" }),
+    );
+    expect(client.conversationListCalls[0]?.maxResults).toBe(100);
+    expect(client.deleted).toEqual(["bot-new", "bot-old"]);
+    expect(actions.deletes).toEqual(["bot-new", "bot-old"]);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /Deleted 2 of 4 recent messages \(asked for 10\)\. X only lets the bot delete its own events \(DELETE \/2\/dm_events\/:id\)/,
+    );
+    expect(client.sent.at(-1)?.text).not.toMatch(/Capped at/);
+  });
+
+  it("deletes exactly the last N messages for a count that is not 25, 50, or 100", async () => {
+    const { engine, client } = setup();
+    const total = 20;
+    const count = 17;
+    client.events.push(
+      message({
+        id: "purge-cmd",
+        senderId: owner.id,
+        text: `!purge ${count}`,
+        createdAt: new Date(Date.UTC(2024, 3, 1) + total * 1000).toISOString(),
+      }),
+    );
+    for (let i = 0; i < total; i += 1) {
+      client.events.push(
+        message({
+          id: `bot-n-${i}`,
+          senderId: "bot-1",
+          text: `m${i}`,
+          createdAt: new Date(Date.UTC(2024, 3, 1) + i * 1000).toISOString(),
+        }),
+      );
+    }
+
+    await engine.processEvent(
+      message({ id: "purge-cmd", senderId: owner.id, text: `!purge ${count}` }),
+    );
+
+    const expected = Array.from({ length: count }, (_, index) => `bot-n-${total - 1 - index}`);
+    expect(client.deleted).toEqual(expected);
+    expect(client.deleted).not.toContain("bot-n-2");
+    expect(client.deleted).not.toContain("purge-cmd");
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 17 of 17\./);
+    expect(client.sent.at(-1)?.text).not.toMatch(/Capped at/);
+  });
+
+  it("walks backward from the newest message when history arrives oldest-first", async () => {
+    const { engine, client } = setup();
+    client.allowDeleteOthers = true;
+    client.listConversationDmEvents = async () => ({
+      events: ["1", "2", "3", "4", "5"].map((id) =>
+        message({ id, senderId: bob.id, text: `m${id}` }),
+      ),
+    });
+
+    await engine.processEvent(message({ id: "purge-order", senderId: owner.id, text: "!purge 2" }));
+
+    expect(client.deleted).toEqual(["5", "4"]);
+  });
+
+  it("walks Chat sequence ids backward when timestamps are missing", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    client.allowDeleteOthers = true;
+    client.listConversationDmEvents = async () => ({
+      events: [
+        message({ id: "msg-a", senderId: bob.id, text: "a", conversationId: chatId, sequenceId: "1" }),
+        message({ id: "msg-b", senderId: bob.id, text: "b", conversationId: chatId, sequenceId: "2" }),
+        message({ id: "msg-c", senderId: alice.id, text: "c", conversationId: chatId, sequenceId: "10" }),
+      ],
+    });
+
+    await engine.processEvent(
+      message({
+        id: "purge-seq",
+        senderId: owner.id,
+        text: "!purge 2",
+        conversationId: chatId,
+      }),
+    );
+
+    expect(client.deleted).toEqual(["msg-c", "msg-b"]);
+  });
+
+  it("keeps a newest-first page in that order instead of reversing it", async () => {
+    const { engine, client } = setup();
+    client.allowDeleteOthers = true;
+    client.listConversationDmEvents = async () => ({
+      events: ["5", "4", "3", "2", "1"].map((id) =>
+        message({ id, senderId: bob.id, text: `m${id}` }),
+      ),
+    });
+
+    await engine.processEvent(message({ id: "purge-keep", senderId: owner.id, text: "!purge 2" }));
+
+    expect(client.deleted).toEqual(["5", "4"]);
+  });
+
+  it("purges encrypted Chat with sequence ids and states the delete-for-all limit", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 1, 0, 1, seconds)).toISOString();
+    client.failDeleteIds.add("member-kept");
+    client.events.push(
+      message({
+        id: "history-command",
+        senderId: owner.id,
+        text: "!purge 4",
+        conversationId: chatId,
+        sequenceId: "seq-cmd",
+        createdAt: stamp(40),
+      }),
+      message({
+        id: "own-1",
+        senderId: "bot-1",
+        text: "bot",
+        conversationId: chatId,
+        sequenceId: "seq-1",
+        createdAt: stamp(30),
+      }),
+      message({
+        id: "member-kept",
+        senderId: bob.id,
+        text: "nope",
+        conversationId: chatId,
+        sequenceId: "seq-2",
+        createdAt: stamp(20),
+      }),
+      message({
+        id: "member-ok",
+        senderId: alice.id,
+        text: "yes",
+        conversationId: chatId,
+        sequenceId: "seq-3",
+        createdAt: stamp(10),
+      }),
+      message({
+        id: "no-seq",
+        senderId: alice.id,
+        text: "missing sequence",
+        conversationId: chatId,
+        createdAt: stamp(0),
+      }),
+    );
+
+    await engine.processEvent(
+      message({
+        id: "live-cmd",
+        senderId: owner.id,
+        text: "!purge 4",
+        conversationId: chatId,
+        sequenceId: "seq-cmd",
+      }),
+    );
+    expect(client.deleted).toEqual(["own-1", "member-ok"]);
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 2 of 4\./);
+    expect(client.sent.at(-1)?.text).toMatch(/delete-for-all/);
+    expect(client.sent.at(-1)?.text).toMatch(/group admin/);
+    expect(client.sent.at(-1)?.text).not.toMatch(/own events/);
+  });
+
+  it("caps !purge at 100 and does not read another page once that many are selected", async () => {
+    const { engine, client } = setup();
+    const pageOne = [
+      message({
+        id: "purge-cap",
+        senderId: owner.id,
+        text: "!purge 500",
+        createdAt: "2024-06-01T00:00:00.000Z",
+      }),
+    ];
+    for (let i = 0; i < 100; i += 1) {
+      pageOne.push(
+        message({
+          id: `bot-page-${i}`,
+          senderId: "bot-1",
+          text: `m${i}`,
+          createdAt: new Date(Date.UTC(2024, 5, 2) + i * 1000).toISOString(),
+        }),
+      );
+    }
+    let calls = 0;
+    client.listConversationDmEvents = async (params) => {
+      calls += 1;
+      expect(params.maxResults).toBe(100);
+      expect(params.conversationId).toBe(groupId);
+      if (calls === 1) return { events: pageOne, nextToken: "more" };
+      throw new Error("purge read past the cap");
+    };
+
+    await engine.processEvent(
+      message({ id: "purge-cap", senderId: owner.id, text: "!purge 500" }),
+    );
+    expect(calls).toBe(1);
+    expect(client.deleted).toHaveLength(100);
+    expect(client.deleted[0]).toBe("bot-page-99");
+    expect(client.deleted).not.toContain("purge-cap");
+    expect(client.sent.at(-1)?.text).toMatch(/Capped at 100\. Deleted 100 of 100\./);
+  });
+
+  it("deletes nothing when history cannot be loaded", async () => {
+    const { engine, client } = setup();
+    client.listConversationDmEvents = async () => {
+      throw new Error("history down");
+    };
+    await engine.processEvent(message({ id: "purge-err", senderId: owner.id, text: "!purge 25" }));
+    expect(client.deleted).toEqual([]);
+    expect(client.sent.at(-1)?.text).toMatch(/nothing was deleted/);
+  });
+
+  it("tells an admin how to use !purge", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent(message({ id: "purge-usage", senderId: owner.id, text: "!purge" }));
+    await engine.processEvent(message({ id: "purge-bad", senderId: owner.id, text: "!purge nope" }));
+    expect(client.sent[0]?.text).toMatch(/Usage: !purge <n>/);
+    expect(client.sent[1]?.text).toMatch(/hard cap 100/);
+    expect(client.sent[1]?.text).toMatch(/how many of the last messages to delete/);
+    expect(client.deleted).toEqual([]);
+    expect(client.conversationListCalls).toHaveLength(0);
+  });
+
+  it("keeps !purge off public help", () => {
+    const loaded = loadDefaults("config/default.yaml");
+    expect(loaded.help).not.toMatch(/!purge/);
+    expect(loaded.admin_help).toMatch(/!purge <n>/);
+    expect(loaded.admin_help).toMatch(/hard cap 100/);
+    expect(loaded.admin_help).toMatch(/the last n messages/);
+    expect(loaded.admin_help).toMatch(/not oldest-first/);
+    expect(loaded.admin_help).toMatch(/not a fixed size/);
+    expect(loaded.admin_help).toMatch(/this account's events only/);
+  });
+
   it("detects flood, attempts delete, and soft-mutes", async () => {
     const { engine, client, store } = setup();
     const now = 1_000_000;

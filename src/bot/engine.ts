@@ -199,6 +199,7 @@ import {
   parseCommand,
   parseLlmWake,
   parseUnknownBang,
+  PURGE_MAX,
   renderTemplate,
   type LlmWakeMatch,
   type ParsedCommand,
@@ -3063,6 +3064,51 @@ export class ModerationEngine {
         }
         return;
       }
+      case "purge": {
+        if (!command.count) {
+          await this.reply(conversationId, purgeUsage(), actions);
+          return;
+        }
+        let targets: DmEvent[];
+        try {
+          targets = await this.listPurgeTargets(conversationId, command.count, {
+            id: event.id,
+            sequenceId: event.sequenceId,
+          });
+        } catch (error) {
+          log.warn(`Could not list messages to purge in ${conversationId}`, error);
+          await this.reply(
+            conversationId,
+            "Could not load recent messages, so nothing was deleted.",
+            actions,
+          );
+          return;
+        }
+        if (targets.length === 0) {
+          await this.reply(conversationId, "No recent messages to purge.", actions);
+          return;
+        }
+        let deleted = 0;
+        for (const target of targets) {
+          const ok = await this.tryDelete(target.id, actions, {
+            conversationId,
+            ...(target.sequenceId ? { sequenceId: target.sequenceId } : {}),
+          });
+          if (ok) deleted += 1;
+        }
+        await this.reply(
+          conversationId,
+          formatPurgeReply({
+            deleted,
+            attempted: targets.length,
+            requested: command.count,
+            capped: command.capped === true,
+            chat: isChatGroupId(conversationId),
+          }),
+          actions,
+        );
+        return;
+      }
       case "note": {
         if (!command.key) {
           const notes = this.store.listNotes(conversationId);
@@ -4228,6 +4274,49 @@ export class ModerationEngine {
     return undefined;
   }
 
+  /**
+   * The last `count` messages in this conversation, newest first.
+   * Deletes start at the most recent message and walk backward. This does not
+   * reverse the page the way `!summarize` does (that path wants oldest-first
+   * context). Skips the `!purge` line itself. Same history read as
+   * `!summarize` (`listConversationDmEvents`, Chat history for `g…` groups).
+   * Stops at `count` (already capped) or after a few pages.
+   */
+  private async listPurgeTargets(
+    conversationId: string,
+    count: number,
+    exclude: { id: string; sequenceId?: string },
+  ): Promise<DmEvent[]> {
+    const selected: DmEvent[] = [];
+    const seen = new Set<string>();
+    if (exclude.id) seen.add(exclude.id);
+    let paginationToken: string | undefined;
+    for (let page = 0; page < PURGE_MAX_PAGES && selected.length < count; page += 1) {
+      const result = await this.client.listConversationDmEvents({
+        conversationId,
+        maxResults: PURGE_PAGE_SIZE,
+        paginationToken,
+      });
+      const batch = newestFirst(
+        result.events.filter((candidate) => {
+          if (candidate.eventType !== "MessageCreate" || !candidate.id) return false;
+          if (seen.has(candidate.id)) return false;
+          if (exclude.sequenceId && candidate.sequenceId === exclude.sequenceId) return false;
+          return true;
+        }),
+      );
+      for (const candidate of batch) {
+        seen.add(candidate.id);
+        selected.push(candidate);
+        if (selected.length >= count) break;
+      }
+      const next = result.nextToken;
+      if (!next || next === paginationToken || result.events.length === 0) break;
+      paginationToken = next;
+    }
+    return selected;
+  }
+
   private async tryDelete(
     eventId: string,
     actions: EngineActions,
@@ -4770,6 +4859,72 @@ export class ModerationEngine {
         await this.reply(conversationId, clean, actions);
       }
     }
+  }
+}
+
+/** History page size for `!purge`. Matches the DM and Chat events list cap. */
+const PURGE_PAGE_SIZE = 100;
+/** Extra pages cover joins and the command itself sitting in a full page. */
+const PURGE_MAX_PAGES = 5;
+
+function purgeUsage(): string {
+  return `Usage: !purge <n>. n is how many of the last messages to delete: any positive integer, hard cap ${PURGE_MAX}. Starts at the most recent message and walks backward, not oldest-first. The !purge line is not included. X only deletes events this account can remove.`;
+}
+
+function formatPurgeReply(input: {
+  deleted: number;
+  attempted: number;
+  requested: number;
+  capped: boolean;
+  chat: boolean;
+}): string {
+  const capNote = input.capped ? `Capped at ${PURGE_MAX}. ` : "";
+  const counts =
+    input.attempted < input.requested
+      ? `Deleted ${input.deleted} of ${input.attempted} recent messages (asked for ${input.requested}).`
+      : `Deleted ${input.deleted} of ${input.attempted}.`;
+  if (input.deleted === input.attempted) return `${capNote}${counts}`;
+  const why = input.chat
+    ? "X Chat delete-for-all (POST /2/chat/conversations/:id/messages/delete) works for messages this account sent, and for other people's messages only when this account is a group admin. The bot also needs each message's sequence id."
+    : "X only lets the bot delete its own events (DELETE /2/dm_events/:id).";
+  return `${capNote}${counts} ${why}`;
+}
+
+/**
+ * Newest message first, then older ones. Timestamp, then Chat sequence id,
+ * then a numeric event id. Ties keep API order, which is already newest first.
+ * A page that arrives oldest-first is still walked backward from the newest.
+ */
+function newestFirst(events: DmEvent[]): DmEvent[] {
+  return [...events].sort(compareNewestFirst);
+}
+
+function compareNewestFirst(a: DmEvent, b: DmEvent): number {
+  const byTime = compareDesc(timeMillis(a.createdAt), timeMillis(b.createdAt));
+  if (byTime !== 0) return byTime;
+  const bySequence = compareDesc(numericKey(a.sequenceId), numericKey(b.sequenceId));
+  if (bySequence !== 0) return bySequence;
+  return compareDesc(numericKey(a.id), numericKey(b.id));
+}
+
+function compareDesc(a: bigint | undefined, b: bigint | undefined): number {
+  if (a === undefined || b === undefined || a === b) return 0;
+  return a > b ? -1 : 1;
+}
+
+function timeMillis(value: string | undefined): bigint | undefined {
+  if (!value) return undefined;
+  if (/^[0-9]+$/.test(value)) return numericKey(value);
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? BigInt(Math.trunc(ms)) : undefined;
+}
+
+function numericKey(value: string | undefined): bigint | undefined {
+  if (!value || !/^[0-9]+$/.test(value)) return undefined;
+  try {
+    return BigInt(value);
+  } catch {
+    return undefined;
   }
 }
 
