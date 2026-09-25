@@ -52,7 +52,7 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
       { command: "!poker", blurb: "5-card draw vs the bot" },
       { command: "!roulette", blurb: "roulette" },
       { command: "!crash", blurb: "crash multiplier" },
-      { command: "!trivia", blurb: "trivia" },
+      { command: "!trivia", blurb: "quiz, Easy to Insane" },
     ],
   },
   {

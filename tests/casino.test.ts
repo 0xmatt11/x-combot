@@ -396,14 +396,19 @@ describe("!crash", () => {
 });
 
 describe("!trivia", () => {
+  function questionIn(text: string) {
+    return TRIVIA_QUESTIONS.find((question) => text.includes(question.prompt));
+  }
+
   it("asks, scores an answer, and does not repeat the open question", () => {
     const sessions = new CasinoTable().trivia;
     const book = new TriviaBook();
     const bank = wallet();
     const ctx = context(bank.xp, { rng: () => 0 });
-    const asked = playTrivia(sessions, book, ctx, "");
+    const asked = playTrivia(sessions, book, ctx, "easy");
     expect(asked).toContain(TRIVIA_QUESTIONS[0]!.prompt);
     expect(asked).toContain("a)");
+    expect(asked).toContain("· Easy");
     expect(asked).not.toContain(alice.id);
     const right = playTrivia(sessions, book, ctx, "b");
     expect(right).toContain("correct");
@@ -411,6 +416,7 @@ describe("!trivia", () => {
     expect(playTrivia(sessions, book, ctx, "b")).toContain("No trivia question");
     const next = playTrivia(sessions, book, ctx, "");
     expect(next).toContain(TRIVIA_QUESTIONS[1]!.prompt);
+    expect(next).toContain("· Easy");
     const wrong = playTrivia(sessions, book, ctx, "a");
     expect(wrong).toContain("nope");
     expect(wrong).toContain("1 right, 1 wrong");
@@ -430,7 +436,7 @@ describe("!trivia", () => {
       label: "@bob",
       rng: () => 0,
     });
-    const asked = playTrivia(sessions, book, asker, "");
+    const asked = playTrivia(sessions, book, asker, "easy");
     expect(asked).toContain("❓ @alice");
     const reprint = playTrivia(sessions, book, other, "");
     expect(reprint).toContain(TRIVIA_QUESTIONS[0]!.prompt);
@@ -440,6 +446,95 @@ describe("!trivia", () => {
     expect(answered).toContain("@bob: 1 right, 0 wrong.");
     expect(playTrivia(sessions, book, asker, "score")).toContain("@alice: 0 right, 0 wrong.");
     expect(playTrivia(sessions, book, other, "score")).toContain("@bob: 1 right, 0 wrong.");
+  });
+
+  it("asks for a tier before the first question and keeps it for the chat", () => {
+    const sessions = new CasinoTable().trivia;
+    const book = new TriviaBook();
+    const bank = wallet();
+    const ctx = context(bank.xp, { rng: () => 0 });
+    const first = playTrivia(sessions, book, ctx, "");
+    expect(first).toContain("How hard?");
+    expect(first).toContain("1 Easy");
+    expect(first).toContain("6 Insane");
+    expect(questionIn(first)).toBeUndefined();
+    expect(playTrivia(sessions, book, ctx, "")).toContain("How hard?");
+
+    const picked = playTrivia(sessions, book, ctx, "easy");
+    expect(questionIn(picked)?.difficulty).toBe("easy");
+    playTrivia(sessions, book, ctx, "b");
+    const again = playTrivia(sessions, book, ctx, "");
+    expect(again).not.toContain("How hard?");
+    expect(questionIn(again)?.difficulty).toBe("easy");
+
+    const otherChat = context(bank.xp, { conversationId: "other-chat", rng: () => 0 });
+    expect(playTrivia(sessions, book, otherChat, "")).toContain("How hard?");
+  });
+
+  it("selects each difficulty and only serves that tier", () => {
+    const picks = [
+      ["1", "easy"],
+      ["medium", "medium"],
+      ["3", "hard"],
+      ["expert", "expert"],
+      ["5", "master"],
+      ["insane", "insane"],
+    ] as const;
+    for (const [word, tier] of picks) {
+      const sessions = new CasinoTable().trivia;
+      const book = new TriviaBook();
+      const bank = wallet();
+      const ctx = context(bank.xp, { rng: () => 0 });
+      const asked = playTrivia(sessions, book, ctx, word);
+      const question = questionIn(asked);
+      expect(question?.difficulty).toBe(tier);
+      expect(asked).toContain(`· ${tier[0]!.toUpperCase()}${tier.slice(1)}`);
+      const counts = new Map<string, number>();
+      for (const row of TRIVIA_QUESTIONS) {
+        counts.set(row.difficulty, (counts.get(row.difficulty) ?? 0) + 1);
+      }
+      expect(counts.get(tier)).toBeGreaterThanOrEqual(12);
+    }
+
+    const prompts = TRIVIA_QUESTIONS.map((question) => question.prompt);
+    expect(new Set(prompts).size).toBe(prompts.length);
+    for (const question of TRIVIA_QUESTIONS) {
+      expect(question.choices).toHaveLength(4);
+      expect(question.answer).toBeGreaterThanOrEqual(0);
+      expect(question.answer).toBeLessThan(4);
+    }
+  });
+
+  it("changes the tier for the next question and leaves the open one up", () => {
+    const sessions = new CasinoTable().trivia;
+    const book = new TriviaBook();
+    const bank = wallet();
+    const ctx = context(bank.xp, { rng: () => 0 });
+    const asked = playTrivia(sessions, book, ctx, "easy");
+    const open = questionIn(asked);
+    expect(open?.difficulty).toBe("easy");
+
+    const menu = playTrivia(sessions, book, ctx, "difficulty");
+    expect(menu).toContain("This chat is on Easy");
+    expect(menu).toContain("6 Insane");
+    expect(questionIn(menu)).toBeUndefined();
+
+    const switched = playTrivia(sessions, book, ctx, "insane");
+    expect(switched).toContain("now on Insane");
+    expect(switched).toContain("next question");
+    expect(questionIn(switched)).toBeUndefined();
+
+    const reprint = playTrivia(sessions, book, ctx, "");
+    expect(reprint).toContain(open!.prompt);
+    expect(reprint).toContain("· Easy");
+
+    const digit = playTrivia(sessions, book, ctx, "1");
+    expect(digit).toContain("nope");
+    expect(digit).not.toContain("next question");
+
+    const next = playTrivia(sessions, book, ctx, "");
+    expect(questionIn(next)?.difficulty).toBe("insane");
+    expect(next).not.toContain("How hard?");
   });
 });
 
@@ -577,7 +672,7 @@ describe("casino commands", () => {
     expect(client.sent[1]?.text).toContain("@alice");
 
     vi.spyOn(Math, "random").mockReturnValue(0);
-    await engine.processEvent(message({ id: "t1", senderId: alice.id, text: "!trivia" }));
+    await engine.processEvent(message({ id: "t1", senderId: alice.id, text: "!trivia easy" }));
     await engine.processEvent(message({ id: "t2", senderId: alice.id, text: "!trivia b" }));
     expect(client.sent[2]?.text).toContain(TRIVIA_QUESTIONS[0]!.prompt);
     expect(client.sent[3]?.text).toContain("correct");

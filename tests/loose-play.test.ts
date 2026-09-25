@@ -7,6 +7,7 @@ import {
   clearWouldYouRatherSessions,
   compatibility,
   deterministicTriviaChoice,
+  deterministicTriviaDifficulty,
   gamesMenu,
   resolveShipQuery,
   shipReply,
@@ -75,6 +76,22 @@ describe("loose trivia choices", () => {
     expect(deterministicTriviaChoice("go with b")).toBe(1);
     expect(deterministicTriviaChoice("hello")).toBeUndefined();
     expect(deterministicTriviaChoice("!banana")).toBeUndefined();
+  });
+
+  it("reads a tier from a digit, a name, a bang, and a short phrase", () => {
+    expect(deterministicTriviaDifficulty("1")).toBe("easy");
+    expect(deterministicTriviaDifficulty("6")).toBe("insane");
+    expect(deterministicTriviaDifficulty("!hard")).toBe("hard");
+    expect(deterministicTriviaDifficulty("/expert")).toBe("expert");
+    expect(deterministicTriviaDifficulty("MEDIUM!")).toBe("medium");
+    expect(deterministicTriviaDifficulty("med")).toBe("medium");
+    expect(deterministicTriviaDifficulty("!triviaeasy")).toBe("easy");
+    expect(deterministicTriviaDifficulty("go with expert")).toBe("expert");
+    expect(deterministicTriviaDifficulty("i want insane")).toBe("insane");
+    expect(deterministicTriviaDifficulty("let's do master")).toBe("master");
+    expect(deterministicTriviaDifficulty("!trivia c")).toBeUndefined();
+    expect(deterministicTriviaDifficulty("hello")).toBeUndefined();
+    expect(deterministicTriviaDifficulty("a")).toBeUndefined();
   });
 });
 
@@ -149,8 +166,31 @@ describe("active game answers", () => {
   }
 
   async function ask(engine: ModerationEngine, id: string): Promise<void> {
-    await engine.processEvent(message({ id, senderId: alice.id, text: "!trivia" }));
+    await engine.processEvent(message({ id, senderId: alice.id, text: "!trivia easy" }));
   }
+
+  it("asks for a difficulty, then takes a loose tier and still scores a loose answer", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { engine, client, llm } = setup();
+    await engine.processEvent(message({ id: "q0", senderId: alice.id, text: "!trivia" }));
+    expect(client.sent[0]?.text).toContain("How hard?");
+    expect(client.sent[0]?.text).not.toContain(TRIVIA_QUESTIONS[0]!.prompt);
+
+    await engine.processEvent(message({ id: "pick", senderId: bob.id, text: "go with hard" }));
+    const dealt = client.sent[1]?.text ?? "";
+    expect(dealt).toContain("· Hard");
+    expect(dealt).not.toContain("How hard?");
+    const hard = TRIVIA_QUESTIONS.find((question) => dealt.includes(question.prompt));
+    expect(hard?.difficulty).toBe("hard");
+
+    await engine.processEvent(message({ id: "ans", senderId: alice.id, text: "i think it's A" }));
+    expect(client.sent[2]?.text).toMatch(/@alice — (correct|nope)/);
+    expect(llm.calls).toHaveLength(0);
+
+    await engine.processEvent(message({ id: "q1", senderId: alice.id, text: "!trivia" }));
+    expect(client.sent[3]?.text).toContain("· Hard");
+    expect(client.sent[3]?.text).not.toContain("How hard?");
+  });
 
   it("scores loose answers for the player who replies, including someone else's question", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
@@ -272,5 +312,8 @@ describe("active game answers", () => {
     expect(readme).toMatch(/one session for the conversation/);
     expect(readme).toMatch(/!triviac/);
     expect(readme).toMatch(/!ship Matt Milady/);
+    expect(readme).toMatch(/Insane/);
+    expect(loaded.help).toMatch(/Easy–Insane/);
+    expect(gamesMenu()).toMatch(/!trivia — quiz, Easy to Insane/);
   });
 });

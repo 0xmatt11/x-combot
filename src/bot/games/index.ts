@@ -132,10 +132,18 @@ export { CRASH_HELP, flyingCents, playCrash, rollCrashCents } from "./crash.js";
 export { POKER_HELP, playPoker } from "./poker.js";
 export { ROULETTE_HELP, playRoulette, rouletteColor, spinWheel } from "./roulette.js";
 export { SLOTS_HELP, playSlots } from "./slots.js";
-export { TRIVIA_HELP, TRIVIA_QUESTIONS, playTrivia } from "./trivia.js";
+export {
+  TRIVIA_DIFFICULTIES,
+  TRIVIA_HELP,
+  TRIVIA_QUESTIONS,
+  playTrivia,
+  triviaDifficultyLabel,
+} from "./trivia.js";
+export type { TriviaDifficulty, TriviaQuestion } from "./trivia.js";
 export {
   buildTriviaInterpretMessages,
   deterministicTriviaChoice,
+  deterministicTriviaDifficulty,
   looksLikeTriviaAttempt,
   looseCasinoVerb,
   looseHigherLowerCall,

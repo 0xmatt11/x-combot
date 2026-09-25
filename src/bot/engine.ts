@@ -113,6 +113,7 @@ import {
   buildTriviaInterpretMessages,
   coinflipReply,
   deterministicTriviaChoice,
+  deterministicTriviaDifficulty,
   diceReply,
   eightBallReply,
   gamesMenu,
@@ -1743,7 +1744,8 @@ export class ModerationEngine {
    * While a game is open, a loose line can be a move. Known bangs are already
    * handled. This runs before the unknown-command joke and before generic chat.
    * The chat model is used only for a short trivia answer that is not already
-   * a letter, a bang letter, or a glued `!triviac`.
+   * a letter, a bang letter, or a glued `!triviac`. A pending difficulty
+   * prompt is read the same way, without the model.
    */
   private async tryLooseGamePlay(
     event: DmEvent,
@@ -1766,6 +1768,17 @@ export class ModerationEngine {
         );
         return true;
       }
+    }
+    if (this.casino.triviaBook.awaitingDifficulty(conversationId)) {
+      const difficulty = deterministicTriviaDifficulty(text);
+      if (difficulty) {
+        await this.finishLoose(event, text, () =>
+          this.handleCasino(event, "trivia", difficulty, settings, actions, nowMs),
+        );
+        return true;
+      }
+    }
+    if (trivia) {
       if (looksLikeTriviaAttempt(text)) {
         const interpreted = await this.interpretTriviaChoice(
           event,
