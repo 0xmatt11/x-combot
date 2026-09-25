@@ -125,8 +125,9 @@ describe("voice request checks", () => {
       text: "stay with me",
     });
     if (scared.ok) {
-      expect(scared.spoken).toBe("[breath] <whisper><higher-pitch>stay with me</higher-pitch></whisper>");
+      expect(scared.spoken).toBe("<whisper><soft>stay with me</soft></whisper>");
       expect(scared.spoken).not.toMatch(/scared|nsfw/i);
+      expect(scared.spoken.trimStart()).not.toMatch(/^\[/);
     }
     expect(parseVoiceRequest("3 stay")).toMatchObject({ personaId: "girl3", voiceId: "ara" });
     expect(parseVoiceRequest("scaredgirl stay")).toMatchObject({ personaId: "girl2" });
@@ -139,9 +140,10 @@ describe("voice request checks", () => {
     });
     if (horny.ok) {
       expect(horny.spoken).toBe(
-        "[inhale] [sigh] [breath] <whisper><higher-pitch><build-intensity>hello there</build-intensity></higher-pitch></whisper>",
+        "<whisper><higher-pitch><build-intensity>hello there</build-intensity></higher-pitch></whisper>",
       );
       expect(horny.spoken).not.toMatch(/horny|nsfw|sexy/i);
+      expect(horny.spoken.trimStart()).not.toMatch(/^\[/);
     }
     expect(parseVoiceRequest("6 hello")).toMatchObject({ personaId: "girl6", voiceId: "eve" });
     expect(parseVoiceRequest("girl3 hello")).toMatchObject({ personaId: "girl3", voiceId: "ara" });
@@ -153,6 +155,7 @@ describe("voice request checks", () => {
     expect(aliases).not.toContain("regular");
     expect(VOICE_PERSONAS.map((persona) => persona.voiceId)).not.toContain("rex");
     const line = "say this";
+    const spokenByTier: string[] = [];
     for (let n = 1; n <= 10; n += 1) {
       const parsed = parseVoiceRequest(`girl${n} ${line}`);
       expect(parsed.ok).toBe(true);
@@ -162,17 +165,30 @@ describe("voice request checks", () => {
       expect(parsed.spoken.replace(/<[^>]+>/g, "").replace(/\[[a-z-]+\]/gi, "").replace(/\s+/g, " ").trim()).toBe(
         line,
       );
+      expect(parsed.spoken.trimStart()).not.toMatch(/^\[/);
+      const firstWord = parsed.spoken.search(/\bsay\b/);
+      const firstSound = parsed.spoken.search(/\[[a-z-]+\]/i);
+      expect(firstWord).toBeGreaterThanOrEqual(0);
+      if (firstSound >= 0) expect(firstWord).toBeLessThan(firstSound);
+      spokenByTier.push(parsed.spoken);
       expect(parseVoiceRequest(`${n} ${line}`)).toMatchObject({ ok: true, personaId: `girl${n}` });
     }
+    expect(new Set(spokenByTier).size).toBe(10);
     const peak = parseVoiceRequest("girl10 say this");
     const numberedPeak = parseVoiceRequest("10 say this");
     expect(peak).toEqual(numberedPeak);
     if (peak.ok) {
       expect(peak.voiceId).toBe("eve");
       expect(peak.spoken).toBe(
-        "[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>say this</emphasis></build-intensity></higher-pitch></fast></loud>",
+        "<loud><fast><higher-pitch><emphasis>say [breath] this</emphasis></higher-pitch></fast></loud>",
       );
-      expect(peak.spoken).toMatch(/\[breath\].*\[inhale\].*\[sigh\].*\[exhale\].*<loud>.*<fast>.*<higher-pitch>.*<build-intensity>/);
+      expect(peak.spoken).not.toMatch(/\[breath\]\s+\[inhale\]/);
+      expect(peak.spoken).toMatch(/<loud>.*<fast>.*<higher-pitch>.*<emphasis>say \[breath\] this<\/emphasis>/);
+    }
+    const oneWord = parseVoiceRequest("girl10 yes");
+    if (oneWord.ok) {
+      expect(oneWord.spoken).toBe("<loud><fast><higher-pitch><emphasis>yes</emphasis></higher-pitch></fast></loud>");
+      expect(oneWord.spoken).not.toMatch(/\[[a-z-]+\]/i);
     }
     expect(parseVoiceRequest("sexy teen portrait")).toEqual({ ok: false, reason: "refused" });
     const longLine = "a".repeat(20_000);
@@ -445,7 +461,7 @@ describe("!voice command", () => {
     );
     expect(peak.voice.prompts).toEqual([
       {
-        text: "[breath] [inhale] [sigh] [exhale] [breath] [sigh] <loud><fast><higher-pitch><build-intensity><emphasis>say this</emphasis></build-intensity></higher-pitch></fast></loud>",
+        text: "<loud><fast><higher-pitch><emphasis>say [breath] this</emphasis></higher-pitch></fast></loud>",
         voiceId: "eve",
       },
     ]);
