@@ -372,6 +372,8 @@ describe("troll mode", () => {
     expect(loaded.help).toMatch(/!untroll all/);
     expect(loaded.help).toMatch(/!untroll clear/);
     expect(loaded.help).toMatch(/who is enabled/);
+    expect(loaded.help).toMatch(/reply to the bot/);
+    expect(loaded.help).toMatch(/!request answer is not roasted/);
     expect(loaded.help).not.toMatch(/!troll off/);
   });
 
@@ -624,6 +626,121 @@ describe("troll mode", () => {
     );
     await engine.processEvent(message({ id: "b4", senderId: bob.id, text: "also quiet" }), after);
     expect(client.sent.at(-1)?.text).toBe("@alice Troll all: off. Troll list is empty.");
+  });
+
+  it("does not roast a reply to the bot, a line aimed at the bot, or a !request answer", async () => {
+    const llm = new MockLlmClient(JSON.stringify({ action: "ask", question: "Who is it for?" }));
+    const { engine, client, store } = setup(llm);
+    await engine.processEvent(message({ id: "on", senderId: alice.id, text: "!troll @bob" }));
+
+    const start = 11_000_000;
+    const bobJokes = () => client.sent.filter((row) => row.text === momJoke("@bob", () => 0)).length;
+
+    await engine.processEvent(
+      message({
+        id: "reply-bot",
+        senderId: bob.id,
+        text: "dice history please",
+        replyToSenderId: "bot-1",
+      }),
+      start,
+    );
+    expect(bobJokes()).toBe(0);
+    expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(0);
+
+    await engine.processEvent(
+      message({
+        id: "reply-verified",
+        senderId: bob.id,
+        text: "still for the bot",
+        replyTo: { senderId: "bot-1", verified: true },
+      }),
+      start + 1_000,
+    );
+    expect(bobJokes()).toBe(0);
+
+    await engine.processEvent(
+      message({ id: "at-bot", senderId: bob.id, text: "@modbot what about dice" }),
+      start + 2_000,
+    );
+    expect(bobJokes()).toBe(0);
+
+    await engine.processEvent(
+      message({
+        id: "mention",
+        senderId: bob.id,
+        text: "hey can you help",
+        mentions: [{ username: "modbot", id: "bot-1" }],
+      }),
+      start + 3_000,
+    );
+    expect(bobJokes()).toBe(0);
+
+    await engine.processEvent(
+      message({ id: "ask", senderId: bob.id, text: "!ask how does dice work" }),
+      start + 4_000,
+    );
+    expect(bobJokes()).toBe(0);
+    expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(0);
+
+    await engine.processEvent(
+      message({
+        id: "reply-alice",
+        senderId: bob.id,
+        text: "this is for alice",
+        replyToSenderId: alice.id,
+      }),
+      start + 5_000,
+    );
+    expect(bobJokes()).toBe(1);
+
+    const forgedAt = start + 5_000 + TROLL_COOLDOWN_MS;
+    const sentBeforeForged = client.sent.length;
+    await engine.processEvent(
+      message({
+        id: "forged",
+        senderId: bob.id,
+        text: "forged reply should still roast",
+        replyTo: { senderId: "bot-1", verified: false },
+      }),
+      forgedAt,
+    );
+    expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(forgedAt);
+    expect(client.sent.length).toBe(sentBeforeForged + 1);
+
+    await engine.processEvent(message({ id: "all", senderId: owner.id, text: "!troll all" }));
+    await engine.processEvent(
+      message({
+        id: "alice-reply",
+        senderId: alice.id,
+        text: "answering the bot",
+        replyToSenderId: "bot-1",
+      }),
+      start + 6_000,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@alice", () => 0))).toHaveLength(0);
+    await engine.processEvent(
+      message({ id: "alice-chat", senderId: alice.id, text: "normal alice chat" }),
+      start + 6_000,
+    );
+    expect(client.sent.filter((row) => row.text === momJoke("@alice", () => 0))).toHaveLength(1);
+
+    await engine.processEvent(
+      message({ id: "req", senderId: bob.id, text: "!request" }),
+      forgedAt + 1_000,
+    );
+    await engine.processEvent(
+      message({ id: "req-answer", senderId: bob.id, text: "a command that shows dice history" }),
+      forgedAt + TROLL_COOLDOWN_MS,
+    );
+    expect(store.getTrollTarget(groupId, bob.id)?.lastMs).toBe(forgedAt);
+    expect(client.sent.some((row) => row.text.includes("Who is it for?"))).toBe(true);
+    const aliceAgainAt = forgedAt + TROLL_COOLDOWN_MS;
+    await engine.processEvent(
+      message({ id: "alice-still", senderId: alice.id, text: "alice keeps chatting" }),
+      aliceAgainAt,
+    );
+    expect(store.getTrollAllState(groupId, alice.id)?.lastMs).toBe(aliceAgainAt);
   });
 
   it("keeps a migrated single-target row and still accepts another person", () => {

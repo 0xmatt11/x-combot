@@ -560,7 +560,6 @@ export class ModerationEngine {
     }
 
     if (await this.continueFeatureRequest(event, actions, nowMs)) {
-      await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
     }
@@ -1339,7 +1338,8 @@ export class ModerationEngine {
    * troll-all is on and anyone who is not the bot speaks. Each person has
    * their own cooldown. Replays never reach here: `alreadyHandled` claims
    * the event first. Muted, filtered, and flood-stopped messages return
-   * before this runs. `!troll` and `!untroll` skip this call.
+   * before this runs. `!troll` and `!untroll` skip this call. A reply to
+   * the bot, a line aimed at the bot, and an open `!request` answer do too.
    */
   private async trollIfTarget(
     event: DmEvent,
@@ -1349,6 +1349,7 @@ export class ModerationEngine {
   ): Promise<void> {
     const latest = event.text?.trim() ?? "";
     if (!latest || !senderId || senderId === this.config.botUserId) return;
+    if (this.trollMessageIsForBot(event)) return;
     const listed = this.store.getTrollTarget(event.conversationId, senderId);
     if (listed) {
       await this.postTroll(event, listed, latest, actions, nowMs, true);
@@ -1409,6 +1410,50 @@ export class ModerationEngine {
       );
     }
     await this.reply(event.conversationId, reply, actions);
+  }
+
+  /**
+   * Continuous troll stays quiet when the line is for the bot.
+   * A trusted reply to the bot counts. So does the same wake `!ask` uses
+   * (`@botname`, a configured prefix, or an @mention of the bot).
+   * An open `!request` answer is handled before this runs.
+   */
+  private trollMessageIsForBot(event: DmEvent): boolean {
+    if (this.repliesToBot(event)) return true;
+    return this.directedAtBot(event);
+  }
+
+  private repliesToBot(event: DmEvent): boolean {
+    const botId = this.config.botUserId;
+    if (!botId) return false;
+    if (event.replyToSenderId === botId) return true;
+    return this.resolveReplyUserId(event) === botId;
+  }
+
+  private directedAtBot(event: DmEvent): boolean {
+    const settings = this.conversationConfig(event.conversationId);
+    if (
+      parseLlmWake(event.text, {
+        botUsername: this.config.botUsername,
+        botUserId: this.config.botUserId,
+        wakePrefixes: settings.llmWakePrefixes,
+        mentions: event.mentions,
+      })
+    ) {
+      return true;
+    }
+    const command = parseCommand(event.text);
+    if (command && isLlmCommandName(command.name)) return true;
+    const handle = this.config.botUsername?.replace(/^@/, "").toLowerCase();
+    const botId = this.config.botUserId;
+    for (const mention of event.mentions) {
+      if (botId && mention.id === botId) return true;
+      const name = mention.username.replace(/^@/, "").toLowerCase();
+      if (handle && name === handle) return true;
+    }
+    if (!handle || !event.text) return false;
+    const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`@${escaped}\\b`, "i").test(event.text);
   }
 
   /**
