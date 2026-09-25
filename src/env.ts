@@ -362,6 +362,16 @@ export interface Env {
   videoImagineResolution?: VideoResolution;
   /** TTS language. Unset uses `en`. Personas choose the voice id. */
   voiceTtsLanguage?: string;
+  /**
+   * Optional second notify for `!request`. The pending JSON file is written either way.
+   * Unset still accepts the request, writes `data/feature-requests/pending/`, and DMs the owner.
+   */
+  requestWebhookUrl?: string;
+  /**
+   * When set, `!request` sends `Authorization: Bearer <secret>`.
+   * Not logged.
+   */
+  requestWebhookSecret?: string;
 }
 
 export function loadEnv(requireOwner = true): Env {
@@ -446,5 +456,7 @@ export function loadEnv(requireOwner = true): Env {
     videoImagineAspectRatio: optionalVideoAspectRatio("VIDEO_IMAGINE_ASPECT_RATIO"),
     videoImagineResolution: optionalVideoResolution("VIDEO_IMAGINE_RESOLUTION"),
     voiceTtsLanguage: optionalVoiceLanguage("VOICE_TTS_LANGUAGE"),
+    requestWebhookUrl: optionalHttpUrl("REQUEST_WEBHOOK_URL"),
+    requestWebhookSecret: optional("REQUEST_WEBHOOK_SECRET"),
   };
 }

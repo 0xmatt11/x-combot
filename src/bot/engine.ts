@@ -157,6 +157,31 @@ import {
   type UserRef,
 } from "./parser.js";
 import {
+  buildFeatureRequestMessages,
+  buildFeatureRequestPayload,
+  buildFeatureRequestSafetyMessages,
+  cannedFeatureQuestion,
+  defaultFeatureRequestPendingDir,
+  deliverFeatureRequest,
+  fallbackFeatureFiling,
+  featureRequestConfirmation,
+  featureRequestOwnerDm,
+  parseFeatureRequestModel,
+  parseFeatureRequestSafety,
+  readRequestReply,
+  writeFeatureRequestFile,
+  substantiveRequestText,
+  unknownFeatureSafety,
+  FEATURE_REQUEST_MAX_QUESTIONS,
+  FEATURE_REQUEST_TIMEOUT_MS,
+  type ClarificationTurn,
+  type FeatureRequestFetch,
+  type FeatureRequestFiling,
+  type FeatureRequestPayload,
+  type FeatureRequestSafety,
+  type FeatureRequester,
+} from "./feature-request.js";
+import {
   formatStatusReport,
   readBuildVersion,
   statusMediaCounts,
@@ -261,6 +286,22 @@ export interface EngineDeps {
    * A restart drops timers that have not fired.
    */
   commandCleanupMs?: number;
+  /**
+   * `!request` filing. The pending folder is the notify Chief of Staff polls.
+   * The webhook is optional. No URL still writes the file and DMs the owner.
+   * `fetchImpl` and `pendingDir` are for tests.
+   */
+  featureRequest?: {
+    webhookUrl?: string;
+    webhookSecret?: string;
+    fetchImpl?: FeatureRequestFetch;
+    /** Defaults to `data/feature-requests/pending` beside the database file. */
+    pendingDir?: string;
+    /** Silence before the open request is filed. Default 10 minutes. */
+    timeoutMs?: number;
+    /** Clarifying questions before filing. Clamped to 1–3. Default 3. */
+    maxQuestions?: number;
+  };
 }
 
 /**
@@ -278,6 +319,19 @@ interface CommandCleanupTarget {
   eventId: string;
   conversationId: string;
   sequenceId?: string;
+}
+
+interface FeatureRequestSession {
+  conversationId: string;
+  requester: FeatureRequester;
+  replyEvent: DmEvent;
+  idea: string;
+  questionsAsked: number;
+  transcript: ClarificationTurn[];
+  lastActivityMs: number;
+  closing: boolean;
+  /** Set while a model call is in flight so a timeout does not file twice. */
+  busy: boolean;
 }
 
 export class ModerationEngine {
@@ -302,6 +356,9 @@ export class ModerationEngine {
    * Bot replies are not on this list.
    */
   private readonly commandCleanupTimers = new Set<ReturnType<typeof setTimeout>>();
+  /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
+  private readonly featureRequests = new Map<string, FeatureRequestSession>();
+  private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly store: Store,
@@ -381,6 +438,8 @@ export class ModerationEngine {
     const senderId = event.senderId;
     if (!senderId) return actions;
 
+    await this.expireFeatureRequests(event, nowMs, actions);
+
     const convoAdmins = this.store.listConversationAdmins(event.conversationId);
     const senderIsAdmin = isAdmin(
       senderId,
@@ -433,6 +492,12 @@ export class ModerationEngine {
     }
 
     if (await this.tryLooseGamePlay(event, senderIsAdmin, settings, actions, nowMs)) {
+      await this.trollIfTarget(event, senderId, actions, nowMs);
+      await this.linkroastIfSpam(event, senderId, actions, nowMs);
+      return actions;
+    }
+
+    if (await this.continueFeatureRequest(event, actions, nowMs)) {
       await this.trollIfTarget(event, senderId, actions, nowMs);
       await this.linkroastIfSpam(event, senderId, actions, nowMs);
       return actions;
@@ -1916,6 +1981,9 @@ export class ModerationEngine {
       case "rules":
         await this.reply(conversationId, settings.rules.trim(), actions);
         return;
+      case "request":
+        await this.handleFeatureRequest(event, command.idea, actions, nowMs);
+        return;
       case "xp":
         await this.handleXpLookup(event, command.target, settings, actions);
         return;
@@ -3265,6 +3333,405 @@ export class ModerationEngine {
     log.info(
       `Skipping auto-delete of command ${target.eventId}: classic DMs only delete messages this account sent.`,
     );
+  }
+
+  private featureRequestKey(conversationId: string, userId: string): string {
+    return `${conversationId}\n${userId}`;
+  }
+
+  private featureRequestMaxQuestions(): number {
+    const configured = this.deps.featureRequest?.maxQuestions;
+    if (configured === undefined || !Number.isInteger(configured) || configured < 1) {
+      return FEATURE_REQUEST_MAX_QUESTIONS;
+    }
+    return Math.min(configured, FEATURE_REQUEST_MAX_QUESTIONS);
+  }
+
+  private featureRequestTimeoutMs(): number {
+    const configured = this.deps.featureRequest?.timeoutMs;
+    if (configured === undefined || !Number.isFinite(configured) || configured < 0) {
+      return FEATURE_REQUEST_TIMEOUT_MS;
+    }
+    return configured;
+  }
+
+  private clearFeatureRequestTimer(key: string): void {
+    const timer = this.featureRequestTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.featureRequestTimers.delete(key);
+  }
+
+  private armFeatureRequestTimer(key: string): void {
+    this.clearFeatureRequestTimer(key);
+    const session = this.featureRequests.get(key);
+    if (!session || session.closing) return;
+    const timer = setTimeout(() => {
+      this.featureRequestTimers.delete(key);
+      void this.onFeatureRequestTimeout(key);
+    }, this.featureRequestTimeoutMs());
+    timer.unref?.();
+    this.featureRequestTimers.set(key, timer);
+  }
+
+  private rememberFeatureRequest(session: FeatureRequestSession): void {
+    const key = this.featureRequestKey(session.conversationId, session.requester.id);
+    const previous = this.featureRequests.get(key);
+    if (previous && previous !== session) previous.closing = true;
+    this.featureRequests.set(key, session);
+    this.armFeatureRequestTimer(key);
+  }
+
+  private dropFeatureRequest(session: FeatureRequestSession): boolean {
+    if (session.closing) return false;
+    session.closing = true;
+    const key = this.featureRequestKey(session.conversationId, session.requester.id);
+    if (this.featureRequests.get(key) === session) this.featureRequests.delete(key);
+    this.clearFeatureRequestTimer(key);
+    return true;
+  }
+
+  private newFeatureSession(event: DmEvent, nowMs: number): FeatureRequestSession {
+    const senderId = event.senderId!;
+    return {
+      conversationId: event.conversationId,
+      requester: {
+        id: senderId,
+        ...(event.sender?.username ? { username: event.sender.username } : {}),
+        ...(event.sender?.name ? { displayName: event.sender.name } : {}),
+      },
+      replyEvent: event,
+      idea: "",
+      questionsAsked: 0,
+      transcript: [],
+      lastActivityMs: nowMs,
+      closing: false,
+      busy: false,
+    };
+  }
+
+  private async onFeatureRequestTimeout(key: string): Promise<void> {
+    const session = this.featureRequests.get(key);
+    if (!session || session.closing) return;
+    if (session.busy) {
+      this.armFeatureRequestTimer(key);
+      return;
+    }
+    const actions: EngineActions = {
+      replies: [],
+      deletes: [],
+      notifies: [],
+      muted: false,
+      warned: false,
+      llm: false,
+    };
+    try {
+      await commandContext.run(session.replyEvent, () =>
+        this.finishFeatureRequest(session, true, actions, Date.now()),
+      );
+    } catch (error) {
+      log.warn(`Feature request timeout failed conversation=${session.conversationId}`, error);
+    }
+  }
+
+  private async expireFeatureRequests(
+    event: DmEvent,
+    nowMs: number,
+    actions: EngineActions,
+  ): Promise<void> {
+    const timeout = this.featureRequestTimeoutMs();
+    const skipKey = event.senderId
+      ? this.featureRequestKey(event.conversationId, event.senderId)
+      : undefined;
+    const due: FeatureRequestSession[] = [];
+    for (const [key, session] of this.featureRequests) {
+      if (session.closing || session.busy || key === skipKey) continue;
+      if (nowMs - session.lastActivityMs >= timeout) due.push(session);
+    }
+    for (const session of due) {
+      await commandContext.run(session.replyEvent, () =>
+        this.finishFeatureRequest(session, true, actions, nowMs),
+      );
+    }
+  }
+
+  private async handleFeatureRequest(
+    event: DmEvent,
+    idea: string | undefined,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const read = readRequestReply(idea ?? "");
+    const session = this.newFeatureSession(event, nowMs);
+    if (read.detail) {
+      session.idea = read.detail;
+      session.transcript.push({ role: "user", text: read.detail });
+    }
+    this.rememberFeatureRequest(session);
+    await this.finishFeatureRequest(session, read.skip && Boolean(read.detail), actions, nowMs);
+  }
+
+  private async continueFeatureRequest(
+    event: DmEvent,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<boolean> {
+    const text = event.text?.trim();
+    const senderId = event.senderId;
+    if (!text || !senderId) return false;
+    if (parseCommand(text) || parseUnknownBang(text)) return false;
+    const session = this.featureRequests.get(this.featureRequestKey(event.conversationId, senderId));
+    if (!session || session.closing || session.busy) return false;
+    const read = readRequestReply(text);
+    session.replyEvent = event;
+    session.lastActivityMs = nowMs;
+    session.transcript.push({ role: "user", text });
+    if (read.detail && !session.idea) session.idea = read.detail;
+    else if (!read.skip && !session.idea) session.idea = text;
+    this.armFeatureRequestTimer(this.featureRequestKey(event.conversationId, senderId));
+    await this.finishFeatureRequest(session, read.skip, actions, nowMs);
+    return true;
+  }
+
+  private async finishFeatureRequest(
+    session: FeatureRequestSession,
+    force: boolean,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (session.closing || session.busy) return;
+    session.busy = true;
+    try {
+      await this.advanceFeatureRequest(session, force, actions, nowMs);
+    } finally {
+      session.busy = false;
+    }
+  }
+
+  private async advanceFeatureRequest(
+    session: FeatureRequestSession,
+    force: boolean,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const settings = this.conversationConfig(session.conversationId);
+    const maxQuestions = this.featureRequestMaxQuestions();
+    const substantive = substantiveRequestText(session.transcript);
+    const mustFinalize = force || session.questionsAsked >= maxQuestions;
+
+    if (!substantive) {
+      if (mustFinalize) {
+        this.dropFeatureRequest(session);
+        await this.reply(
+          session.conversationId,
+          "Send `!request <idea>` when you know what you want.",
+          actions,
+        );
+        return;
+      }
+      await this.askFeatureRequestQuestion(
+        session,
+        cannedFeatureQuestion(session.questionsAsked, false),
+        actions,
+        nowMs,
+      );
+      return;
+    }
+
+    const model = settings.llmEnabled ? this.llmClient : undefined;
+    if (!model) {
+      if (!mustFinalize && session.questionsAsked < 1) {
+        await this.askFeatureRequestQuestion(
+          session,
+          cannedFeatureQuestion(session.questionsAsked, true),
+          actions,
+          nowMs,
+        );
+        return;
+      }
+      await this.fileFeatureRequest(
+        session,
+        fallbackFeatureFiling(session.transcript),
+        actions,
+        nowMs,
+      );
+      return;
+    }
+
+    const uses = this.store.recordLlmUse(
+      session.conversationId,
+      session.requester.id,
+      nowMs,
+      settings.llmRateLimitWindowMs,
+    );
+    if (uses > settings.llmRateLimitPerUser) {
+      await this.fileFeatureRequest(
+        session,
+        fallbackFeatureFiling(session.transcript),
+        actions,
+        nowMs,
+      );
+      return;
+    }
+
+    let raw: string;
+    try {
+      raw = await model.complete(
+        buildFeatureRequestMessages({
+          transcript: session.transcript,
+          questionsAsked: session.questionsAsked,
+          maxQuestions,
+          mustFinalize,
+        }),
+      );
+    } catch (error) {
+      log.warn(`Feature request LLM failed conversation=${session.conversationId}`, error);
+      if (!session.closing) {
+        await this.fileFeatureRequest(
+          session,
+          fallbackFeatureFiling(session.transcript),
+          actions,
+          nowMs,
+        );
+      }
+      return;
+    }
+
+    if (session.closing) return;
+    actions.llm = true;
+    const decision = parseFeatureRequestModel(raw);
+    if (!mustFinalize && decision?.action === "ask" && session.questionsAsked < maxQuestions) {
+      await this.askFeatureRequestQuestion(session, decision.question, actions, nowMs);
+      return;
+    }
+    const filing: FeatureRequestFiling =
+      decision?.action === "finalize" ? decision : fallbackFeatureFiling(session.transcript);
+    await this.fileFeatureRequest(session, filing, actions, nowMs);
+  }
+
+  private async askFeatureRequestQuestion(
+    session: FeatureRequestSession,
+    question: string,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (session.closing) return;
+    const text = question.trim();
+    if (!text) return;
+    session.questionsAsked += 1;
+    session.transcript.push({ role: "bot", text });
+    session.lastActivityMs = nowMs;
+    this.armFeatureRequestTimer(
+      this.featureRequestKey(session.conversationId, session.requester.id),
+    );
+    await this.reply(session.conversationId, text, actions);
+  }
+
+  private async fileFeatureRequest(
+    session: FeatureRequestSession,
+    filing: FeatureRequestFiling,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    if (!this.dropFeatureRequest(session)) return;
+    const safety = await this.reviewFeatureRequestSafety(session, filing, actions, nowMs);
+    const timestamp = new Date(nowMs).toISOString();
+    const payload = buildFeatureRequestPayload({
+      filing,
+      requester: session.requester,
+      conversationId: session.conversationId,
+      clarification: session.transcript,
+      safety,
+      timestamp,
+    });
+    this.store.addFeatureRequest(
+      session.conversationId,
+      session.requester.id,
+      JSON.stringify(payload),
+      timestamp,
+    );
+    const saved = await this.saveFeatureRequestFile(payload);
+    const options = this.deps.featureRequest;
+    const webhook = await deliverFeatureRequest({
+      webhookUrl: options?.webhookUrl,
+      webhookSecret: options?.webhookSecret,
+      payload,
+      fetchImpl: options?.fetchImpl,
+    });
+    let text = featureRequestConfirmation({
+      summary: payload.summary,
+      mvpScope: payload.mvp_scope,
+      saved,
+      webhook,
+    });
+    if (webhook !== "webhook") {
+      const delivered = await this.dmFeatureRequestOwner(payload);
+      if (!delivered && !saved) text += " I couldn't DM the owner.";
+    }
+    await this.reply(session.conversationId, text, actions);
+  }
+
+  /** Required notify. Chief of Staff polls this folder on the live box. */
+  private async saveFeatureRequestFile(payload: FeatureRequestPayload): Promise<boolean> {
+    const directory = this.deps.featureRequest?.pendingDir ?? defaultFeatureRequestPendingDir();
+    try {
+      const filePath = await writeFeatureRequestFile({ directory, payload });
+      log.info(`Feature request saved conversation=${payload.conversationId} file=${filePath}`);
+      return true;
+    } catch (error) {
+      log.warn(`Feature request file failed conversation=${payload.conversationId}`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Safety review runs after the MVP is chosen and before the pending file,
+   * optional webhook, or owner DM. A missing or broken model still files the
+   * request, with risk `unknown`. This call is not skipped when the per-user
+   * ask budget is already spent.
+   */
+  private async reviewFeatureRequestSafety(
+    session: FeatureRequestSession,
+    filing: FeatureRequestFiling,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<FeatureRequestSafety> {
+    const settings = this.conversationConfig(session.conversationId);
+    const model = settings.llmEnabled ? this.llmClient : undefined;
+    if (!model) {
+      return unknownFeatureSafety("No language model was available to review this request.");
+    }
+    this.store.recordLlmUse(
+      session.conversationId,
+      session.requester.id,
+      nowMs,
+      settings.llmRateLimitWindowMs,
+    );
+    try {
+      const raw = await model.complete(
+        buildFeatureRequestSafetyMessages({
+          filing,
+          transcript: session.transcript,
+        }),
+      );
+      actions.llm = true;
+      return parseFeatureRequestSafety(raw);
+    } catch (error) {
+      log.warn(`Feature request safety review failed conversation=${session.conversationId}`, error);
+      return unknownFeatureSafety("The safety review failed.");
+    }
+  }
+
+  private async dmFeatureRequestOwner(payload: FeatureRequestPayload): Promise<boolean> {
+    const ownerId = this.config.ownerId;
+    if (!ownerId || ownerId === this.config.botUserId) return false;
+    try {
+      await this.client.sendDirectMessage(ownerId, featureRequestOwnerDm(payload));
+      return true;
+    } catch (error) {
+      log.warn("Feature request owner DM failed", error);
+      return false;
+    }
   }
 
   private async reply(

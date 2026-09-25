@@ -63,7 +63,8 @@ export type ParsedCommand =
   | { name: "roast"; target?: UserRef }
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "status" }
-  | { name: "auth" };
+  | { name: "auth" }
+  | { name: "request"; idea?: string };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -144,6 +145,8 @@ const KNOWN_COMMAND_NAMES = new Set([
   "linkroast",
   "status",
   "auth",
+  "request",
+  "featurerequest",
 ]);
 
 /**
@@ -371,6 +374,9 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return parseLinkroast(rest);
     case "status":
       return { name: "status" };
+    case "request":
+    case "featurerequest":
+      return rest ? { name: "request", idea: rest } : { name: "request" };
     case "auth":
       if (bang.prefix !== "!" || rest) return undefined;
       return { name: "auth" };
