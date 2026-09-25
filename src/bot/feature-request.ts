@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { ChatMessage } from "../llm/client.js";
 import { log } from "../log.js";
 
@@ -315,19 +318,50 @@ export function buildFeatureRequestPayload(input: {
   };
 }
 
+/**
+ * Pending folder next to the SQLite file. Default database `data/bot.sqlite`
+ * means `data/feature-requests/pending/`. Chief of Staff polls that folder.
+ */
+export function defaultFeatureRequestPendingDir(databasePath?: string): string {
+  const dataDir = databasePath ? path.dirname(path.resolve(databasePath)) : path.resolve("data");
+  return path.join(dataDir, "feature-requests", "pending");
+}
+
+/**
+ * Write one request file. The name is a UUID. A temp file is renamed into place
+ * so a poller does not read a half-written JSON file.
+ */
+export async function writeFeatureRequestFile(options: {
+  directory: string;
+  payload: FeatureRequestPayload;
+  id?: string;
+}): Promise<string> {
+  const id = safeRequestFileId(options.id ?? randomUUID());
+  await fs.mkdir(options.directory, { recursive: true });
+  const finalPath = path.join(options.directory, `${id}.json`);
+  const tmpPath = path.join(options.directory, `.${id}.json.tmp`);
+  await fs.writeFile(tmpPath, `${JSON.stringify(options.payload, null, 2)}\n`, "utf8");
+  await fs.rename(tmpPath, finalPath);
+  return finalPath;
+}
+
 export function featureRequestConfirmation(input: {
   summary: string;
   mvpScope: string;
-  delivery: FeatureRequestDelivery;
+  saved: boolean;
+  webhook: FeatureRequestDelivery;
 }): string {
   const lead = `Filed: ${input.summary}\nMVP: ${input.mvpScope}`;
-  if (input.delivery === "webhook") {
+  if (input.saved && input.webhook !== "webhook_failed") {
     return `${lead}\nSent that to Chief of Staff.`;
   }
-  if (input.delivery === "webhook_failed") {
-    return `${lead}\nThe request webhook didn't accept it. Recorded locally. The owner will see it.`;
+  if (input.saved) {
+    return `${lead}\nSaved for Chief of Staff. The request webhook didn't accept it.`;
   }
-  return `${lead}\nRecorded locally. The owner will see it.`;
+  if (input.webhook === "webhook") {
+    return `${lead}\nSent that to Chief of Staff. The local copy could not be saved.`;
+  }
+  return `${lead}\nCouldn't save that request for Chief of Staff.`;
 }
 
 export function featureRequestOwnerDm(payload: FeatureRequestPayload): string {
@@ -396,6 +430,14 @@ export async function deliverFeatureRequest(options: {
     );
     return "webhook_failed";
   }
+}
+
+function safeRequestFileId(id: string): string {
+  const clean = id.replace(/[^A-Za-z0-9._-]/g, "");
+  if (!clean || clean === "." || clean === "..") {
+    throw new Error("feature request file id is empty");
+  }
+  return clean;
 }
 
 function compactRequester(requester: FeatureRequester): FeatureRequester {

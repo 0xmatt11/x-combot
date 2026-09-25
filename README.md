@@ -591,11 +591,15 @@ The snapshot is whatever this process already knows. It does not call X, the LLM
 
 `!request <idea>` (alias `!featurerequest`, and the `/` forms) lets anyone in an authorized chat ask for a feature. The bot does not implement it in this process. Chief of Staff and cloud agents do that after review.
 
-Bare `!request` asks what they want. With an idea, the bot uses the same LLM client as `!ask` (no group history) to ask a few short questions about the goal, a constraint, or an example, and nudges toward an MVP. It stops after three questions. `just build it`, `MVP is fine`, or about ten minutes of silence files whatever is already known. Those clarifying calls share the per-user LLM rate limit; over the limit, it files without another question. If the model is off or the call fails, it still files from the text it has. After the MVP is chosen, and before the webhook or owner DM, the same model writes a safety review. That review still runs when the ask budget is already spent. If it cannot, `safety.risk` is `unknown`.
+Bare `!request` asks what they want. With an idea, the bot uses the same LLM client as `!ask` (no group history) to ask a few short questions about the goal, a constraint, or an example, and nudges toward an MVP. It stops after three questions. `just build it`, `MVP is fine`, or about ten minutes of silence files whatever is already known. Those clarifying calls share the per-user LLM rate limit; over the limit, it files without another question. If the model is off or the call fails, it still files from the text it has. After the MVP is chosen, and before the pending file, optional webhook, or owner DM, the same model writes a safety review. That review still runs when the ask budget is already spent. If it cannot, `safety.risk` is `unknown`.
 
 The in-chat confirmation is a short summary. It tags the requester and, in encrypted Chat, threads under their message, the same way other command replies do.
 
-Then the bot POSTs JSON to `REQUEST_WEBHOOK_URL`. When `REQUEST_WEBHOOK_SECRET` is set, the header is `Authorization: Bearer <secret>`. No other secret header is sent. The body is:
+Chief of Staff is notified by a file, not by a webhook secret Matt has to copy. On finalize the bot writes one JSON file to `data/feature-requests/pending/<uuid>.json`. That folder sits next to the SQLite file, so a custom `DATABASE_PATH` moves it with the database. Directories are created when the first request is filed. Chief of Staff polls `data/feature-requests/pending/*.json` on the shared live box. The file is renamed into place, so a poll does not read a half-written body. The bot does not implement the idea.
+
+`REQUEST_WEBHOOK_URL` is optional. When it is set, the same JSON is also POSTed. When `REQUEST_WEBHOOK_SECRET` is set, the header is `Authorization: Bearer <secret>`. No other secret header is sent. Redirects are not followed, so the URL should be the final endpoint. The secret is not logged and is not written into the JSON file. Unset, the request still files. If the POST fails, the pending file remains and the bot DMs `BOT_OWNER_ID` when that send works.
+
+The file and the POST use the same body:
 
 | Field | |
 | --- | --- |
@@ -605,10 +609,10 @@ Then the bot POSTs JSON to `REQUEST_WEBHOOK_URL`. When `REQUEST_WEBHOOK_SECRET` 
 | `conversationId` | The chat it was asked in |
 | `clarification` | Q&A transcript (`user` / `bot` turns) |
 | `complexity_hint` | LLM guess: `simple`, `medium`, or `large`. Chief of Staff decides for real |
-| `safety` | LLM review run after the MVP is chosen and before this POST. `risk` is `benign`, `suspicious`, `malicious`, or `unknown`. `reasons` is a short list of why. `categories` may include `auth_bypass`, `secrets`, `exfil`, `spam`, `billing_abuse`, `harassment`, `prompt_injection`, `illegal`. Chief of Staff re-checks and prompts Matt before auto-merge when risk is not clearly benign. If the model cannot review, `risk` is `unknown` and the request is still filed |
+| `safety` | LLM review run after the MVP is chosen and before the file is written. `risk` is `benign`, `suspicious`, `malicious`, or `unknown`. `reasons` is a short list of why. `categories` may include `auth_bypass`, `secrets`, `exfil`, `spam`, `billing_abuse`, `harassment`, `prompt_injection`, `illegal`. Chief of Staff re-checks and prompts Matt before auto-merge when risk is not clearly benign. If the model cannot review, `risk` is `unknown` and the request is still filed |
 | `timestamp` | ISO time |
 
-Every filing is also stored in SQLite `feature_requests`. If `REQUEST_WEBHOOK_URL` is unset, or the POST fails, the bot says it was recorded locally and DMs `BOT_OWNER_ID` when that send works. The secret is not logged and is not copied into the chat. Redirects are not followed, so the URL should be the final endpoint. An unfinished Q&A is kept in memory; a restart drops it, and the requester can send `!request` again. Filed rows stay in SQLite.
+A copy of the same JSON is also stored in SQLite `feature_requests`. Chief of Staff polls the pending folder, not that table. An unfinished Q&A is kept in memory; a restart drops it, and the requester can send `!request` again. Filed files and SQLite rows stay.
 
 ## LLM replies
 
@@ -667,8 +671,8 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `ACTIVITY_BEARER_TOKEN` | App-only bearer for list, stream, and `POST /2/webhooks` |
 | `ACTIVITY_WEBHOOK_PORT`, `ACTIVITY_WEBHOOK_PATH`, `ACTIVITY_WEBHOOK_URL` | Local listener and the public HTTPS URL |
 | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY` | Provider selection. See [LLM replies](#llm-replies) |
-| `REQUEST_WEBHOOK_URL` | `!request` POSTs `feature_request` JSON here. Unset stores it and DMs `BOT_OWNER_ID`. See [Feature requests](#feature-requests) |
-| `REQUEST_WEBHOOK_SECRET` | Optional. Sent as `Authorization: Bearer <secret>`. Not logged |
+| `REQUEST_WEBHOOK_URL` | Optional second notify. `!request` also POSTs the same JSON here. Unset still writes `data/feature-requests/pending/`. See [Feature requests](#feature-requests) |
+| `REQUEST_WEBHOOK_SECRET` | Optional. When the URL is set, sent as `Authorization: Bearer <secret>`. Not logged |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI, and the last-resort key for Grok |
 | `XAI_API_KEY` | Preferred Grok key. TTS, LLM, and Imagine only when `IMAGINE_BACKEND=api` |
 | `IMAGINE_BACKEND` | `browser` (default) or `api`. Browser does not call image or video generation routes |
@@ -709,7 +713,7 @@ SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, wa
 ```
 src/index.ts            # poll loops, Chat listen policy, Activity stream/webhook
 src/bot/engine.ts       # commands, XP, LLM dispatch
-src/bot/feature-request.ts # !request Q&A, webhook POST, owner-DM fallback
+src/bot/feature-request.ts # !request Q&A, pending JSON file, optional webhook, owner DM
 src/bot/parser.ts       # command and wake parsing
 src/bot/status.ts       # !status text from in-process health (no extra API calls)
 src/bot/games/          # !dice, instant games, !minesweeper, word/solo, multiplayer, casino, and the !games catalog

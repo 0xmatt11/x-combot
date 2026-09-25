@@ -161,6 +161,7 @@ import {
   buildFeatureRequestPayload,
   buildFeatureRequestSafetyMessages,
   cannedFeatureQuestion,
+  defaultFeatureRequestPendingDir,
   deliverFeatureRequest,
   fallbackFeatureFiling,
   featureRequestConfirmation,
@@ -168,6 +169,7 @@ import {
   parseFeatureRequestModel,
   parseFeatureRequestSafety,
   readRequestReply,
+  writeFeatureRequestFile,
   substantiveRequestText,
   unknownFeatureSafety,
   FEATURE_REQUEST_MAX_QUESTIONS,
@@ -285,14 +287,16 @@ export interface EngineDeps {
    */
   commandCleanupMs?: number;
   /**
-   * `!request` filing. The webhook URL and secret come from the environment.
-   * No URL still accepts the request, stores it, and DMs the owner.
-   * `fetchImpl` is for tests.
+   * `!request` filing. The pending folder is the notify Chief of Staff polls.
+   * The webhook is optional. No URL still writes the file and DMs the owner.
+   * `fetchImpl` and `pendingDir` are for tests.
    */
   featureRequest?: {
     webhookUrl?: string;
     webhookSecret?: string;
     fetchImpl?: FeatureRequestFetch;
+    /** Defaults to `data/feature-requests/pending` beside the database file. */
+    pendingDir?: string;
     /** Silence before the open request is filed. Default 10 minutes. */
     timeoutMs?: number;
     /** Clarifying questions before filing. Clamped to 1–3. Default 3. */
@@ -3646,8 +3650,9 @@ export class ModerationEngine {
       JSON.stringify(payload),
       timestamp,
     );
+    const saved = await this.saveFeatureRequestFile(payload);
     const options = this.deps.featureRequest;
-    const delivery = await deliverFeatureRequest({
+    const webhook = await deliverFeatureRequest({
       webhookUrl: options?.webhookUrl,
       webhookSecret: options?.webhookSecret,
       payload,
@@ -3656,19 +3661,34 @@ export class ModerationEngine {
     let text = featureRequestConfirmation({
       summary: payload.summary,
       mvpScope: payload.mvp_scope,
-      delivery,
+      saved,
+      webhook,
     });
-    if (delivery !== "webhook") {
+    if (webhook !== "webhook") {
       const delivered = await this.dmFeatureRequestOwner(payload);
-      if (!delivered) text += " I couldn't DM the owner.";
+      if (!delivered && !saved) text += " I couldn't DM the owner.";
     }
     await this.reply(session.conversationId, text, actions);
   }
 
+  /** Required notify. Chief of Staff polls this folder on the live box. */
+  private async saveFeatureRequestFile(payload: FeatureRequestPayload): Promise<boolean> {
+    const directory = this.deps.featureRequest?.pendingDir ?? defaultFeatureRequestPendingDir();
+    try {
+      const filePath = await writeFeatureRequestFile({ directory, payload });
+      log.info(`Feature request saved conversation=${payload.conversationId} file=${filePath}`);
+      return true;
+    } catch (error) {
+      log.warn(`Feature request file failed conversation=${payload.conversationId}`, error);
+      return false;
+    }
+  }
+
   /**
-   * Safety review runs after the MVP is chosen and before the webhook or owner DM.
-   * A missing or broken model still files the request, with risk `unknown`.
-   * This call is not skipped when the per-user ask budget is already spent.
+   * Safety review runs after the MVP is chosen and before the pending file,
+   * optional webhook, or owner DM. A missing or broken model still files the
+   * request, with risk `unknown`. This call is not skipped when the per-user
+   * ask budget is already spent.
    */
   private async reviewFeatureRequestSafety(
     session: FeatureRequestSession,

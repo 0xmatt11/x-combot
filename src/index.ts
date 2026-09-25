@@ -5,6 +5,7 @@ import { log } from "./log.js";
 import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
+import { defaultFeatureRequestPendingDir } from "./bot/feature-request.js";
 import { readBuildVersion, RuntimeHealth } from "./bot/status.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
@@ -253,15 +254,15 @@ async function main(): Promise<void> {
       featureRequest: {
         webhookUrl: env.requestWebhookUrl,
         webhookSecret: env.requestWebhookSecret,
+        pendingDir: defaultFeatureRequestPendingDir(env.databasePath),
       },
     },
   );
+  log.info(
+    `!request writes one JSON file per request to ${defaultFeatureRequestPendingDir(env.databasePath)}.`,
+  );
   if (env.requestWebhookUrl) {
-    log.info("!request will POST feature requests to REQUEST_WEBHOOK_URL.");
-  } else {
-    log.info(
-      "!request has no REQUEST_WEBHOOK_URL. Requests are stored locally and DM BOT_OWNER_ID.",
-    );
+    log.info("!request will also POST feature requests to REQUEST_WEBHOOK_URL.");
   }
 
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;

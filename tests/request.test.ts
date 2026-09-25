@@ -1,13 +1,17 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import {
   buildFeatureRequestPayload,
+  defaultFeatureRequestPendingDir,
   fallbackFeatureFiling,
   parseFeatureRequestModel,
   parseFeatureRequestSafety,
   postFeatureRequestWebhook,
   readRequestReply,
+  writeFeatureRequestFile,
   type FeatureRequestFetch,
   type FeatureRequestPayload,
 } from "../src/bot/feature-request.js";
@@ -216,13 +220,58 @@ describe("feature request model", () => {
   });
 });
 
+describe("feature request files", () => {
+  it("writes the webhook-shaped JSON under the pending folder", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "feature-requests-"));
+    try {
+      const payload = buildFeatureRequestPayload({
+        filing: fallbackFeatureFiling([{ role: "user", text: "dark mode" }]),
+        requester: { id: alice.id, username: "alice" },
+        conversationId: groupId,
+        clarification: [{ role: "user", text: "dark mode" }],
+        safety: { risk: "suspicious", reasons: ["Unclear intent."], categories: ["secrets"] },
+        timestamp: "2026-09-25T15:00:00.000Z",
+      });
+      const filePath = await writeFeatureRequestFile({ directory, payload, id: "req-1" });
+      expect(filePath).toBe(path.join(directory, "req-1.json"));
+      expect(JSON.parse(fs.readFileSync(filePath, "utf8"))).toMatchObject({
+        type: "feature_request",
+        summary: "dark mode",
+        safety: { risk: "suspicious", reasons: ["Unclear intent."], categories: ["secrets"] },
+      });
+      expect(fs.readdirSync(directory).some((name) => name.endsWith(".tmp"))).toBe(false);
+      expect(defaultFeatureRequestPendingDir("/var/bot/data/bot.sqlite")).toBe(
+        path.join("/var/bot/data", "feature-requests", "pending"),
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("!request", () => {
   const stores: Store[] = [];
+  const pendingDirs: string[] = [];
 
   afterEach(() => {
     for (const store of stores) store.close();
     stores.length = 0;
+    for (const dir of pendingDirs) fs.rmSync(dir, { recursive: true, force: true });
+    pendingDirs.length = 0;
   });
+
+  function makePendingDir(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "feature-requests-"));
+    pendingDirs.push(dir);
+    return dir;
+  }
+
+  function readPending(dir: string): FeatureRequestPayload[] {
+    return fs
+      .readdirSync(dir)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as FeatureRequestPayload);
+  }
 
   function setup(options?: {
     replies?: string[];
@@ -231,11 +280,13 @@ describe("!request", () => {
     fetchImpl?: FeatureRequestFetch;
     timeoutMs?: number;
     help?: string;
+    pendingDir?: string;
   }): {
     engine: ModerationEngine;
     client: MockXClient;
     store: Store;
     llm: MockLlmClient;
+    pendingDir: string;
   } {
     const store = new Store(":memory:");
     stores.push(store);
@@ -250,15 +301,17 @@ describe("!request", () => {
       defaults: options?.help ? { ...defaults, help: options.help } : defaults,
     };
     const llm = new MockLlmClient(options?.replies ?? [ask("Who is it for?")]);
+    const dir = options?.pendingDir ?? makePendingDir();
     const engine = new ModerationEngine(store, client, config, llm, {
       featureRequest: {
         webhookUrl: options?.webhookUrl,
         webhookSecret: options?.webhookSecret,
         fetchImpl: options?.fetchImpl,
         timeoutMs: options?.timeoutMs,
+        pendingDir: dir,
       },
     });
-    return { engine, client, store, llm };
+    return { engine, client, store, llm, pendingDir: dir };
   }
 
   it("asks what they want, then one clarifying question", async () => {
@@ -303,7 +356,7 @@ describe("!request", () => {
 
   it("stops after three questions even if the model wants another", async () => {
     const calls: FetchCall[] = [];
-    const { engine, client, llm } = setup({
+    const { engine, client, llm, pendingDir } = setup({
       replies: [
         ask("Who is it for?"),
         ask("Any example?"),
@@ -366,6 +419,7 @@ describe("!request", () => {
     ]);
     expect(JSON.stringify(body)).not.toContain("hook-secret");
     expect(client.direct).toEqual([]);
+    expect(readPending(pendingDir)).toEqual([body]);
   });
 
   it("files a skipped Q&A to the webhook with the model summary", async () => {
@@ -464,7 +518,7 @@ describe("!request", () => {
 
   it("records locally and DMs the owner when the webhook is unset", async () => {
     const calls: FetchCall[] = [];
-    const { engine, client, store } = setup({
+    const { engine, client, store, pendingDir } = setup({
       replies: [
         finalize({
           summary: "Pin a rules message",
@@ -481,8 +535,15 @@ describe("!request", () => {
     );
     expect(calls).toHaveLength(0);
     expect(filed.replies[0]).toMatch(/Filed: Pin a rules message/);
-    expect(filed.replies[0]).toMatch(/Recorded locally/);
-    expect(filed.replies[0]).toMatch(/owner will see it/);
+    expect(filed.replies[0]).toMatch(/Sent that to Chief of Staff/);
+    const pending = readPending(pendingDir);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.safety).toEqual({
+      risk: "benign",
+      reasons: ["Reposts rules that are already public."],
+      categories: [],
+    });
+    expect(fs.readdirSync(pendingDir).some((name) => /^[0-9a-f-]{36}\.json$/.test(name))).toBe(true);
     expect(client.direct).toHaveLength(1);
     expect(client.direct[0]?.participantId).toBe(owner.id);
     expect(client.direct[0]?.text).toContain("Pin a rules message");
@@ -501,7 +562,7 @@ describe("!request", () => {
   });
 
   it("falls back to a local record when the webhook rejects the POST", async () => {
-    const { engine, client } = setup({
+    const { engine, client, pendingDir } = setup({
       replies: [
         finalize({
           summary: "Pin a rules message",
@@ -517,10 +578,12 @@ describe("!request", () => {
       message({ id: "e1", senderId: alice.id, text: "!request pin the rules" }),
     );
     expect(filed.replies[0]).toMatch(/didn't accept it/);
-    expect(filed.replies[0]).toMatch(/Recorded locally/);
+    expect(filed.replies[0]).toMatch(/Saved for Chief of Staff/);
     expect(client.direct[0]?.participantId).toBe(owner.id);
     expect(client.direct[0]?.text).toContain("Pin a rules message");
     expect(client.direct[0]?.text).toContain("Safety: benign");
+    expect(readPending(pendingDir)).toHaveLength(1);
+    expect(readPending(pendingDir)[0]?.summary).toBe("Pin a rules message");
   });
 
   it("files an unanswered request when the silence window passes", async () => {
@@ -639,6 +702,7 @@ describe("!request", () => {
     const client = new MockXClient();
     client.addUser(alice);
     client.addUser(owner);
+    const dir = makePendingDir();
     const engine = new ModerationEngine(
       store,
       client,
@@ -653,6 +717,7 @@ describe("!request", () => {
         featureRequest: {
           webhookUrl: "https://hooks.example/request",
           fetchImpl: recordingFetch(calls),
+          pendingDir: dir,
         },
       },
     );
@@ -666,6 +731,7 @@ describe("!request", () => {
       categories: [],
     });
     expect(bodyOf(calls[0]?.init).safety.reasons[0]).toMatch(/No language model/);
+    expect(readPending(dir)[0]?.safety.risk).toBe("unknown");
   });
 });
 
@@ -680,6 +746,8 @@ describe("!request help and env", () => {
     expect(readme).toMatch(/Authorization: Bearer/);
     expect(readme).toMatch(/safety/);
     expect(readme).toMatch(/not clearly benign/);
+    expect(readme).toMatch(/data\/feature-requests\/pending/);
+    expect(fs.readFileSync(".env.example", "utf8")).toMatch(/feature-requests\/pending/);
     expect(fs.readFileSync(".env.example", "utf8")).toMatch(/REQUEST_WEBHOOK_SECRET/);
   });
 

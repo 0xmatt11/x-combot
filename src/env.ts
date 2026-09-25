@@ -363,8 +363,8 @@ export interface Env {
   /** TTS language. Unset uses `en`. Personas choose the voice id. */
   voiceTtsLanguage?: string;
   /**
-   * `!request` POSTs a feature_request JSON body here for Chief of Staff.
-   * Unset still accepts the request in chat, stores it, and DMs the owner.
+   * Optional second notify for `!request`. The pending JSON file is written either way.
+   * Unset still accepts the request, writes `data/feature-requests/pending/`, and DMs the owner.
    */
   requestWebhookUrl?: string;
   /**
