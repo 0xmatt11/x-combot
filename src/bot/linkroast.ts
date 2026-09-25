@@ -20,7 +20,6 @@ import type { LinkSignals } from "../types.js";
 import { containsBannedAgeTerm } from "./adult-filter.js";
 import { parseLlmWake } from "./parser.js";
 import { stripApiIds } from "./troll.js";
-import { handlesInText } from "./user-context.js";
 
 /** At most one link roast per user per conversation inside this window. */
 export const LINKROAST_COOLDOWN_MS = 45_000;
@@ -104,10 +103,12 @@ export function messageHasRoastableLink(event: {
 }
 
 /**
- * A link or shared post is context for the bot, not an unsolicited promo.
- * True when the message replies to the bot account, or when it is aimed at
- * the bot the same way `!ask` / `@bot` are: a wake prefix, or a mention of
- * the bot's @handle (or an `@` wake such as `@bot`) anywhere in the text.
+ * Link-roast only. A link or shared post is context for the bot, not an
+ * unsolicited promo.
+ *
+ * A trusted reply to the bot account counts. So does a message directed at
+ * the bot: it starts with the same wake `!ask` uses (`@botname`, `@bot`,
+ * `!ask`), or it @mentions the bot's handle.
  */
 export function skipsLinkroastForBotContext(input: {
   text?: string | null;
@@ -121,7 +122,6 @@ export function skipsLinkroastForBotContext(input: {
   const replyId = input.replySenderId?.trim();
   if (botId && replyId === botId) return true;
 
-  const wakePrefixes = [...(input.wakePrefixes ?? [])];
   const mentions = input.mentions?.map((mention) => ({
     username: mention.username,
     id: mention.id,
@@ -130,37 +130,22 @@ export function skipsLinkroastForBotContext(input: {
     parseLlmWake(input.text, {
       botUsername: input.botUsername,
       botUserId: input.botUserId,
-      wakePrefixes,
+      wakePrefixes: [...(input.wakePrefixes ?? [])],
       mentions,
     })
   ) {
     return true;
   }
 
-  const addressed = botAddressHandles(input.botUsername, wakePrefixes);
-  if (addressed.size === 0 && !botId) return false;
+  const handle = input.botUsername?.trim().replace(/^@/, "").toLowerCase();
   for (const mention of mentions ?? []) {
     if (botId && mention.id === botId) return true;
     const name = mention.username.replace(/^@/, "").toLowerCase();
-    if (name && addressed.has(name)) return true;
+    if (handle && name === handle) return true;
   }
-  for (const handle of handlesInText(input.text ?? undefined)) {
-    if (addressed.has(handle.toLowerCase())) return true;
-  }
-  return false;
-}
-
-function botAddressHandles(botUsername: string | undefined, wakePrefixes: readonly string[]): Set<string> {
-  const handles = new Set<string>();
-  const username = botUsername?.trim().replace(/^@/, "").toLowerCase();
-  if (username) handles.add(username);
-  for (const prefix of wakePrefixes) {
-    const trimmed = prefix.trim();
-    if (!trimmed.startsWith("@")) continue;
-    const handle = trimmed.slice(1).trim().toLowerCase();
-    if (handle) handles.add(handle);
-  }
-  return handles;
+  if (!handle || !input.text) return false;
+  const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`@${escaped}\\b`, "i").test(input.text);
 }
 
 export function linkroastFallback(label: string, rng: () => number): string {
