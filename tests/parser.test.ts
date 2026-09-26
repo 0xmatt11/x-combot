@@ -231,6 +231,19 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!undertow please")).toBeUndefined();
   });
 
+  it("parses !fathom and keeps extra text off the lookup", () => {
+    expect(parseCommand("!fathom")).toEqual({ name: "fathom" });
+    expect(parseCommand("!FATHOM")).toEqual({ name: "fathom" });
+    expect(parseCommand("  /fathom  ")).toEqual({ name: "fathom" });
+    expect(parseCommand("!fathom please")).toEqual({ name: "fathom", extra: "please" });
+    expect(parseCommand("!fathom background red")).toEqual({
+      name: "fathom",
+      extra: "background red",
+    });
+    expect(parseUnknownBang("!fathom")).toBeUndefined();
+    expect(parseUnknownBang("!fathom please")).toBeUndefined();
+  });
+
   it("parses xp, level, rank, and the leaderboard aliases", () => {
     expect(parseCommand("!xp")).toEqual({ name: "xp" });
     expect(parseCommand("/level")).toEqual({ name: "xp" });

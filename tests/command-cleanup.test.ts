@@ -102,6 +102,14 @@ describe("command cleanup", () => {
           };
         },
       },
+      fathom: {
+        async randomImage() {
+          return {
+            tokenId: "42",
+            url: "https://i2c.seadn.io/ethereum/0xce62f2a3f0ab5b5f0f5c71313cde70d96e14de23/fathom.png",
+          };
+        },
+      },
       fetchImage: async (url) =>
         url.includes("seadn.io")
           ? { bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/png" }
@@ -264,6 +272,7 @@ describe("command cleanup", () => {
       "!cheese",
       "!milady",
       "!undertow",
+      "!fathom",
       "!imagine a red boat",
     ];
     for (const [index, text] of commands.entries()) {

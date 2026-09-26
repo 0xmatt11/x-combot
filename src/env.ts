@@ -305,7 +305,8 @@ export interface Env {
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
   boobsSearchApiKey?: string;
   /**
-   * Optional OpenSea key for `!milady`. Unset uses the public GraphQL search.
+   * Optional OpenSea key for `!milady`, `!undertow`, and `!fathom`.
+   * Unset uses the public GraphQL search.
    * A GraphQL rate limit with no key mints a free key instead.
    */
   openseaApiKey?: string;
