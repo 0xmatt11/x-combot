@@ -342,6 +342,54 @@ describe("Chat ids and wire shapes", () => {
       senderId: "owner-1",
     });
 
+    const wasmLeft = chatEventToDm(
+      GROUP,
+      { id: "evt-wasm-left", sequence_id: "78" },
+      {
+        type: "groupChange",
+        sequenceId: "78",
+        senderId: "owner-1",
+        change: {
+          change_type: "membersRemoved",
+          member_ids: ["alice-1"],
+          current_member_ids: ["owner-1"],
+        },
+      },
+    );
+    expect(wasmLeft).toMatchObject({
+      id: "evt-wasm-left",
+      eventType: "ParticipantsLeave",
+      participantIds: ["alice-1"],
+      sequenceId: "78",
+      senderId: "owner-1",
+    });
+
+    const wasmJoin = chatEventToDm(
+      GROUP,
+      { id: "evt-wasm-join" },
+      {
+        type: "groupChange",
+        change: {
+          change_type: "membersAdded",
+          member_ids: ["new-1"],
+          current_member_ids: ["new-1", "alice-1"],
+        },
+      },
+    );
+    expect(wasmJoin?.eventType).toBe("ParticipantsJoin");
+    expect(wasmJoin?.participantIds).toEqual(["new-1"]);
+
+    expect(
+      chatEventToDm(
+        GROUP,
+        { id: "evt-wasm-admin" },
+        {
+          type: "groupChange",
+          change: { change_type: "adminsRemoved", admin_ids: ["alice-1"], member_ids: ["alice-1"] },
+        },
+      ),
+    ).toBeUndefined();
+
     const aliased = chatEventToDm(
       GROUP,
       { id: "activity-uuid", encoded_event: "b64-help", sender_id: "alice-1" },
@@ -663,6 +711,55 @@ describe("Chat transport into the moderation engine", () => {
           sender_id: "owner-1",
           encoded_event: "b64-left",
           sequence_id: "77",
+          conversation_id: GROUP,
+        },
+      ],
+    });
+    await poller.pollOnce();
+    expect(cipher.texts).toEqual(["@alice has left"]);
+  });
+
+  it("announces a WASM membersRemoved once and skips the bot", async () => {
+    const { http, cipher, dm, poller, service, store } = setup();
+    dm.addUser({ id: "alice-1", username: "alice", name: "Alice" });
+    cipher.events.set("b64-wasm-left", {
+      type: "groupChange",
+      sequenceId: "90",
+      senderId: "owner-1",
+      id: "msg-wasm-left",
+      change: {
+        change_type: "membersRemoved",
+        member_ids: ["alice-1", "bot-1"],
+      },
+    });
+    http.pages.push({ data: [] });
+    await poller.pollOnce();
+
+    const engine = new ModerationEngine(store, new RoutedXClient(dm, service), runtime());
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
+    await intake.handle({
+      data: {
+        event_type: "chat.received",
+        event_uuid: "activity-wasm-left",
+        payload: {
+          id: "activity-wasm-left",
+          sender_id: "owner-1",
+          conversation_id: GROUP,
+          encoded_event: "b64-wasm-left",
+          sequence_id: "90",
+        },
+      },
+    });
+    expect(cipher.texts).toEqual(["@alice has left"]);
+    expect(dm.sent).toHaveLength(0);
+
+    http.pages.push({
+      data: [
+        {
+          id: "msg-wasm-left",
+          sender_id: "owner-1",
+          encoded_event: "b64-wasm-left",
+          sequence_id: "90",
           conversation_id: GROUP,
         },
       ],

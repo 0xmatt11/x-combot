@@ -9,7 +9,8 @@ welcome:
     I can show !rules, answer with !ask, summarize with !summarize, generate images and videos (!imagine / !video), speak a line (!voice), post fun photos when those commands are enabled, roast with !troll, and track XP (!xp / !top). Type !help for the full list.
 
 # Posted when someone leaves or is removed. X reports both as the same event
-# (classic ParticipantsLeave, Chat groupChange membersRemoved), so the line
+# (classic ParticipantsLeave, Chat groupChange membersRemoved — WASM nests
+# this as change.change_type / change.member_ids), so the line
 # does not try to tell a kick apart from a voluntary leave. On by default.
 # `{username}` is the @handle when X returns one, otherwise the user id.
 leave:

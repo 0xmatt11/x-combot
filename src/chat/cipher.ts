@@ -51,10 +51,29 @@ export interface DecryptedEvent {
    * `media` | `url` | `post` | `unifiedCard`). Media is not a link.
    */
   attachments?: unknown;
+  /**
+   * Documented camelCase. chat-xdk 0.5 WASM leaves the tag as `change_type`
+   * on the nested `change` object (`membersRemoved`, `membersAdded`).
+   */
   changeType?: string;
+  change_type?: string;
   memberIds?: string[];
-  change?: { changeType?: string; memberIds?: string[] };
-  groupChange?: { changeType?: string; memberIds?: string[] };
+  /** WASM field name beside `change_type`. Not `current_member_ids`. */
+  member_ids?: string[];
+  change?: {
+    changeType?: string;
+    change_type?: string;
+    memberIds?: string[];
+    member_ids?: string[];
+    [key: string]: unknown;
+  };
+  groupChange?: {
+    changeType?: string;
+    change_type?: string;
+    memberIds?: string[];
+    member_ids?: string[];
+    [key: string]: unknown;
+  };
 }
 
 export interface ConversationKeySet {

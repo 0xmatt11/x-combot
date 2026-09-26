@@ -8,7 +8,7 @@ Other chat bots can kick and delete anyone's messages when those apps expose tho
 
 ## What it actually does
 
-- Welcomes joins and announces leaves (`@{username} has left`). A voluntary leave and a remove look the same to the API.
+- Welcomes joins and announces leaves (`@{username} has left`) in that same chat. A voluntary leave and a remove look the same to the API. The bot does not announce itself. A reconnect or restart does not repeat a leave it already announced.
 - Public `!help` is a short menu: fun, chat, media, and games. One line per idea, not a writeup of every alias. Admin commands are `!admin` only.
 - Admin commands: warn, kick (soft-mute only), mute, delete, purge, notes, per-group settings, admin allowlist. They are listed by `!admin`, not by `!help`. `!auth` and `!status` are owner-only (`BOT_OWNER_ID`). Admins cannot run them. `!auth` unlocks a new encrypted Chat group; until that account sends it, the group stays silent. `!status` is the health snapshot.
 - `!cheese` posts a few kitten photos and a few cheese photos (separate images, not one combined picture). Search is DuckDuckGo, then Bing, then Reddit. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
@@ -156,6 +156,8 @@ Discovery in `all` mode:
 - Once more than 8 groups are known, each catch-up tick reads newly seen groups first, then a rotating handful (8 reads per tick). An allowlist, and any set of 8 or fewer, is polled in full every tick.
 
 The first sight of a group **seeds a watermark and does not replay history**. Restarting does not replay: known groups are remembered from `chat_events:<id>` watermarks. Allowlist mode polls the allowlist only; remembered ids outside that list are not picked up.
+
+A decrypted group change with members removed posts `@{username} has left` in that chat (`@handle` when known, otherwise the display name, otherwise `someone`). That change arrives on `chat.received` or the catch-up poll. chat-xdk nests it as `change.change_type` `membersRemoved` and `change.member_ids`. A `chat.conversation.member_removed` signal with no ciphertext only registers the group; the poll decrypts the same change. The bot skips its own id. Activity and the poll share one announcement, and a restart does not replay it.
 
 ### Authorizing a new encrypted group
 
