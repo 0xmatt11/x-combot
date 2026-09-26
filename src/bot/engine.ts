@@ -101,6 +101,16 @@ import {
   type UndertowPiece,
 } from "./undertow.js";
 import {
+  createFathomLookup,
+  downloadFathomImage,
+  FATHOM_UNAVAILABLE,
+  FathomLookupError,
+  isFathomSvgUrl,
+  isSafeFathomImageUrl,
+  type FathomImage,
+  type FathomLookup,
+} from "./fathom.js";
+import {
   formatImagineModerationReply,
   imaginePromptRejection,
   ImagineError,
@@ -320,7 +330,13 @@ export interface EngineDeps {
    * This command does not call Imagine or api.x.ai.
    */
   undertow?: UndertowLookup;
-  /** Optional `OPENSEA_API_KEY` for the default `!milady` and `!undertow` clients. */
+  /**
+   * OpenSea lookup for `!fathom`. Absent means the engine builds the default
+   * client on first use. Same `openseaApiKey` as `!milady`.
+   * This command does not call Imagine or api.x.ai.
+   */
+  fathom?: FathomLookup;
+  /** Optional `OPENSEA_API_KEY` for the default `!milady`, `!undertow`, and `!fathom` clients. */
   openseaApiKey?: string;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
@@ -460,6 +476,8 @@ export class ModerationEngine {
   private ownedMilady?: MiladyLookup;
   /** Built on the first `!undertow` when `deps.undertow` was not injected. */
   private ownedUndertow?: UndertowLookup;
+  /** Built on the first `!fathom` when `deps.fathom` was not injected. */
+  private ownedFathom?: FathomLookup;
   /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
   private readonly featureRequests = new Map<string, FeatureRequestSession>();
   private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -2858,6 +2876,9 @@ export class ModerationEngine {
       case "undertow":
         await this.handleUndertow(event, command.extra, actions);
         return;
+      case "fathom":
+        await this.handleFathom(event, command.extra, actions);
+        return;
       case "imagine":
         await this.handleImagine(event, command.prompt, actions);
         return;
@@ -3603,6 +3624,97 @@ export class ModerationEngine {
       random: () => this.nextRandom(),
     });
     return this.ownedUndertow;
+  }
+
+  /**
+   * `!fathom` posts one Fathom Lines image. Extra words are ignored except a
+   * banned age term, which is refused. The lookup is OpenSea only. SVG art is
+   * rasterized to PNG before upload. This does not call Imagine or api.x.ai,
+   * and a failure does not post a link.
+   */
+  private async handleFathom(
+    event: DmEvent,
+    extra: string | undefined,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (extra && containsBannedAgeTerm(extra)) {
+      log.warn(`Refused !fathom with unsafe extra text conversation=${conversationId}`);
+      await this.reply(conversationId, "Refused. !fathom does not search custom text.", actions);
+      return;
+    }
+
+    const lookup = this.fathomClient();
+    let image: FathomImage;
+    try {
+      image = await lookup.randomImage();
+    } catch (error) {
+      const userMessage = error instanceof FathomLookupError ? error.userMessage : FATHOM_UNAVAILABLE;
+      const detail = redactSecrets(error instanceof Error ? error.message : "lookup failed");
+      log.warn(`!fathom lookup failed conversation=${conversationId}: ${detail}`);
+      await this.reply(conversationId, userMessage, actions);
+      return;
+    }
+
+    if (!isSafeFathomImageUrl(image.url)) {
+      log.warn(`!fathom skipped an unsafe image url conversation=${conversationId}`);
+      await this.reply(conversationId, FATHOM_UNAVAILABLE, actions);
+      return;
+    }
+
+    const host = imageHost(image.url);
+    const caption = await this.commandCaption(event);
+    const fetched = await this.fathomBytes(image.url);
+    if (!fetched || fetched.bytes.byteLength === 0) {
+      log.warn(`!fathom image download failed conversation=${conversationId} host=${host}`);
+      await this.reply(conversationId, FATHOM_UNAVAILABLE, actions);
+      return;
+    }
+    try {
+      await this.client.sendImage(conversationId, {
+        url: image.url,
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+        ...(caption ? { caption } : {}),
+      });
+      log.info(`!fathom posted native image conversation=${conversationId} host=${host}`);
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : String(error));
+      log.warn(`!fathom native attach failed conversation=${conversationId} host=${host} (${detail})`);
+      await this.reply(conversationId, FATHOM_UNAVAILABLE, actions);
+    }
+  }
+
+  /**
+   * Raster URLs use the shared image download. SVG (the Fathom Lines file
+   * OpenSea returns, including a render URL with no `.svg` suffix) is
+   * rasterized here, because that shared download only keeps JPEG, PNG, GIF,
+   * and WebP.
+   */
+  private async fathomBytes(url: string): Promise<AdultVisionImage | undefined> {
+    if (!isFathomSvgUrl(url) && this.deps.fetchImage) {
+      try {
+        const fetched = await this.deps.fetchImage(url);
+        if (fetched && fetched.bytes.byteLength > 0) return fetched;
+      } catch {
+        // Shared download keeps JPEG, PNG, GIF, and WebP only.
+      }
+    }
+    if (!isFathomSvgUrl(url) && !this.deps.fetchImage) return undefined;
+    try {
+      return await downloadFathomImage(url);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private fathomClient(): FathomLookup {
+    if (this.deps.fathom) return this.deps.fathom;
+    this.ownedFathom ??= createFathomLookup({
+      apiKey: this.deps.openseaApiKey,
+      random: () => this.nextRandom(),
+    });
+    return this.ownedFathom;
   }
 
   private async handleAdultImage(

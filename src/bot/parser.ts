@@ -30,6 +30,7 @@ export type ParsedCommand =
   | { name: "cheese"; extra?: string }
   | { name: "milady"; extra?: string }
   | { name: "undertow"; extra?: string }
+  | { name: "fathom"; extra?: string }
   | { name: "imagine"; prompt: string }
   | { name: "video"; prompt: string }
   | { name: "voice"; prompt: string }
@@ -109,6 +110,7 @@ const KNOWN_COMMAND_NAMES = new Set([
   "cheese",
   "milady",
   "undertow",
+  "fathom",
   "booties",
   "imagine",
   "video",
@@ -349,6 +351,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "milady", extra: rest } : { name: "milady" };
     case "undertow":
       return rest ? { name: "undertow", extra: rest } : { name: "undertow" };
+    case "fathom":
+      return rest ? { name: "fathom", extra: rest } : { name: "fathom" };
     case "imagine":
       return { name: "imagine", prompt: rest };
     case "video":
