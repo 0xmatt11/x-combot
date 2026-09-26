@@ -87,9 +87,9 @@ export function chatEventToDm(
   }
 
   if (decrypted.type === "groupChange") {
-    const changeType = readChangeType(decrypted);
+    const changeType = canonicalChangeType(readChangeType(decrypted));
     const memberIds = readMemberIds(decrypted);
-    if (changeType === "membersAdded" || changeType === "created") {
+    if (changeType === "membersadded" || changeType === "created") {
       return {
         id,
         eventType: "ParticipantsJoin",
@@ -105,7 +105,8 @@ export function chatEventToDm(
     }
     // chat-xdk GroupChange `membersRemoved` (Thrift GroupMemberRemoveChange).
     // Voluntary leave and an admin remove/kick share this one variant.
-    if (changeType === "membersRemoved") {
+    // WASM 0.5 nests the payload as `change.change_type` / `change.member_ids`.
+    if (changeType === "membersremoved") {
       return {
         id,
         eventType: "ParticipantsLeave",
@@ -222,17 +223,48 @@ function messageKind(event: DecryptedEvent): string {
   return `${content.contentType ?? content.content_type ?? ""}`;
 }
 
+/**
+ * `membersRemoved` and `members_removed` are the same change. Admin add/remove
+ * stays a different token so it is not announced as a leave.
+ */
+function canonicalChangeType(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase().replace(/_/g, "");
+  return normalized || undefined;
+}
+
+function changeRecords(event: DecryptedEvent): object[] {
+  const records: object[] = [event];
+  const nested = readRecord(event, "change", "groupChange", "group_change");
+  if (nested && nested !== event) records.push(nested);
+  return records;
+}
+
 function readChangeType(event: DecryptedEvent): string | undefined {
-  return (
-    event.changeType ??
-    event.change?.changeType ??
-    event.groupChange?.changeType
-  );
+  for (const record of changeRecords(event)) {
+    const value = readString(record, "changeType", "change_type");
+    if (value) return value;
+  }
+  return undefined;
 }
 
 function readMemberIds(event: DecryptedEvent): string[] {
-  const ids = event.memberIds ?? event.change?.memberIds ?? event.groupChange?.memberIds ?? [];
-  return ids.filter((id) => typeof id === "string" && id.length > 0);
+  for (const record of changeRecords(event)) {
+    const ids = readIdList(record, "memberIds", "member_ids");
+    if (ids.length > 0) return ids;
+  }
+  return [];
+}
+
+function readIdList(value: object, ...keys: string[]): string[] {
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const field = record[key];
+    if (!Array.isArray(field)) continue;
+    const ids = field.filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (ids.length > 0) return ids;
+  }
+  return [];
 }
 
 function mentionsIn(text: string): Mention[] {
