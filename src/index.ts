@@ -7,6 +7,11 @@ import { Poller, shouldPollClassicDms } from "./poller.js";
 import { Store } from "./store.js";
 import { ModerationEngine } from "./bot/engine.js";
 import { defaultFeatureRequestPendingDir } from "./bot/feature-request.js";
+import {
+  defaultNotificationRoot,
+  NotificationPoller,
+  notificationDirs,
+} from "./bot/notifications.js";
 import { readBuildVersion, RuntimeHealth } from "./bot/status.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
@@ -267,6 +272,18 @@ async function main(): Promise<void> {
     log.info("!request will also POST feature requests to REQUEST_WEBHOOK_URL.");
   }
 
+  const readyNotifications = notificationDirs(defaultNotificationRoot(env.databasePath));
+  const notificationPoller = new NotificationPoller(readyNotifications, {
+    chatAvailable: () => Boolean(chatService),
+    getUserById: (userId) => xClient.getUserById(userId),
+    sendMessage: (conversationId, text, caption) =>
+      xClient.sendMessage(conversationId, text, caption),
+  });
+  notificationPoller.start();
+  log.info(
+    `Ready notifications: drop JSON in ${readyNotifications.pending}. Sent files move to done/; failures move to failed/.`,
+  );
+
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;
   const activity = resolveActivitySettings(env, defaults);
   const dmPoll = shouldPollClassicDms({
@@ -347,6 +364,7 @@ async function main(): Promise<void> {
     llmRetryDrain.stop();
     poller.stop();
     chatPoller?.stop();
+    notificationPoller.stop();
     activityRuntime?.stop();
     void activityRuntime?.webhook?.close();
     void closeImagineBrowser();
