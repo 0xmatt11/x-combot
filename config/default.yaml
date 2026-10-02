@@ -73,6 +73,7 @@ admin_help: |
   Owner only
   !auth — exact !auth unlocks a new encrypted group
   !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health: uptime, public_keys backoff, Imagine (browser or api)
+  !purge <n> — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Delete the last n messages, starting at the most recent and walking backward (not oldest-first). n is any positive integer (hard cap 100), not a fixed size. The command is not counted. Classic DMs: this account's events only. Chat: own messages, or others' when this account is a group admin
 
   Moderation
   !warn @user [reason] — add a warning
@@ -82,7 +83,6 @@ admin_help: |
   !mute @user [minutes] — soft-mute
   !unmute @user — clear a mute
   !del [id] — delete a message when the API allows
-  !purge <n> — delete the last n messages, starting at the most recent and walking backward (not oldest-first). n is any positive integer (hard cap 100), not a fixed size. The command is not counted. Classic DMs: this account's events only. Chat: own messages, or others' when this account is a group admin
 
   Notes and settings
   !note [key] [text] — save or list notes
@@ -138,7 +138,7 @@ activity:
 
 # X DELETE /2/dm_events/:event_id only succeeds for events owned by the
 # authenticated bot user. Attempts on other users' messages are logged.
-# !purge <n> deletes the last n messages, newest first (any positive integer, hard cap 100).
+# !purge <n> is owner-only (BOT_OWNER_ID), same gate as !auth. It deletes the last n messages, newest first (any positive integer, hard cap 100).
 # It uses that same delete for each of those messages and reports how many
 # succeeded. Encrypted Chat uses delete-for-all instead.
 delete:

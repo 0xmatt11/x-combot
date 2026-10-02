@@ -2850,6 +2850,11 @@ export class ModerationEngine {
         if (senderId !== this.config.ownerId) return;
         await this.reply(conversationId, this.statusReport(conversationId, settings, nowMs), actions);
         return;
+      case "purge":
+        // Same owner gate as !auth. Admins and everyone else are ignored.
+        if (senderId !== this.config.ownerId) return;
+        await this.handlePurge(event, command, actions);
+        return;
       case "rules":
         await this.reply(conversationId, settings.rules.trim(), actions);
         return;
@@ -3190,51 +3195,6 @@ export class ModerationEngine {
             actions,
           );
         }
-        return;
-      }
-      case "purge": {
-        if (!command.count) {
-          await this.reply(conversationId, purgeUsage(), actions);
-          return;
-        }
-        let targets: DmEvent[];
-        try {
-          targets = await this.listPurgeTargets(conversationId, command.count, {
-            id: event.id,
-            sequenceId: event.sequenceId,
-          });
-        } catch (error) {
-          log.warn(`Could not list messages to purge in ${conversationId}`, error);
-          await this.reply(
-            conversationId,
-            "Could not load recent messages, so nothing was deleted.",
-            actions,
-          );
-          return;
-        }
-        if (targets.length === 0) {
-          await this.reply(conversationId, "No recent messages to purge.", actions);
-          return;
-        }
-        let deleted = 0;
-        for (const target of targets) {
-          const ok = await this.tryDelete(target.id, actions, {
-            conversationId,
-            ...(target.sequenceId ? { sequenceId: target.sequenceId } : {}),
-          });
-          if (ok) deleted += 1;
-        }
-        await this.reply(
-          conversationId,
-          formatPurgeReply({
-            deleted,
-            attempted: targets.length,
-            requested: command.count,
-            capped: command.capped === true,
-            chat: isChatGroupId(conversationId),
-          }),
-          actions,
-        );
         return;
       }
       case "note": {
@@ -4491,6 +4451,60 @@ export class ModerationEngine {
       return this.client.getUserByUsername(ref.username);
     }
     return undefined;
+  }
+
+  /**
+   * Owner-only bulk delete. Caller already checked `BOT_OWNER_ID`.
+   * Same delete helper as `!del`.
+   */
+  private async handlePurge(
+    event: DmEvent,
+    command: Extract<ParsedCommand, { name: "purge" }>,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (!command.count) {
+      await this.reply(conversationId, purgeUsage(), actions);
+      return;
+    }
+    let targets: DmEvent[];
+    try {
+      targets = await this.listPurgeTargets(conversationId, command.count, {
+        id: event.id,
+        sequenceId: event.sequenceId,
+      });
+    } catch (error) {
+      log.warn(`Could not list messages to purge in ${conversationId}`, error);
+      await this.reply(
+        conversationId,
+        "Could not load recent messages, so nothing was deleted.",
+        actions,
+      );
+      return;
+    }
+    if (targets.length === 0) {
+      await this.reply(conversationId, "No recent messages to purge.", actions);
+      return;
+    }
+    let deleted = 0;
+    for (const target of targets) {
+      const ok = await this.tryDelete(target.id, actions, {
+        conversationId,
+        ...(target.sequenceId ? { sequenceId: target.sequenceId } : {}),
+      });
+      if (ok) deleted += 1;
+    }
+    await this.reply(
+      conversationId,
+      formatPurgeReply({
+        deleted,
+        attempted: targets.length,
+        requested: command.count,
+        capped: command.capped === true,
+        chat: isChatGroupId(conversationId),
+      }),
+      actions,
+    );
   }
 
   /**
