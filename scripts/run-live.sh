@@ -10,7 +10,8 @@
 #
 # Behavior: cds to repo root, writes supervisor PID to /tmp/x-combot.pid,
 # appends npm start output to logs/bot.log, restarts on crash with short backoff.
-# Does not install a boot unit — after a full box wipe/reboot, launch this once.
+# Boot auto-start on this box: scripts/boot-start.sh via start-sand-box hook
+# (install/refresh with: sudo ./scripts/install-box-boot-hook.sh).
 # For Juicebox unlock use scripts/start-juicebox.sh instead (requires CHAT_PIN).
 
 set -euo pipefail
