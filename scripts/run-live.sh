@@ -18,6 +18,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Ensure local binaries (tsx) are visible to npm scripts and direct exec.
+export PATH="$ROOT/node_modules/.bin:$PATH"
+if [[ ! -x "$ROOT/node_modules/.bin/tsx" ]]; then
+  echo "Missing $ROOT/node_modules/.bin/tsx — run npm install in the repo first." >&2
+  exit 1
+fi
+
 PIDFILE="${X_COMBOT_PIDFILE:-/tmp/x-combot.pid}"
 LOG="${X_COMBOT_LOG:-logs/bot.log}"
 BACKOFF_SEC=5
