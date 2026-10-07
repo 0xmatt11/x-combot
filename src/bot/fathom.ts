@@ -14,10 +14,10 @@
  */
 
 import { containsBannedAgeTerm } from "./adult-filter.js";
-import { OPENSEA_AUTH_KEYS_URL, OPENSEA_GRAPHQL_URL, isSafeMiladyImageUrl } from "./milady.js";
 
 const NON_IMAGE_EXT = /\.(?:mp4|webm|mov|m3u8|html?)(?:$|\?)/i;
 const SVG_EXT = /\.svg$/i;
+const BLOCKED_HOST = /(^|\.)x\.ai$|(^|\.)grok\.com$|(^|\.)opensea\.io$/i;
 
 /** Fathom Lines on Ethereum. */
 export const FATHOM_CONTRACT = "0xce62f2a3F0aB5B5f0f5c71313CDE70d96E14DE23";
@@ -25,7 +25,8 @@ export const FATHOM_SLUG = "fathom-lines";
 export const FATHOM_TOKEN_MIN = 1;
 export const FATHOM_TOKEN_MAX = 4444;
 
-export { OPENSEA_GRAPHQL_URL, OPENSEA_AUTH_KEYS_URL };
+export const OPENSEA_GRAPHQL_URL = "https://gql.opensea.io/graphql";
+export const OPENSEA_AUTH_KEYS_URL = "https://api.opensea.io/api/v2/auth/keys";
 
 /** How many distinct token ids one `!fathom` tries before giving up. */
 export const FATHOM_ATTEMPTS = 3;
@@ -76,7 +77,7 @@ export class FathomLookupError extends Error {
 
 /** Direct https image host. OpenSea item pages, Imagine, and api.x.ai are not images. SVG is allowed. */
 export function isSafeFathomImageUrl(url: string): boolean {
-  if (!isSafeMiladyImageUrl(url)) return false;
+  if (!isDirectHttpsImageUrl(url)) return false;
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -85,6 +86,20 @@ export function isSafeFathomImageUrl(url: string): boolean {
   }
   if (NON_IMAGE_EXT.test(parsed.pathname)) return false;
   if (containsBannedAgeTerm(`${parsed.hostname}${parsed.pathname}`)) return false;
+  return true;
+}
+
+/** https image host. OpenSea item pages, Imagine, and api.x.ai are not images. */
+function isDirectHttpsImageUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:") return false;
+  if (parsed.username || parsed.password) return false;
+  if (BLOCKED_HOST.test(parsed.hostname)) return false;
   return true;
 }
 

@@ -89,8 +89,7 @@ describe("command cleanup", () => {
       milady: {
         async randomImage() {
           return {
-            tokenId: "1",
-            url: "https://i2c.seadn.io/ethereum/0x5af0d9827e0c53e4799bb226655a1de152a425a5/milady.png",
+            url: "https://memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/57b85cf0-f015-4285-ad1c-8a3ea4eda400/public",
           };
         },
       },

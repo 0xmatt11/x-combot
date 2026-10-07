@@ -1,49 +1,32 @@
 /**
- * One random Milady Maker image for `!milady`.
+ * One random Milady meme for `!milady`.
  *
- * Default lookup is OpenSea's public GraphQL (`gql.opensea.io`), collection
- * slug `milady`, no API key. `OPENSEA_API_KEY` switches that call to the REST
- * NFT endpoint. A GraphQL rate limit with no key mints one free OpenSea key
- * (`POST /api/v2/auth/keys`) and caches it until it expires.
+ * The bank is `config/milady-bank.txt` (memedepot.com/d/milady stills).
+ * The process reads it at startup. Optional `MILADY_EXTRA_URLS` adds more
+ * memedepot imagedelivery URLs. An empty bank is a short chat error.
  *
- * This module does not call api.x.ai and does not open grok.com/imagine.
+ * This module does not call OpenSea, api.x.ai, or grok.com/imagine.
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** x.ai, grok.com, and OpenSea pages are not image hosts for this command. */
 const BLOCKED_HOST = /(^|\.)x\.ai$|(^|\.)grok\.com$|(^|\.)opensea\.io$/i;
-
-/** Milady Maker on Ethereum. */
-export const MILADY_CONTRACT = "0x5af0d9827e0c53e4799bb226655a1de152a425a5";
-export const MILADY_SLUG = "milady";
-export const MILADY_TOKEN_MIN = 1;
-export const MILADY_TOKEN_MAX = 10_000;
-
-export const OPENSEA_GRAPHQL_URL = "https://gql.opensea.io/graphql";
-export const OPENSEA_AUTH_KEYS_URL = "https://api.opensea.io/api/v2/auth/keys";
-
-/** How many distinct token ids one `!milady` tries before giving up. */
-export const MILADY_ATTEMPTS = 3;
+const MEMEDEPOT_HOST = "memedepot.com";
+const MEMEDEPOT_PATH =
+  /^\/cdn-cgi\/imagedelivery\/[A-Za-z0-9_-]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/public$/i;
 
 export const MILADY_UNAVAILABLE = "Couldn't load a Milady right now.";
-export const MILADY_RATE_LIMIT = "OpenSea is busy right now. Try !milady again in a minute.";
-
-const USER_AGENT = "x-combot/1.0 (milady command)";
-const REQUEST_TIMEOUT_MS = 12_000;
-
-const MILADY_GRAPHQL_QUERY = `query MiladyItem($query: String!, $collectionSlug: String, $limit: Int!) {
-  itemsByQuery(query: $query, collectionSlug: $collectionSlug, limit: $limit) {
-    tokenId
-    imageUrl
-    contractAddress
-  }
-}`;
+export const MILADY_BANK_EMPTY = "The Milady meme bank is empty.";
 
 export interface MiladyImage {
-  tokenId: string;
   url: string;
 }
 
 export interface MiladyLookup {
-  /** One https image URL for a random Milady. No caller text is accepted. */
+  /** One https still from the meme bank. No caller text is accepted. */
   randomImage(): Promise<MiladyImage>;
 }
 
@@ -57,271 +40,157 @@ export class MiladyLookupError extends Error {
   }
 }
 
-/** Direct https image host. OpenSea item pages, Imagine, and api.x.ai are not images. */
+export class MiladyBankError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MiladyBankError";
+  }
+}
+
+/** Committed still list, next to this package's `config/` directory. */
+export function defaultMiladyBankPath(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "../../config/milady-bank.txt");
+}
+
+/**
+ * Direct memedepot imagedelivery still.
+ * OpenSea pages, SeaDN, Imagine, and api.x.ai are not images for `!milady`.
+ */
 export function isSafeMiladyImageUrl(url: string): boolean {
+  return canonicalMiladyImageUrl(url) !== undefined;
+}
+
+/** Canonical `https://memedepot.com/cdn-cgi/imagedelivery/.../public`, or undefined. */
+export function canonicalMiladyImageUrl(url: string): string | undefined {
+  const trimmed = url.trim();
+  if (!trimmed || /\s/.test(trimmed)) return undefined;
   let parsed: URL;
   try {
-    parsed = new URL(url);
+    parsed = new URL(trimmed);
   } catch {
-    return false;
+    return undefined;
   }
-  if (parsed.protocol !== "https:") return false;
-  if (parsed.username || parsed.password) return false;
-  if (BLOCKED_HOST.test(parsed.hostname)) return false;
-  return true;
+  if (parsed.protocol !== "https:") return undefined;
+  if (parsed.username || parsed.password) return undefined;
+  if (parsed.port) return undefined;
+  if (parsed.search || parsed.hash) return undefined;
+  if (BLOCKED_HOST.test(parsed.hostname)) return undefined;
+  if (parsed.hostname.toLowerCase() !== MEMEDEPOT_HOST) return undefined;
+  if (!MEMEDEPOT_PATH.test(parsed.pathname)) return undefined;
+  return `https://${MEMEDEPOT_HOST}${parsed.pathname}`;
 }
 
-export function isMiladyTokenId(value: string): boolean {
-  if (!/^[1-9]\d{0,4}$/.test(value)) return false;
-  const id = Number(value);
-  return id >= MILADY_TOKEN_MIN && id <= MILADY_TOKEN_MAX;
-}
-
-/** Token ids are 1 through 10000. A missing id is skipped by the lookup. */
-export function randomMiladyTokenId(random: () => number = Math.random): string {
-  const span = MILADY_TOKEN_MAX - MILADY_TOKEN_MIN + 1;
-  const offset = Math.min(span - 1, Math.max(0, Math.floor(random() * span)));
-  return String(MILADY_TOKEN_MIN + offset);
-}
-
-/** Search text that pins one token. `itemsByQuery` treats a bare id as a prefix. */
-export function miladySearchText(tokenId: string): string {
-  return `Milady ${tokenId}`;
-}
-
-export function miladyRestNftUrl(tokenId: string): string {
-  return `https://api.opensea.io/api/v2/chain/ethereum/contract/${MILADY_CONTRACT}/nfts/${encodeURIComponent(tokenId)}`;
-}
-
-export function miladyGraphqlBody(tokenId: string): string {
-  return JSON.stringify({
-    query: MILADY_GRAPHQL_QUERY,
-    variables: {
-      query: miladySearchText(tokenId),
-      collectionSlug: MILADY_SLUG,
-      limit: 5,
-    },
-  });
-}
-
-/** Exact token and contract only. Other search hits are ignored. */
-export function miladyImageFromGraphql(body: unknown, tokenId: string): string | undefined {
-  if (!body || typeof body !== "object") return undefined;
-  const data = (body as { data?: unknown }).data;
-  if (!data || typeof data !== "object") return undefined;
-  const items = (data as { itemsByQuery?: unknown }).itemsByQuery;
-  if (!Array.isArray(items)) return undefined;
-  for (const item of items) {
-    if (!item || typeof item !== "object") continue;
-    const row = item as Record<string, unknown>;
-    if (stringField(row, "tokenId") !== tokenId) continue;
-    if (stringField(row, "contractAddress")?.toLowerCase() !== MILADY_CONTRACT) continue;
-    const url = stringField(row, "imageUrl");
-    if (url && isSafeMiladyImageUrl(url)) return url;
+/**
+ * Split a bank file or env list. Blank lines and `#` comments are skipped.
+ * Commas and whitespace also split a line. Duplicates drop out.
+ * Tokens that are not memedepot imagedelivery stills are returned in `invalid`.
+ */
+export function parseMiladyBankText(text: string): { urls: string[]; invalid: string[] } {
+  const urls: string[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.startsWith("#")) continue;
+    for (const part of trimmedLine.split(/[\s,]+/)) {
+      const token = part.trim();
+      if (!token) continue;
+      const url = canonicalMiladyImageUrl(token);
+      if (!url) {
+        invalid.push(token);
+        continue;
+      }
+      const key = url.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      urls.push(url);
+    }
   }
-  return undefined;
+  return { urls, invalid };
 }
 
-/** REST `nft.display_image_url`, then `nft.image_url`. The OpenSea page URL is not used. */
-export function miladyImageFromRest(body: unknown, tokenId: string): string | undefined {
-  if (!body || typeof body !== "object") return undefined;
-  const nft = (body as { nft?: unknown }).nft;
-  if (!nft || typeof nft !== "object" || Array.isArray(nft)) return undefined;
-  const row = nft as Record<string, unknown>;
-  const id = stringField(row, "identifier") ?? stringField(row, "token_id");
-  if (id !== tokenId) return undefined;
-  for (const key of ["display_image_url", "displayImageUrl", "image_url", "imageUrl"]) {
-    const url = stringField(row, key);
-    if (url && isSafeMiladyImageUrl(url)) return url;
+/**
+ * Read the committed bank and append optional extra URLs.
+ * A bad line throws. An empty file returns an empty list; `!milady` then
+ * tells the chat the bank is empty.
+ */
+export function loadMiladyMemeBank(options?: {
+  bankPath?: string;
+  extraUrls?: readonly string[];
+  /** When set, this text is the bank and `bankPath` is not read. */
+  bankText?: string;
+}): string[] {
+  let text: string;
+  if (options?.bankText !== undefined) {
+    text = options.bankText;
+  } else {
+    const bankPath = options?.bankPath ?? defaultMiladyBankPath();
+    try {
+      text = readFileSync(bankPath, "utf8");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new MiladyBankError(`Could not read the Milady meme bank (${detail})`);
+    }
   }
-  return undefined;
+  const parsed = parseMiladyBankText(text);
+  if (parsed.invalid.length > 0) {
+    throw new MiladyBankError(
+      `Milady meme bank has ${parsed.invalid.length} URL(s) that are not memedepot imagedelivery stills`,
+    );
+  }
+  return mergeMiladyUrls(parsed.urls, options?.extraUrls);
 }
 
 export function createMiladyLookup(options?: {
-  /** When set, `GET` the REST NFT endpoint with `x-api-key` instead of GraphQL. */
-  apiKey?: string;
-  fetchImpl?: typeof fetch;
+  /** Explicit stills. When omitted, the committed bank file is read. */
+  urls?: readonly string[];
+  extraUrls?: readonly string[];
+  bankPath?: string;
+  bankText?: string;
   random?: () => number;
-  attempts?: number;
 }): MiladyLookup {
-  const fetchImpl = options?.fetchImpl ?? fetch;
   const random = options?.random ?? Math.random;
-  const attempts = Math.max(1, options?.attempts ?? MILADY_ATTEMPTS);
-  const configuredKey = options?.apiKey?.trim() || undefined;
-  let minted: { key: string; expiresAtMs: number } | undefined;
-
-  const activeKey = (): string | undefined => {
-    if (configuredKey) return configuredKey;
-    if (minted && minted.expiresAtMs > Date.now()) return minted.key;
-    return undefined;
-  };
+  const urls =
+    options?.urls !== undefined
+      ? mergeMiladyUrls(options.urls, options.extraUrls)
+      : loadMiladyMemeBank({
+          bankPath: options?.bankPath,
+          extraUrls: options?.extraUrls,
+          bankText: options?.bankText,
+        });
 
   return {
     async randomImage() {
-      let key = activeKey();
-      let triedMint = false;
-      const seen = new Set<string>();
-      let draws = 0;
-      while (seen.size < attempts && draws < attempts * 4) {
-        draws += 1;
-        const tokenId = randomMiladyTokenId(random);
-        if (!isMiladyTokenId(tokenId) || seen.has(tokenId)) continue;
-        seen.add(tokenId);
-
-        let hit = await lookupToken(fetchImpl, tokenId, key);
-        if (hit.kind === "rate" && !key && !triedMint) {
-          triedMint = true;
-          const mintedKey = await mintOpenSeaKey(fetchImpl);
-          if (mintedKey.kind === "rate") throw rateLimitError();
-          if (mintedKey.kind === "down") throw unavailableError("opensea free key request failed");
-          minted = mintedKey;
-          key = mintedKey.key;
-          hit = await lookupToken(fetchImpl, tokenId, key);
-        }
-        if (hit.kind === "rate") throw rateLimitError();
-        if (hit.kind === "down") throw unavailableError("opensea request failed");
-        if (hit.kind === "hit") return { tokenId, url: hit.url };
+      if (urls.length === 0) {
+        throw new MiladyLookupError("milady meme bank is empty", MILADY_BANK_EMPTY);
       }
-      throw unavailableError("opensea returned no milady image");
+      const url = urls[miladyPickIndex(urls.length, random)];
+      if (!url || !isSafeMiladyImageUrl(url)) {
+        throw new MiladyLookupError("milady meme url rejected", MILADY_UNAVAILABLE);
+      }
+      return { url };
     },
   };
 }
 
-type TokenHit =
-  | { kind: "hit"; url: string }
-  | { kind: "miss" }
-  | { kind: "rate" }
-  | { kind: "down" };
-
-async function lookupToken(
-  fetchImpl: typeof fetch,
-  tokenId: string,
-  apiKey: string | undefined,
-): Promise<TokenHit> {
-  if (apiKey) return lookupRest(fetchImpl, tokenId, apiKey);
-  return lookupGraphql(fetchImpl, tokenId);
+function mergeMiladyUrls(urls: readonly string[], extraUrls: readonly string[] | undefined): string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string) => {
+    const url = canonicalMiladyImageUrl(raw);
+    if (!url) {
+      throw new MiladyBankError("Milady meme URL is not a memedepot imagedelivery still");
+    }
+    const key = url.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(url);
+  };
+  for (const raw of urls) add(raw);
+  for (const raw of extraUrls ?? []) add(raw);
+  return merged;
 }
 
-async function lookupGraphql(fetchImpl: typeof fetch, tokenId: string): Promise<TokenHit> {
-  const response = await request(fetchImpl, OPENSEA_GRAPHQL_URL, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": USER_AGENT,
-    },
-    body: miladyGraphqlBody(tokenId),
-  });
-  if (!response) return { kind: "down" };
-  if (response.status === 429 || isRateLimited(response.body)) return { kind: "rate" };
-  if (response.status >= 500) return { kind: "down" };
-  if (response.status !== 200) return { kind: "miss" };
-  const url = miladyImageFromGraphql(response.body, tokenId);
-  return url ? { kind: "hit", url } : { kind: "miss" };
-}
-
-async function lookupRest(fetchImpl: typeof fetch, tokenId: string, apiKey: string): Promise<TokenHit> {
-  const response = await request(fetchImpl, miladyRestNftUrl(tokenId), {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      "User-Agent": USER_AGENT,
-      "x-api-key": apiKey,
-    },
-    redirect: "manual",
-  });
-  if (!response) return { kind: "down" };
-  if (response.status === 429 || isRateLimited(response.body)) return { kind: "rate" };
-  if (response.status === 404) return { kind: "miss" };
-  if (response.status !== 200) return { kind: "down" };
-  const url = miladyImageFromRest(response.body, tokenId);
-  return url ? { kind: "hit", url } : { kind: "miss" };
-}
-
-type MintedKey = { kind: "key"; key: string; expiresAtMs: number } | { kind: "rate" } | { kind: "down" };
-
-async function mintOpenSeaKey(fetchImpl: typeof fetch): Promise<MintedKey> {
-  const response = await request(fetchImpl, OPENSEA_AUTH_KEYS_URL, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "User-Agent": USER_AGENT,
-    },
-  });
-  if (!response) return { kind: "down" };
-  if (response.status === 429 || isRateLimited(response.body)) return { kind: "rate" };
-  if (response.status !== 200) return { kind: "down" };
-  const key = stringField(asRecord(response.body), "api_key");
-  if (!key) return { kind: "down" };
-  const expiresAt = stringField(asRecord(response.body), "expires_at");
-  const parsed = expiresAt ? Date.parse(expiresAt) : Number.NaN;
-  const expiresAtMs = Number.isFinite(parsed) ? parsed - 60_000 : Date.now() + 12 * 60 * 60 * 1000;
-  return { kind: "key", key, expiresAtMs };
-}
-
-interface HttpResult {
-  status: number;
-  body: unknown;
-}
-
-async function request(
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit,
-): Promise<HttpResult | undefined> {
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      ...init,
-      redirect: init.redirect ?? "follow",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch {
-    return undefined;
-  }
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    body = undefined;
-  }
-  return { status: response.status, body };
-}
-
-function isRateLimited(body: unknown): boolean {
-  return errorMessages(body).some((message) => /rate limit|too many requests/i.test(message));
-}
-
-function errorMessages(body: unknown): string[] {
-  if (!body || typeof body !== "object") return [];
-  const errors = (body as { errors?: unknown }).errors;
-  if (!Array.isArray(errors)) return [];
-  const out: string[] = [];
-  for (const error of errors) {
-    const message = stringField(asRecord(error), "message");
-    if (message) out.push(message);
-  }
-  return out;
-}
-
-function rateLimitError(): MiladyLookupError {
-  return new MiladyLookupError("opensea rate limit", MILADY_RATE_LIMIT);
-}
-
-function unavailableError(detail: string): MiladyLookupError {
-  return new MiladyLookupError(detail, MILADY_UNAVAILABLE);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
-
-function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
-  if (!record) return undefined;
-  const value = record[key];
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : undefined;
+function miladyPickIndex(length: number, random: () => number): number {
+  return Math.min(length - 1, Math.max(0, Math.floor(random() * length)));
 }

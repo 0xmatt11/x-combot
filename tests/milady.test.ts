@@ -1,23 +1,19 @@
 import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
+import { fetchAdultImage } from "../src/bot/image-fetch.js";
 import { loadEnv } from "../src/env.js";
 import {
-  MILADY_CONTRACT,
-  MILADY_RATE_LIMIT,
-  MILADY_SLUG,
+  MILADY_BANK_EMPTY,
   MILADY_UNAVAILABLE,
+  MiladyBankError,
   MiladyLookupError,
-  OPENSEA_AUTH_KEYS_URL,
-  OPENSEA_GRAPHQL_URL,
+  canonicalMiladyImageUrl,
   createMiladyLookup,
-  isMiladyTokenId,
+  defaultMiladyBankPath,
   isSafeMiladyImageUrl,
-  miladyGraphqlBody,
-  miladyImageFromGraphql,
-  miladyImageFromRest,
-  miladyRestNftUrl,
-  randomMiladyTokenId,
+  loadMiladyMemeBank,
+  parseMiladyBankText,
   type MiladyLookup,
 } from "../src/bot/milady.js";
 import { loadDefaults } from "../src/config.js";
@@ -30,9 +26,12 @@ const alice: XUser = { id: "u-alice", username: "alice", name: "Alice" };
 const groupId = "1578398451921985538";
 const chatGroupId = "g2029561975647150382";
 
-const IMAGE = "https://i2c.seadn.io/ethereum/0x5af0d9827e0c53e4799bb226655a1de152a425a5/milady-42.png";
-const OTHER = "https://i2c.seadn.io/ethereum/0x5af0d9827e0c53e4799bb226655a1de152a425a5/milady-4259.png";
-const DISPLAY = "https://i2c.seadn.io/ethereum/0x5af0d9827e0c53e4799bb226655a1de152a425a5/milady-42-display.png";
+const IMAGE =
+  "https://memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/57b85cf0-f015-4285-ad1c-8a3ea4eda400/public";
+const OTHER =
+  "https://memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/a505b1d5-3cbf-475f-9af8-428ff4c60d00/public";
+const LAST =
+  "https://memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/b232c637-05ca-461f-d721-46645fda9000/public";
 
 const defaults: DefaultsConfig = {
   welcome: { enabled: false, text: "Welcome @{username}!" },
@@ -66,209 +65,84 @@ function message(partial: Partial<DmEvent> & Pick<DmEvent, "id" | "senderId" | "
   };
 }
 
-function graphqlHit(tokenId: string, imageUrl: string, contract = MILADY_CONTRACT) {
-  return {
-    data: {
-      itemsByQuery: [
-        {
-          tokenId: "4259",
-          imageUrl: OTHER,
-          contractAddress: MILADY_CONTRACT,
-        },
-        { tokenId, imageUrl, contractAddress: contract },
-      ],
-    },
-  };
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-describe("milady token ids and image urls", () => {
-  it("picks a token id from 1 through 10000", () => {
-    expect(randomMiladyTokenId(() => 0)).toBe("1");
-    expect(randomMiladyTokenId(() => 0.0041)).toBe("42");
-    expect(randomMiladyTokenId(() => 1)).toBe("10000");
-    expect(isMiladyTokenId("1")).toBe(true);
-    expect(isMiladyTokenId("10000")).toBe(true);
-    expect(isMiladyTokenId("0")).toBe(false);
-    expect(isMiladyTokenId("10001")).toBe(false);
-  });
-
-  it("rejects OpenSea pages and Imagine hosts", () => {
+describe("milady meme urls", () => {
+  it("allows memedepot imagedelivery stills and rejects OpenSea, SeaDN, and Imagine hosts", () => {
     expect(isSafeMiladyImageUrl(IMAGE)).toBe(true);
+    expect(canonicalMiladyImageUrl(`  ${IMAGE}  `)).toBe(IMAGE);
+    expect(isSafeMiladyImageUrl("https://memedepot.com/d/milady")).toBe(false);
     expect(isSafeMiladyImageUrl("https://opensea.io/collection/milady")).toBe(false);
-    expect(isSafeMiladyImageUrl(`https://opensea.io/item/ethereum/${MILADY_CONTRACT}/42`)).toBe(false);
+    expect(isSafeMiladyImageUrl("https://i2c.seadn.io/ethereum/milady-42.png")).toBe(false);
     expect(isSafeMiladyImageUrl("https://api.x.ai/v1/images/generations")).toBe(false);
     expect(isSafeMiladyImageUrl("https://grok.com/imagine/milady.png")).toBe(false);
+    expect(isSafeMiladyImageUrl("https://imagine-public.x.ai/imagine-public/images/milady.jpg")).toBe(false);
     expect(isSafeMiladyImageUrl("ipfs://bafy/milady.png")).toBe(false);
+    expect(isSafeMiladyImageUrl("http://memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/57b85cf0-f015-4285-ad1c-8a3ea4eda400/public")).toBe(false);
+    expect(isSafeMiladyImageUrl(`${IMAGE}?size=public`)).toBe(false);
+    expect(isSafeMiladyImageUrl(`https://user:pass@memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/57b85cf0-f015-4285-ad1c-8a3ea4eda400/public`)).toBe(false);
   });
 
-  it("keeps the exact token from a GraphQL search hit", () => {
-    const body = graphqlHit("42", IMAGE);
-    expect(miladyImageFromGraphql(body, "42")).toBe(IMAGE);
-    expect(miladyImageFromGraphql(body, "4259")).toBe(OTHER);
-    expect(miladyImageFromGraphql(graphqlHit("42", IMAGE, "0x0000000000000000000000000000000000000001"), "42")).toBeUndefined();
-    expect(miladyImageFromGraphql(graphqlHit("42", "https://opensea.io/collection/milady"), "42")).toBeUndefined();
-    expect(miladyImageFromGraphql(graphqlHit("42", "https://api.x.ai/v1/images/milady.png"), "42")).toBeUndefined();
-  });
-
-  it("prefers the REST display image and ignores the OpenSea page", () => {
-    const body = {
-      nft: {
-        identifier: "42",
-        display_image_url: DISPLAY,
-        image_url: IMAGE,
-        opensea_url: `https://opensea.io/item/ethereum/${MILADY_CONTRACT}/42`,
-      },
-    };
-    expect(miladyImageFromRest(body, "42")).toBe(DISPLAY);
-    expect(miladyImageFromRest({ nft: { identifier: "42", image_url: IMAGE, opensea_url: "https://opensea.io/collection/milady" } }, "42")).toBe(IMAGE);
-    expect(miladyImageFromRest(body, "7")).toBeUndefined();
+  it("skips comments and drops duplicate stills", () => {
+    const parsed = parseMiladyBankText(`# comment\n\n${IMAGE}\n${IMAGE}\n${OTHER}, ${LAST}`);
+    expect(parsed.invalid).toEqual([]);
+    expect(parsed.urls).toEqual([IMAGE, OTHER, LAST]);
+    expect(parseMiladyBankText("https://api.x.ai/v1/images/milady.png").invalid).toEqual([
+      "https://api.x.ai/v1/images/milady.png",
+    ]);
   });
 });
 
-describe("!milady OpenSea lookup", () => {
-  it("queries public GraphQL for one Milady and does not call Imagine", async () => {
-    const urls: string[] = [];
-    const bodies: string[] = [];
-    const lookup = createMiladyLookup({
-      random: () => 0.0041,
-      attempts: 1,
-      fetchImpl: async (input, init) => {
-        const url = String(input);
-        urls.push(url);
-        if (url.includes("api.x.ai") || url.includes("grok.com")) {
-          throw new Error("!milady must not call Imagine");
-        }
-        bodies.push(String(init?.body ?? ""));
-        expect(url).toBe(OPENSEA_GRAPHQL_URL);
-        expect(init?.method).toBe("POST");
-        return jsonResponse(graphqlHit("42", IMAGE));
-      },
-    });
-    await expect(lookup.randomImage()).resolves.toEqual({ tokenId: "42", url: IMAGE });
-    expect(urls).toEqual([OPENSEA_GRAPHQL_URL]);
-    const sent = JSON.parse(bodies[0] ?? "{}") as {
-      variables?: { query?: string; collectionSlug?: string };
-    };
-    expect(sent.variables?.query).toBe("Milady 42");
-    expect(sent.variables?.collectionSlug).toBe(MILADY_SLUG);
-    expect(bodies[0]).not.toMatch(/please|background|trait|api\.x\.ai|grok\.com/i);
-    expect(miladyGraphqlBody("42")).toContain("Milady 42");
-    expect(miladyRestNftUrl("42")).toContain(`/nfts/42`);
-    expect(miladyRestNftUrl("42")).toContain(MILADY_CONTRACT);
+describe("!milady meme bank", () => {
+  it("loads 399 stills from the committed file", () => {
+    const urls = loadMiladyMemeBank();
+    expect(defaultMiladyBankPath()).toMatch(/config\/milady-bank\.txt$/);
+    expect(urls).toHaveLength(399);
+    expect(new Set(urls).size).toBe(399);
+    expect(urls.every((url) => isSafeMiladyImageUrl(url))).toBe(true);
+    expect(urls[0]).toBe(IMAGE);
+    const raw = fs.readFileSync("config/milady-bank.txt", "utf8");
+    expect(raw).toMatch(/memedepot\.com\/d\/milady/);
+    expect(raw).not.toMatch(/grok\.com|api\.x\.ai|opensea\.io/i);
   });
 
-  it("tries another token when the first hit has no exact image", async () => {
-    const seen: string[] = [];
-    let call = 0;
+  it("picks a random still from the bank and does not call OpenSea or Imagine", async () => {
+    let draws = 0;
     const lookup = createMiladyLookup({
-      random: () => (call === 0 ? 0.0041 : 0.5),
-      fetchImpl: async (input, init) => {
-        call += 1;
-        const body = JSON.parse(String(init?.body ?? "{}")) as { variables?: { query?: string } };
-        seen.push(body.variables?.query ?? "");
-        if (call === 1) return jsonResponse({ data: { itemsByQuery: [] } });
-        expect(String(input)).toBe(OPENSEA_GRAPHQL_URL);
-        return jsonResponse(graphqlHit("5001", IMAGE));
+      urls: [IMAGE, OTHER, LAST],
+      random: () => {
+        draws += 1;
+        return draws === 1 ? 0 : 1;
       },
     });
-    await expect(lookup.randomImage()).resolves.toEqual({ tokenId: "5001", url: IMAGE });
-    expect(seen).toEqual(["Milady 42", "Milady 5001"]);
+    await expect(lookup.randomImage()).resolves.toEqual({ url: IMAGE });
+    await expect(lookup.randomImage()).resolves.toEqual({ url: LAST });
+    expect(draws).toBe(2);
   });
 
-  it("uses the REST NFT endpoint when an API key is set", async () => {
-    const headers: Array<Record<string, string>> = [];
+  it("merges extra stills and says the bank is empty when nothing is loaded", async () => {
     const lookup = createMiladyLookup({
-      apiKey: "os-test-key",
-      random: () => 0.0041,
-      attempts: 1,
-      fetchImpl: async (input, init) => {
-        expect(String(input)).toBe(miladyRestNftUrl("42"));
-        expect(String(input)).not.toContain("os-test-key");
-        headers.push({ ...(init?.headers as Record<string, string>) });
-        return jsonResponse({
-          nft: {
-            identifier: "42",
-            display_image_url: DISPLAY,
-            image_url: IMAGE,
-            opensea_url: "https://opensea.io/collection/milady",
-          },
-        });
-      },
+      bankText: `# only a comment\n${IMAGE}`,
+      extraUrls: [OTHER],
+      random: () => 0.9,
     });
-    await expect(lookup.randomImage()).resolves.toEqual({ tokenId: "42", url: DISPLAY });
-    expect(headers[0]?.["x-api-key"]).toBe("os-test-key");
-    expect(JSON.stringify(headers)).not.toContain("api.x.ai");
-  });
+    await expect(lookup.randomImage()).resolves.toEqual({ url: OTHER });
 
-  it("mints a free key after a GraphQL rate limit and does not leak it", async () => {
-    const urls: string[] = [];
-    const lookup = createMiladyLookup({
-      random: () => 0.0041,
-      fetchImpl: async (input, init) => {
-        const url = String(input);
-        urls.push(url);
-        if (url === OPENSEA_GRAPHQL_URL) {
-          return jsonResponse({ errors: [{ message: "rate limit exceeded" }] }, 429);
-        }
-        if (url === OPENSEA_AUTH_KEYS_URL) {
-          expect(init?.method).toBe("POST");
-          return jsonResponse({ api_key: "os-free-key", expires_at: "2099-01-01T00:00:00.000Z" });
-        }
-        expect((init?.headers as Record<string, string>)["x-api-key"]).toBe("os-free-key");
-        return jsonResponse({
-          nft: { identifier: "42", image_url: IMAGE, opensea_url: "https://opensea.io/collection/milady" },
-        });
-      },
-    });
-    await expect(lookup.randomImage()).resolves.toEqual({ tokenId: "42", url: IMAGE });
-    expect(urls).toEqual([OPENSEA_GRAPHQL_URL, OPENSEA_AUTH_KEYS_URL, miladyRestNftUrl("42")]);
-
-    urls.length = 0;
-    await expect(lookup.randomImage()).resolves.toEqual({ tokenId: "42", url: IMAGE });
-    expect(urls).toEqual([miladyRestNftUrl("42")]);
-  });
-
-  it("says OpenSea is busy when the free key is also rate limited", async () => {
-    const lookup = createMiladyLookup({
-      random: () => 0,
-      fetchImpl: async (input) => {
-        const url = String(input);
-        if (url === OPENSEA_AUTH_KEYS_URL) {
-          return jsonResponse({ errors: [{ message: "rate limit", api_key: "os-secret-key" }] }, 429);
-        }
-        return jsonResponse({ errors: [{ message: "too many requests" }] }, 429);
-      },
-    });
-    await expect(lookup.randomImage()).rejects.toMatchObject({
+    const empty = createMiladyLookup({ urls: [] });
+    await expect(empty.randomImage()).rejects.toMatchObject({
       name: "MiladyLookupError",
-      userMessage: MILADY_RATE_LIMIT,
+      userMessage: MILADY_BANK_EMPTY,
     });
-    try {
-      await lookup.randomImage();
-    } catch (error) {
-      expect(error).toBeInstanceOf(MiladyLookupError);
-      expect(String(error)).not.toMatch(/os-secret-key/);
-      expect((error as MiladyLookupError).userMessage).not.toMatch(/https?:|opensea\.io/i);
-    }
+    expect(() => createMiladyLookup({ bankText: "https://grok.com/imagine/milady.png" })).toThrow(MiladyBankError);
   });
 
-  it("says a Milady could not be loaded when OpenSea is down", async () => {
-    const lookup = createMiladyLookup({
-      random: () => 0.0041,
-      attempts: 2,
-      fetchImpl: async () => {
-        throw new Error("socket down https://api.x.ai/v1/images");
-      },
-    });
-    await expect(lookup.randomImage()).rejects.toMatchObject({ userMessage: MILADY_UNAVAILABLE });
-  });
+  it("downloads a sample still through the same image fetch !milady uses", async () => {
+    const urls = loadMiladyMemeBank();
+    const sample = urls[0];
+    expect(sample).toBeDefined();
+    const fetched = await fetchAdultImage(sample!);
+    expect(fetched).toBeDefined();
+    expect(fetched!.bytes.byteLength).toBeGreaterThan(1000);
+    expect(fetched!.mimeType).toMatch(/^image\/(png|jpeg|gif|webp)$/);
+  }, 20_000);
 });
 
 describe("!milady engine", () => {
@@ -280,15 +154,18 @@ describe("!milady engine", () => {
   });
 
   function setup(options?: {
-    image?: { tokenId: string; url: string };
+    image?: { url: string };
     fail?: Error;
     failSendImage?: boolean;
     fetchImage?: boolean;
+    miladyUrls?: readonly string[];
+    useDefaultLookup?: boolean;
   }): {
     engine: ModerationEngine;
     client: MockXClient;
     lookupCalls: number;
     imagineCalls: number;
+    fetchedUrls: string[];
   } {
     const store = new Store(":memory:");
     stores.push(store);
@@ -299,16 +176,20 @@ describe("!milady engine", () => {
       async randomImage() {
         lookupCalls += 1;
         if (options?.fail) throw options.fail;
-        return options?.image ?? { tokenId: "42", url: IMAGE };
+        return options?.image ?? { url: IMAGE };
       },
     };
     let imagineCalls = 0;
+    const fetchedUrls: string[] = [];
     const engine = new ModerationEngine(store, client, runtime(), undefined, {
-      milady: lookup,
+      ...(options?.useDefaultLookup ? { miladyUrls: options.miladyUrls ?? [IMAGE, OTHER] } : { milady: lookup }),
       fetchImage:
         options?.fetchImage === false
           ? undefined
-          : async () => ({ bytes: Uint8Array.from([1, 2, 3]), mimeType: "image/png" }),
+          : async (url) => {
+              fetchedUrls.push(url);
+              return { bytes: Uint8Array.from([1, 2, 3]), mimeType: "image/png" };
+            },
       imagine: {
         async generate() {
           imagineCalls += 1;
@@ -319,6 +200,7 @@ describe("!milady engine", () => {
     return {
       engine,
       client,
+      fetchedUrls,
       get lookupCalls() {
         return lookupCalls;
       },
@@ -345,11 +227,22 @@ describe("!milady engine", () => {
     expect(rig.client.sent).toHaveLength(0);
     expect(actions.replies).toEqual([]);
     const posted = JSON.stringify(rig.client.images);
-    expect(posted).not.toMatch(/opensea\.io|api\.x\.ai|grok\.com|Milady 42/i);
+    expect(posted).not.toMatch(/opensea\.io|api\.x\.ai|grok\.com|seadn\.io/i);
     expect(posted).not.toMatch(/collection/i);
   });
 
-  it("ignores extra words and does not describe the NFT", async () => {
+  it("picks from the startup bank when no lookup is injected", async () => {
+    const rig = setup({ useDefaultLookup: true, miladyUrls: [OTHER, IMAGE] });
+    await rig.engine.processEvent(message({ id: "bank", senderId: alice.id, text: "!milady" }));
+    expect(rig.lookupCalls).toBe(0);
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.fetchedUrls).toHaveLength(1);
+    expect([IMAGE, OTHER]).toContain(rig.fetchedUrls[0]);
+    expect(rig.client.images).toHaveLength(1);
+    expect(rig.client.sent).toHaveLength(0);
+  });
+
+  it("ignores extra words and does not describe the meme", async () => {
     const rig = setup();
     await rig.engine.processEvent(
       message({ id: "m2", senderId: alice.id, text: "!milady background red please" }),
@@ -360,7 +253,7 @@ describe("!milady engine", () => {
     expect(JSON.stringify(rig.client.images)).not.toMatch(/background|please|red/);
   });
 
-  it("refuses a banned age term and does not call OpenSea", async () => {
+  it("refuses a banned age term and does not read the bank", async () => {
     const rig = setup();
     await rig.engine.processEvent(message({ id: "m3", senderId: alice.id, text: "!milady teen" }));
     expect(rig.lookupCalls).toBe(0);
@@ -373,14 +266,14 @@ describe("!milady engine", () => {
     expect(text.startsWith("@alice ")).toBe(true);
   });
 
-  it("replies with the OpenSea rate-limit line and no link", async () => {
+  it("replies that the bank is empty and posts no link", async () => {
     const rig = setup({
-      fail: new MiladyLookupError("opensea rate limit", MILADY_RATE_LIMIT),
+      fail: new MiladyLookupError("milady meme bank is empty", MILADY_BANK_EMPTY),
     });
     await rig.engine.processEvent(message({ id: "m4", senderId: alice.id, text: "!milady" }));
     expect(rig.client.images).toHaveLength(0);
-    expect(rig.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_RATE_LIMIT}`]);
-    expect(rig.client.sent[0]?.text).not.toMatch(/https?:|opensea\.io|seadn\.io/i);
+    expect(rig.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_BANK_EMPTY}`]);
+    expect(rig.client.sent[0]?.text).not.toMatch(/https?:|opensea\.io|memedepot\.com/i);
   });
 
   it("does not post the image URL when the download or upload fails", async () => {
@@ -389,7 +282,7 @@ describe("!milady engine", () => {
     expect(missing.client.images).toHaveLength(0);
     expect(missing.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_UNAVAILABLE}`]);
     expect(missing.client.sent[0]?.text).not.toContain(IMAGE);
-    expect(missing.client.sent[0]?.text).not.toMatch(/opensea\.io/i);
+    expect(missing.client.sent[0]?.text).not.toMatch(/opensea\.io|memedepot\.com/i);
 
     const failed = setup({ failSendImage: true });
     await failed.engine.processEvent(message({ id: "m6", senderId: alice.id, text: "!milady" }));
@@ -424,7 +317,7 @@ describe("!milady engine", () => {
     const engine = new ModerationEngine(store, new RoutedXClient(new MockXClient(), chat), runtime(), undefined, {
       milady: {
         async randomImage() {
-          return { tokenId: "42", url: IMAGE };
+          return { url: IMAGE };
         },
       },
       fetchImage: async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/png" }),
@@ -462,33 +355,45 @@ describe("!milady engine", () => {
   it("mentions !milady in the default !help text and the README", () => {
     const help = loadDefaults("config/default.yaml").help;
     expect(help).toMatch(/!milady/);
-    expect(help).toMatch(/one random Milady Maker/);
+    expect(help).toMatch(/random Milady meme from the memedepot bank/);
     expect(help).toMatch(/Image only/);
     const media = help.split("Games:")[0] ?? "";
     expect(media).toMatch(/!milady/);
     const readme = fs.readFileSync("README.md", "utf8");
-    expect(readme).toMatch(/`!milady`/);
-    expect(readme).toMatch(/gql\.opensea\.io\/graphql/);
-    expect(readme).toMatch(/OPENSEA_API_KEY/);
-    expect(readme).toMatch(/itemsByQuery/);
-    expect(readme).toMatch(/api\/v2\/auth\/keys/);
-    expect(readme).toMatch(new RegExp(MILADY_CONTRACT));
-    expect(readme).toMatch(/does not post the image URL/i);
+    const section = readme.split("## Milady memes")[1]?.split("## Undertow")[0] ?? "";
+    expect(section).toMatch(/`!milady`/);
+    expect(section).toMatch(/config\/milady-bank\.txt/);
+    expect(section).toMatch(/memedepot\.com\/d\/milady/);
+    expect(section).toMatch(/399/);
+    expect(section).toMatch(/MILADY_EXTRA_URLS/);
+    expect(section).toMatch(/does not post the image URL/i);
+    expect(section).not.toMatch(/gql\.opensea\.io|itemsByQuery|OPENSEA_API_KEY/i);
   });
 });
 
 describe("milady env", () => {
-  it("reads an optional OPENSEA_API_KEY", () => {
+  it("reads optional extra stills and still reads OPENSEA_API_KEY for other commands", () => {
     process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
-    const previous = process.env.OPENSEA_API_KEY;
+    const previousKey = process.env.OPENSEA_API_KEY;
+    const previousExtra = process.env.MILADY_EXTRA_URLS;
     try {
       delete process.env.OPENSEA_API_KEY;
+      delete process.env.MILADY_EXTRA_URLS;
       expect(loadEnv(true).openseaApiKey).toBeUndefined();
+      expect(loadEnv(true).miladyExtraUrls).toBeUndefined();
       process.env.OPENSEA_API_KEY = "  os-test-key  ";
+      process.env.MILADY_EXTRA_URLS = ` ${OTHER} `;
       expect(loadEnv(true).openseaApiKey).toBe("os-test-key");
+      expect(loadEnv(true).miladyExtraUrls).toEqual([OTHER]);
+      process.env.MILADY_EXTRA_URLS = "https://api.x.ai/v1/images/milady.png";
+      expect(() => loadEnv(true)).toThrow(/MILADY_EXTRA_URLS/);
+      process.env.MILADY_EXTRA_URLS = "https://grok.com/imagine/milady.png";
+      expect(() => loadEnv(true)).toThrow(/MILADY_EXTRA_URLS/);
     } finally {
-      if (previous === undefined) delete process.env.OPENSEA_API_KEY;
-      else process.env.OPENSEA_API_KEY = previous;
+      if (previousKey === undefined) delete process.env.OPENSEA_API_KEY;
+      else process.env.OPENSEA_API_KEY = previousKey;
+      if (previousExtra === undefined) delete process.env.MILADY_EXTRA_URLS;
+      else process.env.MILADY_EXTRA_URLS = previousExtra;
     }
   });
 });

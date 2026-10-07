@@ -318,25 +318,29 @@ export interface EngineDeps {
    */
   cheeseSearch?: CheeseImageSearch;
   /**
-   * OpenSea lookup for `!milady`. Absent means the engine builds the default
-   * client on first use. `openseaApiKey` selects the REST NFT endpoint.
-   * Without a key the public GraphQL search is used.
-   * This command does not call Imagine or api.x.ai.
+   * Memedepot still bank for `!milady`. Absent means the engine builds the
+   * default client on first use from `miladyUrls`, or from `config/milady-bank.txt`
+   * when that list was not passed. This command does not call OpenSea, Imagine, or api.x.ai.
    */
   milady?: MiladyLookup;
   /**
+   * Stills loaded at startup from `config/milady-bank.txt`, plus `MILADY_EXTRA_URLS`.
+   * Used when `milady` was not injected.
+   */
+  miladyUrls?: readonly string[];
+  /**
    * OpenSea Created-tab lookup for `!undertow`. Absent means the engine builds
-   * the default client on first use. Same `openseaApiKey` as `!milady`.
+   * the default client on first use.
    * This command does not call Imagine or api.x.ai.
    */
   undertow?: UndertowLookup;
   /**
    * OpenSea lookup for `!fathom`. Absent means the engine builds the default
-   * client on first use. Same `openseaApiKey` as `!milady`.
+   * client on first use.
    * This command does not call Imagine or api.x.ai.
    */
   fathom?: FathomLookup;
-  /** Optional `OPENSEA_API_KEY` for the default `!milady`, `!undertow`, and `!fathom` clients. */
+  /** Optional `OPENSEA_API_KEY` for the default `!undertow` and `!fathom` clients. */
   openseaApiKey?: string;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
   /** Used only when `boobs.vision` is on. Text filtering still runs when this is absent. */
@@ -3478,9 +3482,9 @@ export class ModerationEngine {
   }
 
   /**
-   * `!milady` posts one Milady Maker image. Extra words are ignored except a
-   * banned age term, which is refused. The lookup is OpenSea only. This does
-   * not call Imagine or api.x.ai, and a failure does not post a link.
+   * `!milady` posts one still from the memedepot meme bank. Extra words are
+   * ignored except a banned age term, which is refused. This does not call
+   * OpenSea, Imagine, or api.x.ai, and a failure does not post a link.
    */
   private async handleMilady(
     event: DmEvent,
@@ -3545,7 +3549,7 @@ export class ModerationEngine {
   private miladyClient(): MiladyLookup {
     if (this.deps.milady) return this.deps.milady;
     this.ownedMilady ??= createMiladyLookup({
-      apiKey: this.deps.openseaApiKey,
+      ...(this.deps.miladyUrls !== undefined ? { urls: this.deps.miladyUrls } : {}),
       random: () => this.nextRandom(),
     });
     return this.ownedMilady;
