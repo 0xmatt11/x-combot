@@ -15,6 +15,7 @@ import {
 import { readBuildVersion, RuntimeHealth } from "./bot/status.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
+import { defaultMiladyBankPath, loadMiladyMemeBank } from "./bot/milady.js";
 import { createImageSearch } from "./bot/image-search.js";
 import { createUserFacingImagine } from "./bot/imagine-backend.js";
 import { closeImagineBrowser } from "./bot/imagine-browser.js";
@@ -211,6 +212,12 @@ async function main(): Promise<void> {
       "BOOBS_VISION is on but no vision-capable LLM is configured. !boobs, !ass, and !booty will ask the user to retry until one is set.",
     );
   }
+  const miladyUrls = loadMiladyMemeBank({
+    bankPath: defaultMiladyBankPath(),
+    extraUrls: env.miladyExtraUrls,
+  });
+  log.info(`!milady meme bank loaded (${miladyUrls.length} stills from memedepot).`);
+
   const botUserId = env.botUserId ?? me.id;
   const identityPresent = Boolean(env.chatPin) || fs.existsSync(env.chatKeysPath);
   let listen = resolveChatListen({
@@ -242,6 +249,7 @@ async function main(): Promise<void> {
         apiKey: env.boobsSearchApiKey,
       }),
       openseaApiKey: env.openseaApiKey,
+      miladyUrls,
       fetchImage: fetchAdultImage,
       imagine,
       imaginePublic,

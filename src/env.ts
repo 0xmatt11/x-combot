@@ -23,6 +23,7 @@ import {
   type VideoResolution,
 } from "./bot/video.js";
 import { normalizeVoiceLanguage } from "./bot/voice.js";
+import { parseMiladyBankText } from "./bot/milady.js";
 import { parseChatConversationIds } from "./chat/ids.js";
 import { remoteKeyCachePathBeside } from "./chat/remote-key-cache.js";
 
@@ -86,6 +87,18 @@ function optionalImaginePublicUrl(name: string): string | undefined {
     );
   }
   return url;
+}
+
+function optionalMiladyExtraUrls(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || !raw.trim()) return undefined;
+  const { urls, invalid } = parseMiladyBankText(raw);
+  if (invalid.length > 0) {
+    throw new Error(
+      `${name} must be https memedepot.com imagedelivery stills (/cdn-cgi/imagedelivery/<account>/<id>/public), separated by commas or whitespace`,
+    );
+  }
+  return urls.length > 0 ? urls : undefined;
 }
 
 function optionalImaginePublicUrlList(name: string): string[] | undefined {
@@ -305,11 +318,17 @@ export interface Env {
   /** SerpAPI key or Bing Image Search key. Unused by DuckDuckGo and Reddit. */
   boobsSearchApiKey?: string;
   /**
-   * Optional OpenSea key for `!milady`, `!undertow`, and `!fathom`.
+   * Optional OpenSea key for `!undertow` and `!fathom`.
    * Unset uses the public GraphQL search.
    * A GraphQL rate limit with no key mints a free key instead.
+   * `!milady` does not use this. It reads `config/milady-bank.txt`.
    */
   openseaApiKey?: string;
+  /**
+   * Extra `!milady` stills merged with `config/milady-bank.txt`.
+   * Comma- or whitespace-separated memedepot imagedelivery URLs.
+   */
+  miladyExtraUrls?: string[];
   /**
    * Still parsed (`imagine` or `search`) so an existing `.env` does not fail
    * startup. Adult commands ignore it. They use the saved imagine-public bank,
@@ -435,6 +454,7 @@ export function loadEnv(requireOwner = true): Env {
     boobsSearchProvider: optionalBoobsProvider("BOOBS_SEARCH_PROVIDER"),
     boobsSearchApiKey: optional("BOOBS_SEARCH_API_KEY"),
     openseaApiKey: optional("OPENSEA_API_KEY"),
+    miladyExtraUrls: optionalMiladyExtraUrls("MILADY_EXTRA_URLS"),
     boobsImageProvider: optionalAdultImageProvider("BOOBS_IMAGE_PROVIDER"),
     boobsImagineModel: optionalImagineModel("BOOBS_IMAGINE_MODEL"),
     boobsImagineAspectRatio: optionalImagineAspectRatio("BOOBS_IMAGINE_ASPECT_RATIO"),

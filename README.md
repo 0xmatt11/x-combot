@@ -12,9 +12,9 @@ Other chat bots can kick and delete anyone's messages when those apps expose tho
 - Public `!help` is a short menu: fun, chat, media, and games. One line per idea, not a writeup of every alias. Admin commands are `!admin` only.
 - Admin commands: warn, kick (soft-mute only), mute, delete, purge, notes, per-group settings, admin allowlist. They are listed by `!admin`, not by `!help`. `!auth` and `!status` are owner-only (`BOT_OWNER_ID`). Admins cannot run them. `!auth` unlocks a new encrypted Chat group; until that account sends it, the group stays silent. `!status` is the health snapshot.
 - `!cheese` posts a few kitten photos and a few cheese photos (separate images, not one combined picture). Search is DuckDuckGo, then Bing, then Reddit. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
-- `!milady` posts one random Milady Maker NFT image. The lookup is OpenSea (public GraphQL by default, or the REST NFT endpoint when `OPENSEA_API_KEY` is set). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
-- `!undertow` posts one random image from the OpenSea Created tab for `-undertow-`. The lookup is the same OpenSea path (public GraphQL by default, or the REST collections list when `OPENSEA_API_KEY` is set). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
-- `!fathom` posts one random Fathom Lines NFT image from contract `0xce62f2a3F0aB5B5f0f5c71313CDE70d96E14DE23`. The lookup is the same OpenSea path (public GraphQL by default, or the REST NFT endpoint when `OPENSEA_API_KEY` is set). The art is SVG and is rasterized to PNG before upload. The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
+- `!milady` posts one random Milady meme from the memedepot bank (`config/milady-bank.txt`). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
+- `!undertow` posts one random image from the OpenSea Created tab for `-undertow-`. The lookup is OpenSea (public GraphQL by default, or the REST collections list when `OPENSEA_API_KEY` is set). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
+- `!fathom` posts one random Fathom Lines NFT image from contract `0xce62f2a3F0aB5B5f0f5c71313CDE70d96E14DE23`. The lookup is OpenSea (public GraphQL by default, or the REST NFT endpoint when `OPENSEA_API_KEY` is set). The art is SVG and is rasterized to PNG before upload. The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
 - `!darwin`, `!lastwords`, `!obituary`, and `!finalboss` each post one canned cartoon line. Fiction only: Looney-Tunes physics, a fake last line, a roast obituary, or a video-game boss vignette. They do not describe real-world methods, do not call the LLM, and do not cost XP.
 - Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. They use the saved imagine-public bank (`BOOBS_IMAGINE_APP` and the `BOOBS_IMAGINE_PUBLIC_*` URL lists), including each command's mp4 bank. `!ass` / `!booty` stills rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. If that bank is empty or exhausted, image search runs. They do not open grok.com/imagine and they do not call api.x.ai image generation. `!imagine` and `!video` still use the Chrome session.
 - `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
@@ -291,7 +291,7 @@ If X Chat rate-limits `!ask`, `@bot`, `!summarize`, or `!analyze`, the bot says 
 | `!boobs` | Chest photo from the saved bank (off until enabled). Does not open grok.com/imagine. See [Adult photos](#adult-photos) |
 | `!ass` / `!booty` | Butt photo, same switch (`!booties`) |
 | `!cheese` | A few kitten photos and cheese photos. Extra words are ignored. See [Kitten and cheese photos](#kitten-and-cheese-photos) |
-| `!milady` | One random Milady Maker image. See [Milady Maker](#milady-maker) |
+| `!milady` | One random Milady meme from the memedepot bank. See [Milady memes](#milady-memes) |
 | `!undertow` | One random image from the OpenSea Created tab for `-undertow-`. See [Undertow](#undertow) |
 | `!fathom` | One random Fathom Lines image. See [Fathom Lines](#fathom-lines) |
 
@@ -447,21 +447,15 @@ Search uses fixed queries only. DuckDuckGo runs first with safesearch on. If tha
 
 `!cheese` does not open https://grok.com/imagine, does not `POST` `https://api.x.ai/v1/images/generations`, and does not use `XAI_API_KEY`. It stays available when `!boobs` is off.
 
-## Milady Maker
+## Milady memes
 
-`!milady` posts one random Milady Maker NFT as an image attachment. Extra words are ignored and are not trait filters. Text that includes a banned age term is refused and does not call OpenSea. The reply tags the person who sent the command (`@handle` when that account has one) and, in encrypted Chat, is a reply to that command message. That label is the only text. There is no OpenSea link, collection URL, or token description.
+`!milady` posts one random still from the Milady meme bank as an image attachment. The bank is `config/milady-bank.txt`, scraped from https://memedepot.com/d/milady on 2026-10-07. It has 399 IMAGE and COPYPASTA stills. Videos were omitted because their `/public` URLs 404. Extra words are ignored and are not a search. Text that includes a banned age term is refused and does not pick from the bank. The reply tags the person who sent the command (`@handle` when that account has one) and, in encrypted Chat, is a reply to that command message. That label is the only text. There is no page link.
 
-The image comes from OpenSea, not from image generation. No `OPENSEA_API_KEY` is required.
+The process reads that file at startup. Optional `MILADY_EXTRA_URLS` adds more `https://memedepot.com/cdn-cgi/imagedelivery/.../public` URLs (commas, spaces, or newlines). x.ai and grok.com are not image hosts for this command. This is not a random OpenSea NFT.
 
-The default call is `POST https://gql.opensea.io/graphql`. The query is `itemsByQuery` with `collectionSlug` `milady` and `query` `Milady <id>`, where `<id>` is a random token id from 1 to 10000. The bot keeps the hit whose `tokenId` matches that id and whose contract is `0x5af0d9827e0c53e4799bb226655a1de152a425a5`, then downloads `imageUrl` (the SeaDN CDN). A missing token is tried again, a few times.
+The bytes are uploaded as the only attachment. If the bank is empty, or the download or upload fails, the bot says so in a short reply to the requester. It does not post the image URL.
 
-Set `OPENSEA_API_KEY` to use the REST NFT endpoint instead: `GET https://api.opensea.io/api/v2/chain/ethereum/contract/0x5af0d9827e0c53e4799bb226655a1de152a425a5/nfts/<id>` with header `x-api-key`. The image is `display_image_url`, or `image_url` when that is the one OpenSea returned. The key is not logged.
-
-If the public GraphQL call is rate-limited and `OPENSEA_API_KEY` is unset, the bot requests a free key with `POST https://api.opensea.io/api/v2/auth/keys`, caches it until `expires_at`, and uses the REST call above. You do not need to put a key in the environment for that.
-
-The bytes are uploaded as the only attachment. If OpenSea is down, rate-limits the bot, returns no image URL, or the download or upload fails, the bot says so in a short reply to the requester. It does not post the image URL or an OpenSea page.
-
-`!milady` does not open https://grok.com/imagine, does not `POST` `https://api.x.ai/v1/images/generations`, and does not use `XAI_API_KEY`. It stays available when `!boobs` is off.
+`!milady` does not open https://grok.com/imagine, does not `POST` `https://api.x.ai/v1/images/generations`, and does not use `XAI_API_KEY`. It does not call OpenSea. It stays available when `!boobs` is off.
 
 ## Undertow
 
@@ -489,7 +483,7 @@ The default call is `POST https://gql.opensea.io/graphql`. The query is `itemsBy
 
 Set `OPENSEA_API_KEY` to use the REST NFT endpoint instead: `GET https://api.opensea.io/api/v2/chain/ethereum/contract/0xce62f2a3F0aB5B5f0f5c71313CDE70d96E14DE23/nfts/<id>` with header `x-api-key`. The image is `display_image_url`, or `image_url` when that is the one OpenSea returned. An SVG from that endpoint is rasterized the same way. The key is not logged.
 
-If the public GraphQL call is rate-limited and `OPENSEA_API_KEY` is unset, the bot requests a free key with `POST https://api.opensea.io/api/v2/auth/keys`, caches it until `expires_at`, and uses the REST call above. You do not need to put a key in the environment for that. This is the same key path as `!milady` and `!undertow`.
+If the public GraphQL call is rate-limited and `OPENSEA_API_KEY` is unset, the bot requests a free key with `POST https://api.opensea.io/api/v2/auth/keys`, caches it until `expires_at`, and uses the REST call above. You do not need to put a key in the environment for that. This is the same key path as `!undertow`.
 
 The bytes are uploaded as the only attachment. If OpenSea is down, rate-limits the bot, returns no image URL, or the download, raster, or upload fails, the bot says so in a short reply to the requester. It does not post the image URL or an OpenSea page.
 
