@@ -902,6 +902,14 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 
 SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` list, the per-conversation `!troll all` flag and per-user troll-all cooldowns, the per-conversation `!linkroast` flag and per-user roast times, filed `!request` payloads (`feature_requests`), and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
 
+## Operations
+
+The live process is `scripts/run-live.sh`. It writes `/tmp/x-combot.pid`, appends to `logs/bot.log`, and restarts the bot after a crash (5 seconds, then up to 60). Stop it with `kill "$(cat /tmp/x-combot.pid)"`.
+
+Host boot runs `scripts/boot-start.sh` from the `start-sand-box` hook. Boot lines go to `/tmp/x-combot-boot.log`. From the repo root, install or refresh that hook with `sudo ./scripts/install-box-boot-hook.sh`. If an image refresh removes the hook marker, boot logs a warning with that command. It does not run sudo.
+
+An image refresh can keep the repo, `data/`, and `.env`, and drop `node_modules/`. Before the bot starts, `scripts/ensure-deps.sh` (from both launchers) runs `npm ci --no-audit --no-fund` when `node_modules/.bin/tsx` is missing, or when `node_modules/.package-lock.json` is older than `package-lock.json` or its installed packages differ. If `npm ci` fails, it tries `npm install --no-audit --no-fund` once. If that fails, it logs the npm exit code and exits non-zero. It does not retry in a loop. `/tmp/x-combot-npm-ci.lock` keeps a second launcher from installing at the same time. One line is written before the install and one after, to the boot log and `logs/bot.log`. The launchers do not read or print `.env`. `tests/ensure-deps.test.ts` covers the missing-`tsx` path with a stub `npm`.
+
 ## Layout
 
 ```
@@ -939,6 +947,10 @@ config/default.yaml
 scripts/oauth.ts
 scripts/chat-register.ts
 scripts/chat-rotate.ts
+scripts/run-live.sh       # live supervisor (pidfile, bot.log, restart backoff)
+scripts/boot-start.sh     # boot hook launcher
+scripts/ensure-deps.sh    # npm ci when tsx or the installed lockfile is missing or stale
+scripts/install-box-boot-hook.sh
 ```
 
 Tests use `MockXClient` and `MockLlmClient`. Production uses `fetch` against `https://api.x.com`. Chat ciphertext in CI is the upstream chat-xdk fixture (`tests/fixtures/sdk_vectors.json`), not a live account.

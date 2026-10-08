@@ -8,8 +8,11 @@
 #   kill "$(cat /tmp/x-combot.pid)"    # stops supervisor; child gets SIGTERM
 #   # ensure no stray bot: pgrep -af 'tsx src/index.ts'
 #
-# Behavior: cds to repo root, writes supervisor PID to /tmp/x-combot.pid,
-# appends npm start output to logs/bot.log, restarts on crash with short backoff.
+# Behavior: cds to repo root, installs deps when node_modules is missing or
+# the installed lock is stale (scripts/ensure-deps.sh), writes supervisor PID
+# to /tmp/x-combot.pid, appends npm start output to logs/bot.log, and restarts
+# on crash with short backoff. A failed install exits non-zero once (no retry
+# loop); the backoff below applies after the bot process itself exits.
 # Boot auto-start on this box: scripts/boot-start.sh via start-sand-box hook
 # (install/refresh with: sudo ./scripts/install-box-boot-hook.sh).
 # For Juicebox unlock use scripts/start-juicebox.sh instead (requires CHAT_PIN).
@@ -19,12 +22,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Ensure local binaries (tsx) are visible to npm scripts and direct exec.
-export PATH="$ROOT/node_modules/.bin:$PATH"
-if [[ ! -x "$ROOT/node_modules/.bin/tsx" ]]; then
-  echo "Missing $ROOT/node_modules/.bin/tsx — run npm install in the repo first." >&2
-  exit 1
-fi
+# Boot env is minimal. Keep the caller's PATH so nvm/node stays visible.
+export PATH="/usr/local/bin:/usr/bin:/bin:${ROOT}/node_modules/.bin${PATH:+:$PATH}"
 
 PIDFILE="${X_COMBOT_PIDFILE:-/tmp/x-combot.pid}"
 LOG="${X_COMBOT_LOG:-logs/bot.log}"
@@ -48,6 +47,18 @@ if pgrep -f -- 'tsx src/index\.ts' >/dev/null 2>&1; then
   pgrep -af -- 'tsx src/index\.ts' >&2 || true
   exit 1
 fi
+
+# Install only after the "already running" checks so npm ci cannot delete
+# node_modules out from under a live bot.
+if [[ "$LOG" = /* ]]; then
+  export ENSURE_DEPS_BOT_LOG="$LOG"
+else
+  export ENSURE_DEPS_BOT_LOG="${ROOT}/${LOG}"
+fi
+export ENSURE_DEPS_BOOT_LOG="${X_COMBOT_BOOT_LOG:-/tmp/x-combot-boot.log}"
+# shellcheck source=ensure-deps.sh
+source "${ROOT}/scripts/ensure-deps.sh"
+ensure_deps "${ROOT}"
 
 echo $$ >"$PIDFILE"
 
