@@ -34,7 +34,9 @@ export interface ChatPollerOptions {
 
 export class ChatPoller {
   private stopped = false;
-  private timer: NodeJS.Timeout | undefined;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private ticking = false;
+  private wakeNow = false;
   private idleMs: number;
   private readonly policy: ChatListenPolicy;
   private readonly ids = new Set<string>();
@@ -93,7 +95,24 @@ export class ChatPoller {
 
   stop(): void {
     this.stopped = true;
+    this.wakeNow = false;
     if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  /**
+   * Run the next poll as soon as the current one finishes. Used after a VM
+   * resume or a dead Activity socket, when the scheduled timer may be stale.
+   */
+  kick(): void {
+    if (this.stopped) return;
+    this.wakeNow = true;
+    if (this.ticking) return;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    void this.tick();
   }
 
   /**
@@ -114,7 +133,8 @@ export class ChatPoller {
   }
 
   async tick(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.ticking) return;
+    this.ticking = true;
     let delayMs = this.intervalMs;
     let reason: "backoff" | "idle" | undefined;
     try {
@@ -138,13 +158,17 @@ export class ChatPoller {
         reason === "backoff" ? `backoff ${Math.max(1, Math.ceil(delayMs / 1000))}s` : "poll failed",
       );
     } finally {
+      this.ticking = false;
       if (!this.stopped) {
         if (reason === "backoff") {
           log.warn(`Next Chat poll in ${delayMs}ms (API backoff)`);
         } else if (reason === "idle") {
           log.warn(`Next Chat poll in ${delayMs}ms (idle; no new events)`);
         }
-        this.timer = setTimeout(() => void this.tick(), delayMs);
+        const delay = this.wakeNow ? 0 : delayMs;
+        this.wakeNow = false;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = setTimeout(() => void this.tick(), delay);
       }
     }
   }

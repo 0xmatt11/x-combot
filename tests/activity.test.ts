@@ -364,6 +364,7 @@ describe("Activity intake", () => {
 
   it("reads a stream body of two events", async () => {
     const seen: unknown[] = [];
+    let bytes = 0;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         const text = `${JSON.stringify(envelope())}\n\n${JSON.stringify({ data: { event_type: "profile.update.bio" } })}\n`;
@@ -371,9 +372,14 @@ describe("Activity intake", () => {
         controller.close();
       },
     });
-    await readActivityBody(stream, async (body) => {
-      seen.push(body);
-    });
+    await readActivityBody(
+      stream,
+      async (body) => {
+        seen.push(body);
+      },
+      { onBytes: () => { bytes += 1; } },
+    );
+    expect(bytes).toBe(1);
     expect(seen).toHaveLength(2);
     expect(parseActivityChat(seen[0])?.conversationId).toBe(GROUP);
     expect(parseActivityChat(seen[1])).toBeUndefined();

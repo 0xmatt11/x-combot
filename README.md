@@ -910,6 +910,8 @@ Host boot runs `scripts/boot-start.sh` from the `start-sand-box` hook. Boot line
 
 An image refresh can keep the repo, `data/`, and `.env`, and drop `node_modules/`. Before the bot starts, `scripts/ensure-deps.sh` (from both launchers) runs `npm ci --no-audit --no-fund` when `node_modules/.bin/tsx` is missing, or when `node_modules/.package-lock.json` is older than `package-lock.json` or its installed packages differ. If `npm ci` fails, it tries `npm install --no-audit --no-fund` once. If that fails, it logs the npm exit code and exits non-zero. It does not retry in a loop. `/tmp/x-combot-npm-ci.lock` keeps a second launcher from installing at the same time. One line is written before the install and one after, to the boot log and `logs/bot.log`. The launchers do not read or print `.env`. `tests/ensure-deps.test.ts` covers the missing-`tsx` path with a stub `npm`.
 
+A VM pause can leave `tsx src/index.ts` alive with a dead Activity socket and a Chat poll that never runs again. The process writes `/tmp/x-combot.heartbeat` every 60s (`HANG_HEARTBEAT_MS`, `HANG_HEARTBEAT_FILE`). A gap over 3 minutes (`HANG_WALL_JUMP_MS`) is treated as a resume. A stream with no bytes or keepalive for 5 minutes (`HANG_STREAM_STALE_MS`) is treated as dead. Either one closes and reopens the Activity stream and schedules the Chat poll immediately. If the stream still has no bytes 3 minutes later (`HANG_RECONNECT_GRACE_MS`), the process logs one warning and exits non-zero so `run-live.sh` starts it again. That exit is limited to once per 30 minutes (`HANG_RESTART_COOLDOWN_MS`), recorded in `/tmp/x-combot.last-restart` (`HANG_RESTART_STAMP`). Inside the cap, it keeps reconnecting. The supervisor is the backstop when the event loop itself is frozen: after a 5 minute grace (`HANG_GRACE_SEC`) it checks the heartbeat every 60s (`HANG_CHECK_SEC`) and, if the file is older than 10 minutes (`HANG_STALE_SEC`), sends SIGTERM and then SIGKILL, using the same stamp. A second kill inside the cap is logged and skipped. Manual check: after the grace window, `touch -d '15 min ago' /tmp/x-combot.heartbeat` and confirm one restart warning in `logs/bot.log`. Touch it again within 30 minutes and confirm the suppression warning. `tests/hang-watchdog.test.ts` covers the in-process decisions.
+
 ## Layout
 
 ```
@@ -941,6 +943,7 @@ src/bot/image-search.ts # duckduckgo, keyless Bing HTML, reddit, serpapi, Azure 
 src/chat/listen.ts      # CHAT_LISTEN all | allowlist | off
 src/chat/poller.ts      # catch-up poll, inbox discovery, watermarks
 src/chat/activity.ts    # stream/webhook parse and intake
+src/hang-watchdog.ts    # pause/resume and dead Activity stream recovery
 src/chat/identity.ts    # key file and Juicebox unlock
 src/store.ts            # SQLite, including processed_events and watermarks
 config/default.yaml
