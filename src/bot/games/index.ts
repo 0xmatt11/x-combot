@@ -151,6 +151,24 @@ export {
   parseTriviaInterpret,
 } from "./loose.js";
 export { SHIP_HELP, compatibility, mergeMembers, resolveShipQuery, shipReply } from "./ship.js";
+export {
+  DEFAULT_GROW_SETTINGS,
+  GROW_HELP,
+  LOAN_HELP,
+  PVP_HELP,
+  loadGrowSettings,
+  playDod,
+  playDtop,
+  playGrow,
+  playLoan,
+  playPvp,
+  playSize,
+  positiveRatioFor,
+  rollDodBonusCm,
+  rollGrowthCm,
+  streakBonusCm,
+} from "./grow.js";
+export type { GrowOutcome, GrowSettings } from "./grow.js";
 export { SESSION_TTL_MS, SessionMap } from "./session.js";
 export {
   DEFAULT_BET,

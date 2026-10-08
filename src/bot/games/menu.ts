@@ -23,6 +23,17 @@ export const GAME_CATALOG: readonly GameCatalogGroup[] = [
     ],
   },
   {
+    title: "Size",
+    games: [
+      { command: "!grow", blurb: "daily size (!dick)" },
+      { command: "!dtop", blurb: "size leaderboard" },
+      { command: "!size", blurb: "your size and fights" },
+      { command: "!dod", blurb: "dick of the day" },
+      { command: "!pvp", blurb: "open fight (!fight)" },
+      { command: "!loan", blurb: "reset a negative size (!borrow)" },
+    ],
+  },
+  {
     title: "Multiplayer",
     games: [
       { command: "!tictactoe", blurb: "tic-tac-toe" },
