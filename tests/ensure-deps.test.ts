@@ -310,7 +310,7 @@ describe("ensure-deps", () => {
       expect(bot).toContain("could not acquire npm lock");
       expect(readIf(path.join(root, "npm-invocations.log"))).toBe("");
     } finally {
-      holder.kill("TERM");
+      holder.kill("SIGTERM");
       rmSync(root, { recursive: true, force: true });
     }
   }, 15_000);
