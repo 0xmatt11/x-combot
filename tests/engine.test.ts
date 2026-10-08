@@ -445,9 +445,10 @@ describe("ModerationEngine", () => {
     expect(client.deleted).toEqual([]);
   });
 
-  it("rejects !purge from non-admins and allows the same admin gate", async () => {
+  it("ignores !purge from everyone except BOT_OWNER_ID", async () => {
     const store = new Store(":memory:");
     stores.push(store);
+    store.addConversationAdmin(groupId, alice.id);
     const client = new MockXClient();
     client.addUser(alice);
     client.addUser(bob);
@@ -457,18 +458,29 @@ describe("ModerationEngine", () => {
       globalAdminIds: [bob.id],
     });
 
-    await engine.processEvent(message({ id: "p-deny", senderId: alice.id, text: "!purge 25" }));
-    expect(client.sent.at(-1)?.text).toMatch(/limited to configured admins/);
+    await engine.processEvent(
+      message({ id: "p-stranger", senderId: "u-stranger", text: "!purge 25" }),
+    );
+    await engine.processEvent(message({ id: "p-global", senderId: bob.id, text: "/purge 50" }));
+    await engine.processEvent(message({ id: "p-local", senderId: alice.id, text: "!purge 100" }));
+    await engine.processEvent(message({ id: "p-usage", senderId: bob.id, text: "!PURGE" }));
+    expect(client.sent).toEqual([]);
     expect(client.deleted).toEqual([]);
     expect(client.conversationListCalls).toHaveLength(0);
 
-    await engine.processEvent(message({ id: "p-global", senderId: bob.id, text: "/purge 50" }));
+    await engine.processEvent(
+      message({
+        id: "p-warn",
+        senderId: bob.id,
+        text: "!warn @alice",
+        mentions: [{ username: "alice", id: alice.id }],
+      }),
+    );
+    expect(store.getWarnCount(groupId, alice.id)).toBe(1);
+
+    await engine.processEvent(message({ id: "p-owner", senderId: owner.id, text: "!purge 10" }));
     expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
     expect(client.conversationListCalls).toHaveLength(1);
-
-    store.addConversationAdmin(groupId, alice.id);
-    await engine.processEvent(message({ id: "p-local", senderId: alice.id, text: "!purge 100" }));
-    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
     expect(client.deleted).toEqual([]);
   });
 
@@ -732,8 +744,21 @@ describe("ModerationEngine", () => {
     expect(client.sent.at(-1)?.text).toMatch(/nothing was deleted/);
   });
 
-  it("tells an admin how to use !purge", async () => {
-    const { engine, client } = setup();
+  it("tells the owner how to use !purge and stays quiet for other admins", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.addConversationAdmin(groupId, alice.id);
+    const client = new MockXClient();
+    client.addUser(alice);
+    client.addUser(bob);
+    client.addUser(owner);
+    const engine = new ModerationEngine(store, client, {
+      ...runtime(),
+      globalAdminIds: [bob.id],
+    });
+    await engine.processEvent(message({ id: "purge-admin", senderId: bob.id, text: "!purge" }));
+    await engine.processEvent(message({ id: "purge-local", senderId: alice.id, text: "/purge nope" }));
+    expect(client.sent).toEqual([]);
     await engine.processEvent(message({ id: "purge-usage", senderId: owner.id, text: "!purge" }));
     await engine.processEvent(message({ id: "purge-bad", senderId: owner.id, text: "!purge nope" }));
     expect(client.sent[0]?.text).toMatch(/Usage: !purge <n>/);
@@ -743,15 +768,22 @@ describe("ModerationEngine", () => {
     expect(client.conversationListCalls).toHaveLength(0);
   });
 
-  it("keeps !purge off public help", () => {
+  it("keeps !purge off public help and marks it owner-only", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).not.toMatch(/!purge/);
-    expect(loaded.admin_help).toMatch(/!purge <n>/);
-    expect(loaded.admin_help).toMatch(/hard cap 100/);
-    expect(loaded.admin_help).toMatch(/the last n messages/);
-    expect(loaded.admin_help).toMatch(/not oldest-first/);
-    expect(loaded.admin_help).toMatch(/not a fixed size/);
-    expect(loaded.admin_help).toMatch(/this account's events only/);
+    expect(loaded.help).not.toMatch(/!warn @user/);
+    const [ownerSection, moderation] = (loaded.admin_help ?? "").split(/\n\s*Moderation\n/);
+    expect(ownerSection).toMatch(/!purge <n> — owner only \(BOT_OWNER_ID\)/);
+    expect(ownerSection).toMatch(/same gate as !auth/);
+    expect(ownerSection).toMatch(/ADMIN_IDS and per-group admins are ignored/);
+    expect(ownerSection).toMatch(/hard cap 100/);
+    expect(ownerSection).toMatch(/the last n messages/);
+    expect(ownerSection).toMatch(/not oldest-first/);
+    expect(ownerSection).toMatch(/not a fixed size/);
+    expect(ownerSection).toMatch(/this account's events only/);
+    expect(moderation).not.toMatch(/!purge/);
+    expect(moderation).toMatch(/!warn @user/);
+    expect(moderation).toMatch(/!del \[id\]/);
   });
 
   it("detects flood, attempts delete, and soft-mutes", async () => {
