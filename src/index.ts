@@ -34,7 +34,12 @@ import {
 } from "./bot/video.js";
 import { createVoiceClient, DEFAULT_VOICE_LANGUAGE } from "./bot/voice.js";
 import { ChatActivityIntake, resolveActivitySettings } from "./chat/activity.js";
-import { startActivityStream } from "./chat/activity-stream.js";
+import { startActivityStream, type ActivityStreamHandle } from "./chat/activity-stream.js";
+import {
+  loadHangWatchdogConfig,
+  startHangWatchdog,
+  writeHeartbeat,
+} from "./hang-watchdog.js";
 import {
   ensureChatActivitySubscription,
   requireActivityAppBearer,
@@ -344,6 +349,7 @@ async function main(): Promise<void> {
   if (chatPoller) health.markChatRunning();
   chatPoller?.start();
 
+  const streamBytes = { at: Date.now() };
   const activityRuntime = chatService
     ? await startActivityRuntime({
         env,
@@ -361,6 +367,9 @@ async function main(): Promise<void> {
         health,
         policy: listen.policy,
         onSeen: (conversationId, eventId) => chatPoller?.observeFromActivity(conversationId, eventId),
+        onStreamBytes: () => {
+          streamBytes.at = Date.now();
+        },
       })
     : undefined;
   if (activity.enabled && !chatService) {
@@ -371,8 +380,34 @@ async function main(): Promise<void> {
 
   const llmRetryDrain = startLlmRetryDrain(engine);
 
+  const hangConfig = loadHangWatchdogConfig();
+  const watchStream = Boolean(activityRuntime?.stream);
+  streamBytes.at = Date.now();
+  log.info(
+    `Hang watchdog: heartbeat every ${hangConfig.heartbeatIntervalMs}ms, stream stale after ${hangConfig.streamStaleMs}ms, restart cap ${hangConfig.restartCooldownMs}ms` +
+      (watchStream ? ", watching the Activity stream." : "."),
+  );
+  const hangWatch = startHangWatchdog({
+    config: hangConfig,
+    watchStream,
+    streamLastByte: () => streamBytes.at,
+    onReconnect: () => {
+      activityRuntime?.stream?.reconnect();
+      chatPoller?.kick();
+    },
+    onRestart: () => {
+      process.exit(1);
+    },
+    onHeartbeat: (at) => writeHeartbeat(hangConfig.heartbeatFile, at),
+    // Synchronous stderr so the restart line is in bot.log before process.exit.
+    log: (_level, message) => {
+      fs.writeSync(2, `[${new Date().toISOString()}] WARN ${message}\n`);
+    },
+  });
+
   const shutdown = () => {
     log.info("Shutting down");
+    hangWatch.stop();
     llmRetryDrain.stop();
     poller.stop();
     chatPoller?.stop();
@@ -441,7 +476,8 @@ async function startActivityRuntime(options: {
   health: RuntimeHealth;
   policy: ChatListenPolicy;
   onSeen?: (conversationId: string, eventId: string | undefined) => void;
-}): Promise<{ stop(): void; webhook?: ActivityWebhook } | undefined> {
+  onStreamBytes?: () => void;
+}): Promise<{ stop(): void; webhook?: ActivityWebhook; stream?: ActivityStreamHandle } | undefined> {
   if (!options.enabled) return undefined;
   options.health.markActivityEnabled();
   const intake = new ChatActivityIntake(options.chat, options.engine, options.policy, options.onSeen);
@@ -461,7 +497,7 @@ async function startActivityRuntime(options: {
     }
   }
 
-  let stream: { stop(): void } | undefined;
+  let stream: ActivityStreamHandle | undefined;
   if (options.transport !== "webhook") {
     try {
       const streamToken = requireActivityAppBearer(options.bearerToken, "stream");
@@ -471,6 +507,7 @@ async function startActivityRuntime(options: {
         open: (token, signal) => options.client.openActivityStream(token, signal),
         onEvent: (body) => intake.handle(body),
         onState: (state, detail) => options.health.noteActivityStream(state, detail),
+        onBytes: options.onStreamBytes,
       });
     } catch (error) {
       options.health.noteActivityStream("degraded", "not started");
@@ -511,6 +548,7 @@ async function startActivityRuntime(options: {
 
   return {
     webhook,
+    stream,
     stop() {
       stream?.stop();
     },
