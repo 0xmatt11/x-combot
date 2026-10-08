@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { leaveAnnouncementText, ModerationEngine } from "../src/bot/engine.js";
+import { leaveAnnouncementText, ModerationEngine, PURGE_HISTORY_RETRY_CAP_MS } from "../src/bot/engine.js";
+import type { EngineDeps } from "../src/bot/engine.js";
 import { loadDefaults } from "../src/config.js";
 import { collectNewEvents } from "../src/poller.js";
 import { Store } from "../src/store.js";
@@ -56,6 +60,7 @@ describe("ModerationEngine", () => {
 
   function setup(
     flood?: Partial<DefaultsConfig["flood"]>,
+    deps?: EngineDeps,
   ): { engine: ModerationEngine; client: MockXClient; store: Store } {
     const store = new Store(":memory:");
     stores.push(store);
@@ -65,7 +70,7 @@ describe("ModerationEngine", () => {
     client.addUser(owner);
     const config = runtime();
     if (flood) config.defaults = { ...defaults, flood: { ...defaults.flood, ...flood } };
-    const engine = new ModerationEngine(store, client, config);
+    const engine = new ModerationEngine(store, client, config, undefined, deps);
     return { engine, client, store };
   }
 
@@ -463,13 +468,17 @@ describe("ModerationEngine", () => {
     expect(client.conversationListCalls).toHaveLength(0);
 
     await engine.processEvent(message({ id: "p-global", senderId: bob.id, text: "/purge 50" }));
-    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
     expect(client.conversationListCalls).toHaveLength(1);
+    expect(client.deleted).toEqual(["sent-1"]);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /Deleted 1 of 2 recent messages \(asked for 50\)/,
+    );
 
     store.addConversationAdmin(groupId, alice.id);
     await engine.processEvent(message({ id: "p-local", senderId: alice.id, text: "!purge 100" }));
-    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
-    expect(client.deleted).toEqual([]);
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted \d+ of \d+ recent messages \(asked for 100\)/);
+    expect(client.sent.at(-1)?.text).not.toMatch(/limited to configured admins/);
+    expect(client.deleted).toContain("sent-2");
   });
 
   it("purges newest messages and reports classic deletes the bot does not own", async () => {
@@ -730,6 +739,342 @@ describe("ModerationEngine", () => {
     await engine.processEvent(message({ id: "purge-err", senderId: owner.id, text: "!purge 25" }));
     expect(client.deleted).toEqual([]);
     expect(client.sent.at(-1)?.text).toMatch(/nothing was deleted/);
+  });
+
+  it("fills purge memory from processEvent and skips history when that covers the count", async () => {
+    const { engine, client } = setup();
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 2, 0, 0, seconds)).toISOString();
+    client.events.push(
+      message({
+        id: "bot-from-history",
+        senderId: "bot-1",
+        text: "only on the history page",
+        createdAt: stamp(1),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-m1",
+        senderId: "bot-1",
+        text: "one",
+        createdAt: stamp(2),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-m2",
+        senderId: "bot-1",
+        text: "two",
+        createdAt: stamp(3),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-m3",
+        senderId: "bot-1",
+        text: "three",
+        createdAt: stamp(4),
+      }),
+    );
+
+    await engine.processEvent(
+      message({ id: "purge-mem", senderId: owner.id, text: "!purge 2", createdAt: stamp(5) }),
+    );
+
+    expect(client.conversationListCalls).toHaveLength(0);
+    expect(client.deleted).toEqual(["bot-m3", "bot-m2"]);
+    expect(client.deleted).not.toContain("purge-mem");
+    expect(client.deleted).not.toContain("bot-from-history");
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 2 of 2\./);
+  });
+
+  it("purges remembered messages plus history when memory is short", async () => {
+    const { engine, client } = setup();
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 3, 0, 0, seconds)).toISOString();
+    client.events.push(
+      message({
+        id: "bot-older",
+        senderId: "bot-1",
+        text: "from history",
+        createdAt: stamp(1),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-live",
+        senderId: "bot-1",
+        text: "from activity",
+        createdAt: stamp(2),
+      }),
+    );
+
+    await engine.processEvent(
+      message({ id: "purge-mix", senderId: owner.id, text: "!purge 2", createdAt: stamp(3) }),
+    );
+
+    expect(client.conversationListCalls).toHaveLength(1);
+    expect(client.deleted).toEqual(["bot-live", "bot-older"]);
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 2 of 2\./);
+  });
+
+  it("names the history retry wait when purge memory is empty", async () => {
+    const sleeps: number[] = [];
+    const { engine, client } = setup(undefined, {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      reads += 1;
+      throw new Error("Rate limited; retry after 284411ms");
+    };
+
+    await engine.processEvent(message({ id: "purge-wait", senderId: owner.id, text: "!purge 25" }));
+
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([284411]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sent.some((row) => /waiting ~5 minutes then retrying once/.test(row.text))).toBe(
+      true,
+    );
+    expect(
+      client.sent.filter((row) => /waiting ~5 minutes then retrying once/.test(row.text)),
+    ).toHaveLength(1);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /X is rate-limiting history reads; try again in about 5 minutes/,
+    );
+    expect(client.sent.at(-1)?.text).not.toMatch(/Could not load recent messages/);
+    expect(client.sent.at(-1)?.text).not.toMatch(/nothing was deleted/);
+    expect(client.sent.at(-1)?.text).not.toContain(groupId);
+  });
+
+  it("purges only remembered messages when history is rate-limited", async () => {
+    const sleeps: number[] = [];
+    const { engine, client, store } = setup(undefined, {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 4, 0, 0, seconds)).toISOString();
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      reads += 1;
+      throw Object.assign(new Error("Rate limited; retry after 284411ms"), {
+        status: 429,
+        retryAfterMs: 284411,
+      });
+    };
+    await engine.processEvent(
+      message({
+        id: "bot-keep",
+        senderId: "bot-1",
+        text: "super-secret-token",
+        conversationId: chatId,
+        sequenceId: "seq-keep",
+        createdAt: stamp(1),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "act-dup",
+        senderId: bob.id,
+        text: "same message",
+        conversationId: chatId,
+        sequenceId: "seq-dup",
+        createdAt: stamp(2),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "poll-dup",
+        senderId: bob.id,
+        text: "same message",
+        conversationId: chatId,
+        sequenceId: "seq-dup",
+        createdAt: stamp(2),
+      }),
+    );
+
+    await engine.processEvent(
+      message({
+        id: "purge-partial",
+        senderId: owner.id,
+        text: "!purge 10",
+        conversationId: chatId,
+        sequenceId: "seq-cmd",
+        createdAt: stamp(3),
+      }),
+    );
+
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([284411]);
+    expect(client.deleted).toEqual(["poll-dup", "bot-keep"]);
+    expect(client.deleted).not.toContain("act-dup");
+    expect(client.deleted).not.toContain("purge-partial");
+    expect(client.sent.some((row) => /waiting ~5 minutes then retrying once/.test(row.text))).toBe(
+      true,
+    );
+    expect(client.sent.at(-1)?.text).toMatch(
+      /Deleted 2 of 10 from recent memory because history was rate-limited/,
+    );
+    expect(client.sent.at(-1)?.text).not.toContain("super-secret-token");
+    expect(client.sent.at(-1)?.text).not.toContain(chatId);
+  });
+
+  it("retries history once after a 429 and then purges the page", async () => {
+    const sleeps: number[] = [];
+    const { engine, client } = setup(undefined, {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("Rate limited; retry after 60000ms");
+      return {
+        events: [
+          message({
+            id: "bot-after-wait",
+            senderId: "bot-1",
+            text: "from the second read",
+            createdAt: "2024-08-01T00:00:00.000Z",
+          }),
+        ],
+      };
+    };
+
+    await engine.processEvent(message({ id: "purge-retry", senderId: owner.id, text: "!purge 4" }));
+
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([60_000]);
+    expect(client.deleted).toEqual(["bot-after-wait"]);
+    expect(client.sent.some((row) => /waiting ~1 minute then retrying once/.test(row.text))).toBe(
+      true,
+    );
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 1 of 1 recent messages \(asked for 4\)/);
+    expect(client.sent.at(-1)?.text).not.toMatch(/from recent memory/);
+  });
+
+  it("does not wait a second time when the history retry is also rate-limited", async () => {
+    const sleeps: number[] = [];
+    const { engine, client } = setup(undefined, {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    const waits = [30_000, PURGE_HISTORY_RETRY_CAP_MS];
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      const wait = waits[reads] ?? PURGE_HISTORY_RETRY_CAP_MS;
+      reads += 1;
+      throw new Error(`Rate limited; retry after ${wait}ms`);
+    };
+
+    await engine.processEvent(message({ id: "purge-once", senderId: owner.id, text: "!purge 3" }));
+
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([30_000]);
+    expect(client.deleted).toEqual([]);
+    expect(client.sent.filter((row) => /retrying once/.test(row.text))).toHaveLength(1);
+    expect(client.sent.at(-1)?.text).toMatch(/try again in about 15 minutes/);
+  });
+
+  it("skips the history retry when the wait is longer than the cap", async () => {
+    const sleeps: number[] = [];
+    const { engine, client } = setup(undefined, {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      reads += 1;
+      throw new Error(`Rate limited; retry after ${PURGE_HISTORY_RETRY_CAP_MS + 60_000}ms`);
+    };
+
+    await engine.processEvent(message({ id: "purge-long", senderId: owner.id, text: "!purge 2" }));
+
+    expect(reads).toBe(1);
+    expect(sleeps).toEqual([]);
+    expect(client.sent.some((row) => /retrying once/.test(row.text))).toBe(false);
+    expect(client.sent.at(-1)?.text).toMatch(/try again in about 16 minutes/);
+    expect(client.deleted).toEqual([]);
+  });
+
+  it("includes the bot's own replies and activity messages in the purge window", async () => {
+    const { engine, client } = setup();
+    await engine.processEvent(
+      message({
+        id: "bot-seen",
+        senderId: "bot-1",
+        text: "do-not-echo-this-token",
+        createdAt: "2024-09-01T00:00:00.000Z",
+      }),
+    );
+    await engine.processEvent(message({ id: "help-for-purge", senderId: alice.id, text: "!help" }));
+    await engine.processEvent(message({ id: "purge-own", senderId: owner.id, text: "!purge 3" }));
+
+    expect(client.conversationListCalls).toHaveLength(0);
+    expect(client.deleted).toEqual(["sent-1", "bot-seen"]);
+    expect(client.deleted).not.toContain("purge-own");
+    expect(client.deleted).not.toContain("help-for-purge");
+    expect(client.sent.some((row) => row.text.includes("do-not-echo-this-token"))).toBe(false);
+  });
+
+  it("reloads recent message ids after a restart and does not persist plaintext", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "purge-recent-"));
+    const file = path.join(dir, "chat-recent-messages.json");
+    try {
+      const first = setup(undefined, { recentMessagesPath: file, recentMessagesWriteDelayMs: 0 });
+      await first.engine.processEvent(
+        message({
+          id: "bot-saved",
+          senderId: "bot-1",
+          text: "plaintext-must-not-land-on-disk",
+          sequenceId: "seq-saved",
+          createdAt: "2024-10-01T00:00:00.000Z",
+          encodedEvent: "ciphertext-blob",
+        }),
+      );
+      const raw = fs.readFileSync(file, "utf8");
+      expect(raw).toContain("bot-saved");
+      expect(raw).toContain("seq-saved");
+      expect(raw).not.toContain("plaintext-must-not-land-on-disk");
+      expect(raw).not.toContain("ciphertext-blob");
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+
+      const sleeps: number[] = [];
+      const client = new MockXClient();
+      client.addUser(alice);
+      client.addUser(bob);
+      client.addUser(owner);
+      let reads = 0;
+      client.listConversationDmEvents = async () => {
+        reads += 1;
+        throw new Error("Rate limited; retry after 1000ms");
+      };
+      const engine = new ModerationEngine(first.store, client, runtime(), undefined, {
+        recentMessagesPath: file,
+        recentMessagesWriteDelayMs: 0,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      });
+      await engine.processEvent(message({ id: "purge-reloaded", senderId: owner.id, text: "!purge 4" }));
+      expect(reads).toBe(2);
+      expect(sleeps).toEqual([1000]);
+      expect(client.deleted).toEqual(["bot-saved"]);
+      expect(JSON.stringify(client.sent)).not.toContain("plaintext-must-not-land-on-disk");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("tells an admin how to use !purge", async () => {

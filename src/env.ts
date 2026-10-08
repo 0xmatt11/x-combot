@@ -25,6 +25,7 @@ import {
 import { normalizeVoiceLanguage } from "./bot/voice.js";
 import { parseMiladyBankText } from "./bot/milady.js";
 import { parseChatConversationIds } from "./chat/ids.js";
+import { recentMessagesPathBeside } from "./bot/purge-memory.js";
 import { remoteKeyCachePathBeside } from "./chat/remote-key-cache.js";
 
 function required(name: string): string {
@@ -292,6 +293,11 @@ export interface Env {
    * Default sits beside `chatKeysPath`.
    */
   chatRemoteKeysPath: string;
+  /**
+   * Recent message ids for `!purge` (mode 0600). Not message text.
+   * Default sits beside `chatKeysPath`.
+   */
+  chatRecentMessagesPath: string;
   /** Juicebox PIN. Used only when no local key file exists. Never commit this. */
   chatPin?: string;
   chatPollIntervalMs?: number;
@@ -436,6 +442,10 @@ export function loadEnv(requireOwner = true): Env {
     chatRemoteKeysPath: path.resolve(
       optional("CHAT_REMOTE_KEYS_PATH") ??
         remoteKeyCachePathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
+    ),
+    chatRecentMessagesPath: path.resolve(
+      optional("CHAT_RECENT_MESSAGES_PATH") ??
+        recentMessagesPathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
     ),
     chatPin: optional("CHAT_PIN"),
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,

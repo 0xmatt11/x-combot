@@ -5,6 +5,7 @@ dist/
 data/
 chat-keys.json
 chat-remote-keys.json
+chat-recent-messages.json
 *.log
 .DS_Store
 coverage/

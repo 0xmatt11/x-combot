@@ -133,6 +133,8 @@ A restart reads the cache before any public_keys request. Cached users are not f
 
 `CHAT_REMOTE_KEYS_PATH` moves the file. The default is `data/chat-remote-keys.json`, beside `CHAT_KEYS_PATH`. Delete it to force a refetch. It is gitignored. Do not commit it.
 
+`!purge` keeps a short list of recent message ids (event id, conversation, sequence id, sender, time) in `data/chat-recent-messages.json`, also mode `0600` and beside the identity file. Message text is not written there. A restart loads the file so purge can still see messages the bot already handled. `CHAT_RECENT_MESSAGES_PATH` moves it. It is gitignored. Do not commit it.
+
 Conversation keys recovered while decrypting are stored in the same file so a restart can send Chat text and media before the next KeyChange. Those bytes decrypt the group, so they stay in this mode `0600` file and are not logged. Every version this process can unwrap is kept. Outbound messages use the newest. A file written by an older build (one version per conversation) still loads. `chat:rotate` still requests member keys when the API is not in backoff, and uses a non-empty cached list if that request is rate limited.
 
 ### Which groups
@@ -851,6 +853,7 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `CHAT_CONVERSATION_DENY_IDS` | Groups to skip |
 | `CHAT_KEYS_PATH` | Default `data/chat-keys.json` |
 | `CHAT_REMOTE_KEYS_PATH` | Member public_keys cache. Default `data/chat-remote-keys.json` (beside the identity file). Restarts reuse it. Not the bot identity |
+| `CHAT_RECENT_MESSAGES_PATH` | Recent message ids for `!purge`. Default `data/chat-recent-messages.json`. No message text. Restarts reuse it |
 | `CHAT_PIN` | One-time Juicebox PIN. Needs `juicebox-sdk`. Not needed after the key file matches a registered public key |
 | `CHAT_POLL_INTERVAL_MS` | Chat catch-up interval. Overrides the Activity 5-minute default |
 | `CHAT_POLL_IDLE_MAX_MS` | Cap for quiet Chat polls when Activity is off. Default 120000 |

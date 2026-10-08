@@ -271,7 +271,11 @@ async function main(): Promise<void> {
         webhookSecret: env.requestWebhookSecret,
         pendingDir: defaultFeatureRequestPendingDir(env.databasePath),
       },
+      recentMessagesPath: env.chatRecentMessagesPath,
     },
+  );
+  log.info(
+    `!purge keeps recent message ids in ${env.chatRecentMessagesPath} (no message text).`,
   );
   log.info(
     `!request writes one JSON file per request to ${defaultFeatureRequestPendingDir(env.databasePath)}.`,
