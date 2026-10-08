@@ -463,12 +463,17 @@ describe("ModerationEngine", () => {
     expect(client.conversationListCalls).toHaveLength(0);
 
     await engine.processEvent(message({ id: "p-global", senderId: bob.id, text: "/purge 50" }));
-    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
     expect(client.conversationListCalls).toHaveLength(1);
+    expect(client.deleted).toEqual([]);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /Deleted 0 of 1 recent messages \(asked for 50\)/,
+    );
 
     store.addConversationAdmin(groupId, alice.id);
     await engine.processEvent(message({ id: "p-local", senderId: alice.id, text: "!purge 100" }));
-    expect(client.sent.at(-1)?.text).toMatch(/No recent messages to purge/);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /Deleted 0 of 2 recent messages \(asked for 100\)/,
+    );
     expect(client.deleted).toEqual([]);
   });
 
@@ -730,6 +735,191 @@ describe("ModerationEngine", () => {
     await engine.processEvent(message({ id: "purge-err", senderId: owner.id, text: "!purge 25" }));
     expect(client.deleted).toEqual([]);
     expect(client.sent.at(-1)?.text).toMatch(/nothing was deleted/);
+  });
+
+  it("fills purge memory from processEvent and skips history when that covers the count", async () => {
+    const { engine, client } = setup();
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 2, 0, 0, seconds)).toISOString();
+    client.events.push(
+      message({
+        id: "bot-from-history",
+        senderId: "bot-1",
+        text: "only on the history page",
+        createdAt: stamp(1),
+      }),
+    );
+    await engine.processEvent({
+      id: "join-skip",
+      eventType: "ParticipantsJoin",
+      conversationId: groupId,
+      senderId: owner.id,
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    });
+    await engine.processEvent(
+      message({
+        id: "bot-m1",
+        senderId: "bot-1",
+        text: "one",
+        createdAt: stamp(2),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-m2",
+        senderId: "bot-1",
+        text: "two",
+        createdAt: stamp(3),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-m3",
+        senderId: "bot-1",
+        text: "three",
+        createdAt: stamp(4),
+      }),
+    );
+
+    await engine.processEvent(
+      message({ id: "purge-mem", senderId: owner.id, text: "!purge 2", createdAt: stamp(5) }),
+    );
+
+    expect(client.conversationListCalls).toHaveLength(0);
+    expect(client.deleted).toEqual(["bot-m3", "bot-m2"]);
+    expect(client.deleted).not.toContain("purge-mem");
+    expect(client.deleted).not.toContain("join-skip");
+    expect(client.deleted).not.toContain("bot-from-history");
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 2 of 2\./);
+  });
+
+  it("purges remembered messages plus history when memory is short", async () => {
+    const { engine, client } = setup();
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 3, 0, 0, seconds)).toISOString();
+    client.events.push(
+      message({
+        id: "bot-older",
+        senderId: "bot-1",
+        text: "from history",
+        createdAt: stamp(1),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "bot-live",
+        senderId: "bot-1",
+        text: "from activity",
+        createdAt: stamp(2),
+      }),
+    );
+
+    await engine.processEvent(
+      message({ id: "purge-mix", senderId: owner.id, text: "!purge 2", createdAt: stamp(3) }),
+    );
+
+    expect(client.conversationListCalls).toHaveLength(1);
+    expect(client.deleted).toEqual(["bot-live", "bot-older"]);
+    expect(client.sent.at(-1)?.text).toMatch(/Deleted 2 of 2\./);
+  });
+
+  it("names the history retry wait when purge memory is empty", async () => {
+    const { engine, client } = setup();
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      reads += 1;
+      throw new Error("Rate limited; retry after 284411ms");
+    };
+
+    await engine.processEvent(message({ id: "purge-wait", senderId: owner.id, text: "!purge 25" }));
+
+    expect(reads).toBe(1);
+    expect(client.deleted).toEqual([]);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /X is rate-limiting history reads; try again in about 5 minutes/,
+    );
+    expect(client.sent.at(-1)?.text).not.toMatch(/Could not load recent messages/);
+    expect(client.sent.at(-1)?.text).not.toMatch(/nothing was deleted/);
+    expect(client.sent.at(-1)?.text).not.toContain(groupId);
+  });
+
+  it("purges only remembered messages when history is rate-limited", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    const stamp = (seconds: number) =>
+      new Date(Date.UTC(2024, 0, 4, 0, 0, seconds)).toISOString();
+    let reads = 0;
+    client.listConversationDmEvents = async () => {
+      reads += 1;
+      throw Object.assign(new Error("Rate limited; retry after 284411ms"), {
+        status: 429,
+        retryAfterMs: 284411,
+      });
+    };
+    await engine.processEvent({
+      id: "join-chat",
+      eventType: "ParticipantsJoin",
+      conversationId: chatId,
+      senderId: owner.id,
+      participantIds: [alice.id],
+      participants: [alice],
+      mentions: [],
+    });
+    await engine.processEvent(
+      message({
+        id: "bot-keep",
+        senderId: "bot-1",
+        text: "super-secret-token",
+        conversationId: chatId,
+        sequenceId: "seq-keep",
+        createdAt: stamp(1),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "act-dup",
+        senderId: bob.id,
+        text: "same message",
+        conversationId: chatId,
+        sequenceId: "seq-dup",
+        createdAt: stamp(2),
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "poll-dup",
+        senderId: bob.id,
+        text: "same message",
+        conversationId: chatId,
+        sequenceId: "seq-dup",
+        createdAt: stamp(2),
+      }),
+    );
+
+    await engine.processEvent(
+      message({
+        id: "purge-partial",
+        senderId: owner.id,
+        text: "!purge 10",
+        conversationId: chatId,
+        sequenceId: "seq-cmd",
+        createdAt: stamp(3),
+      }),
+    );
+
+    expect(reads).toBe(1);
+    expect(client.deleted).toEqual(["poll-dup", "bot-keep"]);
+    expect(client.deleted).not.toContain("act-dup");
+    expect(client.deleted).not.toContain("join-chat");
+    expect(client.deleted).not.toContain("purge-partial");
+    expect(client.sent.at(-1)?.text).toMatch(
+      /Deleted 2 of 10 from recent memory because history was rate-limited/,
+    );
+    expect(client.sent.at(-1)?.text).not.toContain("super-secret-token");
+    expect(client.sent.at(-1)?.text).not.toContain(chatId);
   });
 
   it("tells an admin how to use !purge", async () => {

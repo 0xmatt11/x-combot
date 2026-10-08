@@ -30,6 +30,7 @@ import { buildLlmMessages, buildUnknownCommandMessages, selectContextTurns, spli
 import { asChatCopy } from "./user-copy.js";
 import {
   boundedHistoryRetryMs,
+  chatErrorStatus,
   dmEventFromLlmRetry,
   isRecoverableChatError,
   llmRetryDelayMs,
@@ -42,6 +43,7 @@ import {
   snapshotLlmRetry,
   type LlmHandleOutcome,
 } from "../llm/chat-retry.js";
+import { createPurgeMemory } from "./purge-memory.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
   buildRoastMessages,
@@ -459,6 +461,13 @@ interface FeatureRequestSession {
 
 export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
+  /**
+   * Recent decrypted MessageCreate events, newest first, per conversation.
+   * Activity and the poller both call `processEvent`, so `!purge` can delete
+   * from this window when GET history is rate-limited. Text and ciphertext
+   * are not stored.
+   */
+  private readonly purgeMemory = createPurgeMemory();
   private readonly casino = new CasinoTable();
   /** Users we have already resolved to a handle or display name. */
   private readonly namedUsers = new Map<string, XUser>();
@@ -532,6 +541,8 @@ export class ModerationEngine {
       warned: false,
       llm: false,
     };
+
+    this.purgeMemory.remember(event);
 
     if (this.alreadyHandled(event)) {
       if (!event.conversationId || this.chatMayAct(event.conversationId)) {
@@ -3259,9 +3270,9 @@ export class ModerationEngine {
           await this.reply(conversationId, purgeUsage(), actions);
           return;
         }
-        let targets: DmEvent[];
+        let listed: PurgeTargetList;
         try {
-          targets = await this.listPurgeTargets(conversationId, command.count, {
+          listed = await this.listPurgeTargets(conversationId, command.count, {
             id: event.id,
             sequenceId: event.sequenceId,
           });
@@ -3274,9 +3285,26 @@ export class ModerationEngine {
           );
           return;
         }
+        if (listed.rateLimited) {
+          log.warn(
+            `History reads are rate-limited in ${conversationId}; retry after ${listed.retryAfterMs ?? "unknown"}ms`,
+          );
+          await this.reply(
+            conversationId,
+            formatHistoryRateLimitReply(listed.retryAfterMs),
+            actions,
+          );
+          return;
+        }
+        const targets = listed.targets;
         if (targets.length === 0) {
           await this.reply(conversationId, "No recent messages to purge.", actions);
           return;
+        }
+        if (listed.fromMemoryOnly) {
+          log.warn(
+            `History reads are rate-limited in ${conversationId}; purging ${targets.length} remembered message(s)`,
+          );
         }
         let deleted = 0;
         for (const target of targets) {
@@ -3294,6 +3322,7 @@ export class ModerationEngine {
             requested: command.count,
             capped: command.capped === true,
             chat: isChatGroupId(conversationId),
+            fromMemoryOnly: listed.fromMemoryOnly === true,
           }),
           actions,
         );
@@ -4559,41 +4588,87 @@ export class ModerationEngine {
    * The last `count` messages in this conversation, newest first.
    * Deletes start at the most recent message and walk backward. This does not
    * reverse the page the way `!summarize` does (that path wants oldest-first
-   * context). Skips the `!purge` line itself. Same history read as
-   * `!summarize` (`listConversationDmEvents`, Chat history for `g…` groups).
+   * context). Skips the `!purge` line itself (id and sequence id).
+   *
+   * The in-memory window from `processEvent` is enough when it already holds
+   * `count` targets, so a busy group does not GET history. Otherwise this
+   * reads `listConversationDmEvents` (Chat history for `g…` groups) and
+   * merges. A 429 with remembered targets deletes that window only. A 429
+   * with an empty window returns the retry wait instead of throwing.
    * Stops at `count` (already capped) or after a few pages.
    */
   private async listPurgeTargets(
     conversationId: string,
     count: number,
     exclude: { id: string; sequenceId?: string },
-  ): Promise<DmEvent[]> {
+  ): Promise<PurgeTargetList> {
+    const memory = this.memoryPurgeTargets(conversationId, count, exclude);
+    if (memory.length >= count) {
+      return { targets: memory };
+    }
+
     const selected: DmEvent[] = [];
     const seen = new Set<string>();
     if (exclude.id) seen.add(exclude.id);
     let paginationToken: string | undefined;
-    for (let page = 0; page < PURGE_MAX_PAGES && selected.length < count; page += 1) {
-      const result = await this.client.listConversationDmEvents({
-        conversationId,
-        maxResults: PURGE_PAGE_SIZE,
-        paginationToken,
-      });
-      const batch = newestFirst(
-        result.events.filter((candidate) => {
-          if (candidate.eventType !== "MessageCreate" || !candidate.id) return false;
-          if (seen.has(candidate.id)) return false;
-          if (exclude.sequenceId && candidate.sequenceId === exclude.sequenceId) return false;
-          return true;
-        }),
-      );
-      for (const candidate of batch) {
-        seen.add(candidate.id);
-        selected.push(candidate);
-        if (selected.length >= count) break;
+    try {
+      for (let page = 0; page < PURGE_MAX_PAGES && selected.length < count; page += 1) {
+        const result = await this.client.listConversationDmEvents({
+          conversationId,
+          maxResults: PURGE_PAGE_SIZE,
+          paginationToken,
+        });
+        const batch = newestFirst(
+          result.events.filter((candidate) => {
+            if (candidate.eventType !== "MessageCreate" || !candidate.id) return false;
+            if (seen.has(candidate.id)) return false;
+            if (exclude.sequenceId && candidate.sequenceId === exclude.sequenceId) return false;
+            return true;
+          }),
+        );
+        for (const candidate of batch) {
+          seen.add(candidate.id);
+          selected.push(candidate);
+          if (selected.length >= count) break;
+        }
+        const next = result.nextToken;
+        if (!next || next === paginationToken || result.events.length === 0) break;
+        paginationToken = next;
       }
-      const next = result.nextToken;
-      if (!next || next === paginationToken || result.events.length === 0) break;
-      paginationToken = next;
+    } catch (error) {
+      if (isHistoryRateLimited(error)) {
+        const retryAfterMs = readRetryAfterMs(error);
+        if (memory.length > 0 && selected.length === 0) {
+          return { targets: memory, fromMemoryOnly: true, retryAfterMs };
+        }
+        if (selected.length > 0) {
+          return { targets: mergePurgeTargets(memory, selected, count) };
+        }
+        return { targets: [], rateLimited: true, retryAfterMs };
+      }
+      throw error;
+    }
+    return { targets: mergePurgeTargets(memory, selected, count) };
+  }
+
+  /** Newest MessageCreate rows from memory, excluding the `!purge` line. */
+  private memoryPurgeTargets(
+    conversationId: string,
+    count: number,
+    exclude: { id: string; sequenceId?: string },
+  ): DmEvent[] {
+    const seen = new Set<string>();
+    if (exclude.id) seen.add(exclude.id);
+    if (exclude.sequenceId) seen.add(`seq:${conversationId}:${exclude.sequenceId}`);
+    const selected: DmEvent[] = [];
+    for (const candidate of newestFirst([...this.purgeMemory.list(conversationId)])) {
+      if (candidate.eventType !== "MessageCreate" || !candidate.id) continue;
+      if (exclude.sequenceId && candidate.sequenceId === exclude.sequenceId) continue;
+      const keys = eventReplayKeys(candidate);
+      if (keys.some((key) => seen.has(key))) continue;
+      for (const key of keys) seen.add(key);
+      selected.push(candidate);
+      if (selected.length >= count) break;
     }
     return selected;
   }
@@ -5209,6 +5284,15 @@ const PURGE_PAGE_SIZE = 100;
 /** Extra pages cover joins and the command itself sitting in a full page. */
 const PURGE_MAX_PAGES = 5;
 
+interface PurgeTargetList {
+  targets: DmEvent[];
+  /** History was rate-limited and every target came from the in-memory window. */
+  fromMemoryOnly?: boolean;
+  /** History was rate-limited and the window had nothing left to delete. */
+  rateLimited?: boolean;
+  retryAfterMs?: number;
+}
+
 function purgeUsage(): string {
   return `Usage: !purge <n>. n is how many of the last messages to delete: any positive integer, hard cap ${PURGE_MAX}. Starts at the most recent message and walks backward, not oldest-first. The !purge line is not included. X only deletes events this account can remove.`;
 }
@@ -5219,17 +5303,72 @@ function formatPurgeReply(input: {
   requested: number;
   capped: boolean;
   chat: boolean;
+  fromMemoryOnly?: boolean;
 }): string {
   const capNote = input.capped ? `Capped at ${PURGE_MAX}. ` : "";
+  if (input.fromMemoryOnly) {
+    const base = `${capNote}Deleted ${input.deleted} of ${input.requested} from recent memory because history was rate-limited.`;
+    if (input.deleted === input.attempted) return base;
+    return `${base} ${purgeDeleteLimit(input.chat)}`;
+  }
   const counts =
     input.attempted < input.requested
       ? `Deleted ${input.deleted} of ${input.attempted} recent messages (asked for ${input.requested}).`
       : `Deleted ${input.deleted} of ${input.attempted}.`;
   if (input.deleted === input.attempted) return `${capNote}${counts}`;
-  const why = input.chat
+  return `${capNote}${counts} ${purgeDeleteLimit(input.chat)}`;
+}
+
+function purgeDeleteLimit(chat: boolean): string {
+  return chat
     ? "X Chat delete-for-all (POST /2/chat/conversations/:id/messages/delete) works for messages this account sent, and for other people's messages only when this account is a group admin. The bot also needs each message's sequence id."
     : "X only lets the bot delete its own events (DELETE /2/dm_events/:id).";
-  return `${capNote}${counts} ${why}`;
+}
+
+/**
+ * Empty-window reply when GET history is in 429 backoff.
+ * Minutes are rounded up so the note does not say to retry before the window lifts.
+ * `retryAfterMs` comes from `readRetryAfterMs` (property or the live-client message).
+ */
+function formatHistoryRateLimitReply(retryAfterMs: number | undefined): string {
+  const minutes = historyRateLimitMinutes(retryAfterMs);
+  if (minutes === undefined) {
+    return "X is rate-limiting history reads; try again in a few minutes.";
+  }
+  const unit = minutes === 1 ? "minute" : "minutes";
+  return `X is rate-limiting history reads; try again in about ${minutes} ${unit}.`;
+}
+
+function historyRateLimitMinutes(retryAfterMs: number | undefined): number | undefined {
+  if (retryAfterMs === undefined || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) {
+    return undefined;
+  }
+  return Math.max(1, Math.ceil(retryAfterMs / 60_000));
+}
+
+/**
+ * GET history 429 from the live client: HTTP status, or the stable
+ * `Rate limited; retry after <ms>ms` message set on that error.
+ */
+function isHistoryRateLimited(error: unknown): boolean {
+  if (chatErrorStatus(error) === 429) return true;
+  const message = error instanceof Error ? error.message : "";
+  return /rate limited; retry after \d+ms/i.test(message);
+}
+
+/** Memory rows plus history rows, newest first, one row per message, capped at `count`. */
+function mergePurgeTargets(memory: DmEvent[], history: DmEvent[], count: number): DmEvent[] {
+  const seen = new Set<string>();
+  const merged: DmEvent[] = [];
+  for (const candidate of newestFirst([...memory, ...history])) {
+    if (!candidate.id) continue;
+    const keys = eventReplayKeys(candidate);
+    if (keys.some((key) => seen.has(key))) continue;
+    for (const key of keys) seen.add(key);
+    merged.push(candidate);
+    if (merged.length >= count) break;
+  }
+  return merged;
 }
 
 /**
