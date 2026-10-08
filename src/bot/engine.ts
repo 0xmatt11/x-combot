@@ -15,6 +15,7 @@ import type {
   LlmContextMode,
   MediaCaption,
   ResolvedConversationConfig,
+  SendMessageResult,
   XUser,
 } from "../types.js";
 import { isChatGroupId } from "../chat/ids.js";
@@ -174,6 +175,13 @@ import {
   diceReply,
   eightBallReply,
   gamesMenu,
+  loadGrowSettings,
+  playDod,
+  playDtop,
+  playGrow,
+  playLoan,
+  playPvp,
+  playSize,
   guessReply,
   higherLowerOpen,
   higherLowerReply,
@@ -2947,6 +2955,56 @@ export class ModerationEngine {
       case "games":
         await this.reply(conversationId, gamesMenu(), actions);
         return;
+      case "grow":
+        await this.handleGrowCommand(event, actions, nowMs);
+        return;
+      case "dtop":
+        await this.reply(
+          conversationId,
+          playDtop(this.store, { conversationId, nowMs, settings: loadGrowSettings() }).text,
+          actions,
+        );
+        return;
+      case "size":
+        await this.reply(
+          conversationId,
+          playSize(this.store, {
+            conversationId,
+            userId: senderId,
+            label: await this.diceRoller(event),
+            settings: loadGrowSettings(),
+          }).text,
+          actions,
+        );
+        return;
+      case "dod":
+        await this.reply(
+          conversationId,
+          playDod(this.store, {
+            conversationId,
+            nowMs,
+            rng: () => this.nextRandom(),
+            settings: loadGrowSettings(),
+          }).text,
+          actions,
+        );
+        return;
+      case "pvp":
+        await this.handlePvpCommand(event, command.args, actions, nowMs);
+        return;
+      case "loan":
+        await this.reply(
+          conversationId,
+          playLoan(this.store, {
+            conversationId,
+            userId: senderId,
+            label: await this.diceRoller(event),
+            confirm: command.confirm,
+            settings: loadGrowSettings(),
+          }).text,
+          actions,
+        );
+        return;
       case "ship":
         this.rememberEventMembers(event);
         await this.reply(
@@ -5052,14 +5110,75 @@ export class ModerationEngine {
     }
   }
 
-  private async reply(
+  private async reply(conversationId: string, text: string, actions: EngineActions): Promise<void> {
+    await this.sendReply(conversationId, text, actions);
+  }
+
+  private async sendReply(
     conversationId: string,
     text: string,
     actions: EngineActions,
-  ): Promise<void> {
+  ): Promise<SendMessageResult | undefined> {
     const addressed = await this.addressText(asChatCopy(text));
-    await this.client.sendMessage(conversationId, addressed.text, addressed.caption);
+    const sent = await this.client.sendMessage(conversationId, addressed.text, addressed.caption);
     actions.replies.push(addressed.text);
+    return sent;
+  }
+
+  private async handleGrowCommand(
+    event: DmEvent,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const senderId = event.senderId;
+    if (!senderId) return;
+    await this.reply(
+      event.conversationId,
+      playGrow(this.store, {
+        conversationId: event.conversationId,
+        userId: senderId,
+        label: await this.diceRoller(event),
+        nowMs,
+        rng: () => this.nextRandom(),
+        settings: loadGrowSettings(),
+      }).text,
+      actions,
+    );
+  }
+
+  private async handlePvpCommand(
+    event: DmEvent,
+    args: string | undefined,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
+    const senderId = event.senderId;
+    if (!senderId) return;
+    const outcome = playPvp(this.store, {
+      conversationId: event.conversationId,
+      userId: senderId,
+      label: await this.diceRoller(event),
+      args: args ?? "",
+      replyToChallenge: this.replyTargetsOpenFight(event),
+      nowMs,
+      rng: () => this.nextRandom(),
+      settings: loadGrowSettings(),
+    });
+    const sent = await this.sendReply(event.conversationId, outcome.text, actions);
+    if (outcome.trackFight && sent?.dmEventId) {
+      this.store.attachGrowFightMessage(event.conversationId, sent.dmEventId);
+    }
+  }
+
+  /** A reply to this chat's open fight, or to the bot while that fight is up. */
+  private replyTargetsOpenFight(event: DmEvent): boolean {
+    const fight = this.store.getGrowFight(event.conversationId);
+    if (!fight) return false;
+    const reply = event.replyTo;
+    if (fight.messageId && (reply?.eventId === fight.messageId || reply?.sequenceId === fight.messageId)) {
+      return true;
+    }
+    return event.replyToSenderId === this.config.botUserId;
   }
 
   private async notifyAdmins(

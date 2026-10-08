@@ -206,6 +206,56 @@ CREATE TABLE IF NOT EXISTS llm_retry_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_llm_retry_due
   ON llm_retry_jobs (next_attempt_ms);
+
+CREATE TABLE IF NOT EXISTS grow_sizes (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  length INTEGER NOT NULL,
+  grown_at_ms INTEGER NOT NULL,
+  first_played_ms INTEGER NOT NULL,
+  streak INTEGER NOT NULL DEFAULT 0,
+  streak_max INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (conversation_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS grow_dod (
+  conversation_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  bonus INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS grow_fights (
+  conversation_id TEXT PRIMARY KEY,
+  challenger_id TEXT NOT NULL,
+  challenger_label TEXT NOT NULL,
+  bet INTEGER NOT NULL,
+  message_id TEXT,
+  created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS grow_pvp_stats (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  battles INTEGER NOT NULL DEFAULT 0,
+  wins INTEGER NOT NULL DEFAULT 0,
+  win_streak INTEGER NOT NULL DEFAULT 0,
+  win_streak_max INTEGER NOT NULL DEFAULT 0,
+  acquired INTEGER NOT NULL DEFAULT 0,
+  lost INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (conversation_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS grow_loans (
+  conversation_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  debt INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, user_id)
+);
 `;
 
 export class Store {
@@ -1187,6 +1237,292 @@ export class Store {
       )
       .run(conversationId, userId, nowMs);
   }
+
+  /** Run several grow writes as one SQLite transaction. */
+  inTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  getGrowSize(conversationId: string, userId: string): GrowSizeRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, label, length, grown_at_ms, first_played_ms, streak, streak_max
+         FROM grow_sizes WHERE conversation_id = ? AND user_id = ?`,
+      )
+      .get(conversationId, userId) as GrowSizeSql | undefined;
+    return row ? growSizeFrom(row) : undefined;
+  }
+
+  /** Longest first. Same length: more recent grow, then label. */
+  listGrowSizes(conversationId: string): GrowSizeRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT user_id, label, length, grown_at_ms, first_played_ms, streak, streak_max
+         FROM grow_sizes
+         WHERE conversation_id = ?
+         ORDER BY length DESC, grown_at_ms DESC, label ASC`,
+      )
+      .all(conversationId) as GrowSizeSql[];
+    return rows.map(growSizeFrom);
+  }
+
+  saveGrowSize(row: GrowSizeRow & { conversationId: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO grow_sizes (
+           conversation_id, user_id, label, length, grown_at_ms, first_played_ms, streak, streak_max
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+           label = excluded.label,
+           length = excluded.length,
+           grown_at_ms = excluded.grown_at_ms,
+           first_played_ms = excluded.first_played_ms,
+           streak = excluded.streak,
+           streak_max = excluded.streak_max`,
+      )
+      .run(
+        row.conversationId,
+        row.userId,
+        row.label,
+        row.length,
+        row.grownAtMs,
+        row.firstPlayedMs,
+        row.streak,
+        row.streakMax,
+      );
+  }
+
+  getGrowLoan(conversationId: string, userId: string): number {
+    const row = this.db
+      .prepare(`SELECT debt FROM grow_loans WHERE conversation_id = ? AND user_id = ?`)
+      .get(conversationId, userId) as { debt: number } | undefined;
+    return row?.debt ?? 0;
+  }
+
+  setGrowLoan(conversationId: string, userId: string, debt: number): void {
+    if (debt <= 0) {
+      this.db
+        .prepare(`DELETE FROM grow_loans WHERE conversation_id = ? AND user_id = ?`)
+        .run(conversationId, userId);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO grow_loans (conversation_id, user_id, debt) VALUES (?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET debt = excluded.debt`,
+      )
+      .run(conversationId, userId, debt);
+  }
+
+  getGrowDod(conversationId: string, day: string): GrowDodRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, label, bonus FROM grow_dod WHERE conversation_id = ? AND day = ?`,
+      )
+      .get(conversationId, day) as GrowDodSql | undefined;
+    if (!row) return undefined;
+    return { userId: row.user_id, label: row.label, bonus: row.bonus };
+  }
+
+  saveGrowDod(row: GrowDodRow & { conversationId: string; day: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO grow_dod (conversation_id, day, user_id, label, bonus)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(row.conversationId, row.day, row.userId, row.label, row.bonus);
+  }
+
+  getGrowFight(conversationId: string): GrowFightRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT challenger_id, challenger_label, bet, message_id, created_at_ms
+         FROM grow_fights WHERE conversation_id = ?`,
+      )
+      .get(conversationId) as GrowFightSql | undefined;
+    if (!row) return undefined;
+    return {
+      challengerId: row.challenger_id,
+      challengerLabel: row.challenger_label,
+      bet: row.bet,
+      messageId: row.message_id,
+      createdAtMs: row.created_at_ms,
+    };
+  }
+
+  saveGrowFight(row: GrowFightRow & { conversationId: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO grow_fights (
+           conversation_id, challenger_id, challenger_label, bet, message_id, created_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           challenger_id = excluded.challenger_id,
+           challenger_label = excluded.challenger_label,
+           bet = excluded.bet,
+           message_id = excluded.message_id,
+           created_at_ms = excluded.created_at_ms`,
+      )
+      .run(
+        row.conversationId,
+        row.challengerId,
+        row.challengerLabel,
+        row.bet,
+        row.messageId,
+        row.createdAtMs,
+      );
+  }
+
+  attachGrowFightMessage(conversationId: string, messageId: string): void {
+    this.db
+      .prepare(`UPDATE grow_fights SET message_id = ? WHERE conversation_id = ?`)
+      .run(messageId, conversationId);
+  }
+
+  clearGrowFight(conversationId: string): void {
+    this.db.prepare(`DELETE FROM grow_fights WHERE conversation_id = ?`).run(conversationId);
+  }
+
+  getGrowPvpStats(conversationId: string, userId: string): GrowPvpStatsRow {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, label, battles, wins, win_streak, win_streak_max, acquired, lost
+         FROM grow_pvp_stats WHERE conversation_id = ? AND user_id = ?`,
+      )
+      .get(conversationId, userId) as GrowPvpSql | undefined;
+    if (!row) {
+      return {
+        userId,
+        label: "",
+        battles: 0,
+        wins: 0,
+        winStreak: 0,
+        winStreakMax: 0,
+        acquired: 0,
+        lost: 0,
+      };
+    }
+    return {
+      userId: row.user_id,
+      label: row.label,
+      battles: row.battles,
+      wins: row.wins,
+      winStreak: row.win_streak,
+      winStreakMax: row.win_streak_max,
+      acquired: row.acquired,
+      lost: row.lost,
+    };
+  }
+
+  saveGrowPvpStats(row: GrowPvpStatsRow & { conversationId: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO grow_pvp_stats (
+           conversation_id, user_id, label, battles, wins, win_streak, win_streak_max, acquired, lost
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+           label = excluded.label,
+           battles = excluded.battles,
+           wins = excluded.wins,
+           win_streak = excluded.win_streak,
+           win_streak_max = excluded.win_streak_max,
+           acquired = excluded.acquired,
+           lost = excluded.lost`,
+      )
+      .run(
+        row.conversationId,
+        row.userId,
+        row.label,
+        row.battles,
+        row.wins,
+        row.winStreak,
+        row.winStreakMax,
+        row.acquired,
+        row.lost,
+      );
+  }
+}
+
+export interface GrowSizeRow {
+  userId: string;
+  label: string;
+  length: number;
+  grownAtMs: number;
+  firstPlayedMs: number;
+  streak: number;
+  streakMax: number;
+}
+
+export interface GrowDodRow {
+  userId: string;
+  label: string;
+  bonus: number;
+}
+
+export interface GrowFightRow {
+  challengerId: string;
+  challengerLabel: string;
+  bet: number;
+  messageId: string | null;
+  createdAtMs: number;
+}
+
+export interface GrowPvpStatsRow {
+  userId: string;
+  label: string;
+  battles: number;
+  wins: number;
+  winStreak: number;
+  winStreakMax: number;
+  acquired: number;
+  lost: number;
+}
+
+interface GrowSizeSql {
+  user_id: string;
+  label: string;
+  length: number;
+  grown_at_ms: number;
+  first_played_ms: number;
+  streak: number;
+  streak_max: number;
+}
+
+interface GrowDodSql {
+  user_id: string;
+  label: string;
+  bonus: number;
+}
+
+interface GrowFightSql {
+  challenger_id: string;
+  challenger_label: string;
+  bet: number;
+  message_id: string | null;
+  created_at_ms: number;
+}
+
+interface GrowPvpSql {
+  user_id: string;
+  label: string;
+  battles: number;
+  wins: number;
+  win_streak: number;
+  win_streak_max: number;
+  acquired: number;
+  lost: number;
+}
+
+function growSizeFrom(row: GrowSizeSql): GrowSizeRow {
+  return {
+    userId: row.user_id,
+    label: row.label,
+    length: row.length,
+    grownAtMs: row.grown_at_ms,
+    firstPlayedMs: row.first_played_ms,
+    streak: row.streak,
+    streakMax: row.streak_max,
+  };
 }
 
 interface LlmRetryRow {

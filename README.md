@@ -307,6 +307,12 @@ If X Chat rate-limits `!ask`, `@bot`, `!summarize`, or `!analyze`, the bot says 
 | `!tictactoe` / `!connect4` / `!duel` / `!hangman` / `!story` | Play with someone |
 | `!slots` / `!blackjack` / `!poker` / `!roulette` / `!crash` / `!trivia` | Casino and quiz. An open round also takes a letter, `!a`, or a short phrase |
 | `!ship` | Two people in this chat. `@handle` or a display name |
+| `!grow` / `!dick` | Daily size change, once per person per chat per UTC day. See [Daily size](#daily-size) |
+| `!dtop` | This chat's sizes. Not the XP board (`!top`) |
+| `!size` | Your size, streak, and fight record |
+| `!dod` | Dick of the day. A random player who grew in the last 7 days |
+| `!pvp` / `!fight` | Open a fight for a bet in centimeters. Someone else `!pvp accept`s |
+| `!loan` / `!borrow` | Reset a negative size. Confirm with `!loan yes` |
 
 `!admin` is the admin list for the owner, `ADMIN_IDS`, and per-group admins. Anyone else gets the same deny as other mod commands. `/admin` is the same. `!admin add` and `!admin remove` still change the allowlist.
 
@@ -377,9 +383,25 @@ The same giver can change the same target only once per `xp.level_grant_cooldown
 
 ## Games
 
-Anyone can play. There is no admin gate. `!games` prints the catalog in groups: instant (`!dice`, `!rps`, `!coinflip`, `!8ball`), board (`!minesweeper`), word/solo (`!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`), multiplayer (`!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`), XP/casino (`!slots`, `!blackjack` / `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`), and social (`!ship`). Every command in that catalog is playable. `!hit` draws on an open blackjack hand. `!stand` holds an open blackjack or poker hand, and asks which one when both are open. `/games` works the same way. A minesweeper board expires after 15 minutes without a move. The word and solo rounds stay in memory for this process and drop after 30 minutes of quiet.
+Anyone can play. There is no admin gate. `!games` prints the catalog in groups: instant (`!dice`, `!rps`, `!coinflip`, `!8ball`), size (`!grow` / `!dick`, `!dtop`, `!size`, `!dod`, `!pvp` / `!fight`, `!loan` / `!borrow`), board (`!minesweeper`), word/solo (`!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`), multiplayer (`!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`), XP/casino (`!slots`, `!blackjack` / `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`), and social (`!ship`). Every command in that catalog is playable. `!hit` draws on an open blackjack hand. `!stand` holds an open blackjack or poker hand, and asks which one when both are open. `/games` works the same way. A minesweeper board expires after 15 minutes without a move. The word and solo rounds stay in memory for this process and drop after 30 minutes of quiet.
 
 While a round is open, a move does not need the full bang. Trivia comes first: `a`, `A`, `!a`, `!A`, `!trivia c`, and glued `!triviac` are answers, and so is a short phrase such as `I think it's A` or `go with b`. A bare letter is read directly. A short line that is clearly an answer but not one of those forms can use the chat LLM, and only then. Other messages in the chat are not sent to the model for this. The same idea covers the first-run trivia difficulty prompt (`3`, `!hard`, `go with expert`), an open would-you-rather vote (`a` / `b`), a higher-or-lower call (`higher`, `h`), a bare `hit` or `stand` on your open hand, and a tic-tac-toe, connect-four, duel, or hangman turn when it is your move (`5`, `attack`, `e`). Trivia wins when a letter could be either. The difficulty read is deterministic. `!games` repeats the short version of this.
+
+### Daily size
+
+`!grow` (alias `!dick`) changes your size in this chat once per UTC day. The change is never 0 cm. Half the time it is a gain from 1 to 10 cm. Otherwise it is a loss from 1 to 5 cm. For the first 7 whole days after you start, every roll is a gain. A streak adds centimeters on days 2, 4, 8, 16, and 32 (and stays at +5 after that). The same bonus softens a loss. Miss a day and the streak starts over. The best streak is kept. A negative size also gets 1% of the depth, rounded, added to that day's change.
+
+`!dtop` lists up to 10 sizes in this chat, longest first. `[+]` has not grown today. `[~]` has not grown for more than 7 days. A size of 0 that is also inactive is hidden. This is not the XP board. `!top`, `!leaderboard`, `!rank`, `!xp`, and `!level` are unchanged.
+
+`!size` is your length, rank, streak, and fight record. Names are `@handle` or a display name. A numeric user id is never printed.
+
+`!dod` picks one person who grew in the last 7 days, uniformly, and adds 1 to 5 cm. Once per chat per UTC day. It does not spend that person's daily grow.
+
+`!pvp 5` (alias `!fight`) posts one open challenge for the chat. You need at least that many centimeters. Someone else accepts with `!pvp accept`, or by replying to the challenge with `!pvp`. You cannot take your own fight. The acceptor needs a size of at least 0. The winner is a coin flip and takes the bet. Win rate, win streak, and centimeters won or lost are kept. `!duel` and `!hit` are the other games and are not this fight.
+
+`!loan` (alias `!borrow`) is only for a negative size. `!loan yes` sets it to 0. You then owe that many centimeters. Each later positive grow, and each fight you win, pays 10% of that gain until the debt is gone.
+
+`DISABLE_CMD_GROW`, `DISABLE_CMD_TOP` (`!dtop`), `DISABLE_CMD_STATS` (`!size`), `DISABLE_CMD_DOD`, `DISABLE_CMD_PVP`, and `DISABLE_CMD_LOAN` turn that command off when the variable is set to any value. `DISABLE_STREAK` turns the streak bonus off. Ranges and the ratios above can be changed with `GROWTH_MIN`, `GROWTH_MAX`, `GROW_SHRINK_RATIO`, `NEWCOMERS_GRACE_DAYS`, `GROWTH_DOD_BONUS_MAX`, `TOP_LIMIT`, `INACTIVITY_DAYS`, `HELP_PUSSIES_COEF`, `LOAN_PAYOUT_COEF`, and `STREAK_BONUS_GRADES`. State is in SQLite, per chat. There is no inactive-size shrink job.
 
 `!dice` rolls **1d6** and replies `🎲 @handle rolled a 4` (or `an 8`). The name is `@username` when a handle is known, otherwise the display name. Encrypted Chat events often carry only a numeric sender id, so the bot looks that id up (`GET /2/users/:id`) before choosing the name, the same lookup leave announcements use. With neither a handle nor a display name, the reply says `someone` and never prints the raw user id. Optional notation: `!dice 2d20`, `!dice d20` (count defaults to 1), `!dice 2` (sides default to 6), and `!dice 1d6+2`. A roll is capped at 20 dice, 100 sides, and a modifier of 1000. Anything else gets a one-line usage reply. `/dice` works the same way.
 
@@ -738,7 +760,7 @@ Write the body to `pending/.<id>.json.tmp`, then rename it to `pending/<id>.json
 
 The poll runs every 5 seconds. Each tick renames a pending file into `processing/` before reading it, so two polls cannot send it twice. A successful send renames that file into `done/` and leaves the original JSON. Anything that cannot be posted is rewritten into `failed/` with `reason` and `failedAt` added. The original fields stay, so copying that file back to `pending/` retries it (`reason` and `failedAt` are ignored on the way in). A file left in `processing/` by a crash is tried again on the next tick. If that send had already reached the chat, the retry posts the same line again.
 
-`userId` is resolved with `GET /2/users/:id` (`getUserById`). The chat line is `@handle your !command is live` when `text` is omitted. When `text` is set, that string is the body and the handle is still prefixed, unless the body already starts with that `@handle`. The post goes through Chat `sendMessage`. The mention entity covers the `@handle` bytes only, the same range other outbound mentions use. The default line does not say Telegram. Do not put that word in `text`.
+`userId` is resolved with `GET /2/users/:id` (`getUserById`). The chat line is `@handle your !command is live` when `text` is omitted. When `text` is set, that string is the body and the handle is still prefixed, unless the body already starts with that `@handle`. The post goes through Chat `sendMessage`. The mention entity covers the `@handle` bytes only, the same range other outbound mentions use. The default line does not name another chat app. Do not put that name in `text`.
 
 If the Chat identity is not open, the file is not sent. It moves to `failed/` with `reason` `Chat is unavailable.` A lookup or send that throws, a user with no @handle, or a file that is not the schema below also moves to `failed/` with its own `reason`.
 
@@ -796,7 +818,7 @@ Independent of the X API tier. The bot calls OpenAI-compatible **Chat Completion
 
 **Grok.** `Authorization: Bearer $XAI_API_KEY` against `https://api.x.ai/v1/chat/completions`. Create a key at [console.x.ai](https://console.x.ai). xAI also documents a Responses API; this bot stays on Chat Completions so every provider shares one client. Default model is `grok-4.6`. `LLM_PROVIDER=grok` or `openai` without a key exits at startup. Leaving the provider unset and omitting keys still starts the bot; `!ask` then explains how to configure it. Local providers do not require a cloud key. `127.0.0.1` only works when the bot process can open that port.
 
-Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!request`, `!featurerequest`, `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!cheese`, `!milady`, `!undertow`, `!fathom`, `!troll`, `!untroll`, `!roast`, `!darwin`, `!lastwords`, `!obituary`, `!finalboss`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!ship`, `!hit`, `!stand`, `!purge`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
+Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. They do not load group history. The name is a word that contains a letter, so `!dice` and `!8ball` both count; a bare number or a hyphenated token does not. Registered names stay on their own path, including `!request`, `!featurerequest`, `!status`, `!admin`, `!imagine`, `!video`, `!voice`, `!cheese`, `!milady`, `!undertow`, `!fathom`, `!troll`, `!untroll`, `!roast`, `!darwin`, `!lastwords`, `!obituary`, `!finalboss`, `!linkroast`, `!boobs`, `!rps`, `!coinflip`, `!flip`, `!8ball`, `!eightball`, `!minesweeper`, `!games`, `!wordle`, `!anagram`, `!scramble`, `!guess`, `!higherlower`, `!wouldyourather`, `!truthordare`, `!tictactoe`, `!connect4`, `!duel`, `!hangman`, `!story`, `!slots`, `!blackjack`, `!bj`, `!poker`, `!roulette`, `!crash`, `!trivia`, `!ship`, `!grow`, `!dick`, `!dtop`, `!size`, `!dod`, `!pvp`, `!fight`, `!loan`, `!borrow`, `!hit`, `!stand`, `!purge`, and `!warn` with no user. The joke shares the per-user LLM rate limit with `!ask`. When the model cannot be called, the bot stays quiet. A real `!ask` still explains those gates out loud.
 
 | `llm.context_mode` | What is sent | Reads |
 | --- | --- | --- |
@@ -885,7 +907,7 @@ src/bot/engine.ts       # commands, XP, LLM dispatch
 src/bot/feature-request.ts # !request Q&A, pending JSON file, optional webhook, owner DM
 src/bot/parser.ts       # command and wake parsing
 src/bot/status.ts       # !status text from in-process health (no extra API calls)
-src/bot/games/          # !dice, instant games, !minesweeper, word/solo, multiplayer, casino, and the !games catalog
+src/bot/games/          # !dice, daily size, !minesweeper, word/solo, multiplayer, casino, and the !games catalog
 src/bot/xp.ts           # level curve and + / -
 src/bot/imagine.ts      # API Imagine client (IMAGINE_BACKEND=api), adult prompts, !imagine checks
 src/bot/imagine-backend.ts # browser|api switch; browser generators do not call the generations API

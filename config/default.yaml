@@ -60,6 +60,7 @@ help: |
   Games:
   !games — full list
   !dice — roll (1d6, or 2d20). !rps — rock-paper-scissors. !coinflip — coin (!flip). !8ball — magic 8-ball (!eightball)
+  !grow — daily size (!dick). !dtop — this chat's sizes. !size — yours. !dod — dick of the day. !pvp <cm> — open fight (!fight). !loan — reset a negative size (!borrow)
   !minesweeper — 5×5 or 7×7. Full list: !games
   !wordle — daily word (correct, present, or absent). !anagram — unscramble. !scramble — short words. !guess — higher or lower
   !higherlower — cards. !wouldyourather — vote. !truthordare — a prompt

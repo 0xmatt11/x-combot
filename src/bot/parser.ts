@@ -61,6 +61,12 @@ export type ParsedCommand =
   | { name: "crash"; args: string }
   | { name: "trivia"; args: string }
   | { name: "ship"; args: string }
+  | { name: "grow" }
+  | { name: "dtop" }
+  | { name: "size" }
+  | { name: "dod" }
+  | { name: "pvp"; args?: string }
+  | { name: "loan"; confirm: boolean }
   | { name: "hit"; args: string }
   | { name: "stand"; args: string }
   | { name: "troll"; off?: boolean; target?: UserRef; all?: boolean }
@@ -151,6 +157,15 @@ const KNOWN_COMMAND_NAMES = new Set([
   "trivia",
   "quiz",
   "ship",
+  "grow",
+  "dick",
+  "dtop",
+  "size",
+  "dod",
+  "pvp",
+  "fight",
+  "loan",
+  "borrow",
   "hit",
   "stand",
   "troll",
@@ -422,6 +437,21 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return { name: "trivia", args: rest };
     case "ship":
       return { name: "ship", args: rest };
+    case "grow":
+    case "dick":
+      return { name: "grow" };
+    case "dtop":
+      return { name: "dtop" };
+    case "size":
+      return { name: "size" };
+    case "dod":
+      return { name: "dod" };
+    case "pvp":
+    case "fight":
+      return rest ? { name: "pvp", args: rest } : { name: "pvp" };
+    case "loan":
+    case "borrow":
+      return { name: "loan", confirm: /^(yes|confirm)$/i.test(rest) };
     case "hit":
       return { name: "hit", args: rest };
     case "stand":
