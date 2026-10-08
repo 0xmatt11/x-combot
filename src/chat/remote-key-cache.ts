@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { SigningKeyEntry } from "./cipher.js";
+import { compareKeyVersions, latestKeyVersion } from "./conversation-keys.js";
 import type { RemotePublicKey } from "./wire.js";
 
 /**
@@ -28,21 +29,46 @@ export interface CachedRemoteUser {
   signing: SigningKeyEntry[];
 }
 
-export interface CachedConversationKey {
+export interface CachedConversationKeyVersion {
   version: string;
   /** Raw conversation key. Secret: it decrypts that group's messages. */
   key: Uint8Array;
 }
 
+/**
+ * Every conversation-key version unwrapped for one chat.
+ * `version` / `key` are the newest and are what outbound encrypt uses.
+ * `keys` includes that newest version.
+ */
+export interface CachedConversationKey {
+  version: string;
+  /** Raw conversation key. Secret: it decrypts that group's messages. */
+  key: Uint8Array;
+  keys: CachedConversationKeyVersion[];
+}
+
+/**
+ * One fetch of an older events page for a conversation-key version we could
+ * not unwrap. `retryAt` is when that pair may be fetched again. No key bytes.
+ */
+export interface MissingKeyFetchRecord {
+  attempts: number;
+  retryAt: number;
+  outcome: "not_found" | "failed";
+}
+
 export interface RemoteKeyCacheSnapshot {
   users: Map<string, CachedRemoteUser>;
   conversations: Map<string, CachedConversationKey>;
+  /** Absent on callers that only write users and conversation keys. */
+  missingKeyFetches?: Map<string, Map<string, MissingKeyFetchRecord>>;
 }
 
 export interface LoadedRemoteKeyCache extends RemoteKeyCacheSnapshot {
   /** Set when the file existed but the whole document could not be used. */
   invalid?: string;
   skippedUsers: number;
+  missingKeyFetches: Map<string, Map<string, MissingKeyFetchRecord>>;
 }
 
 interface DiskRemoteKey {
@@ -67,9 +93,19 @@ interface DiskUser {
   signing: DiskSigningKey[];
 }
 
-interface DiskConversation {
+interface DiskConversationKey {
   version: string;
   key_b64: string;
+}
+
+/**
+ * `version` + `key_b64` are the newest key (the original single-version file).
+ * `keys` is every version. Load accepts a file that has only the original pair.
+ */
+interface DiskConversation {
+  version?: string;
+  key_b64?: string;
+  keys?: DiskConversationKey[];
   saved_at?: number;
 }
 
@@ -82,6 +118,7 @@ export function loadRemoteKeyCache(filePath: string): LoadedRemoteKeyCache {
   const empty: LoadedRemoteKeyCache = {
     users: new Map(),
     conversations: new Map(),
+    missingKeyFetches: new Map(),
     skippedUsers: 0,
   };
   if (!fs.existsSync(filePath)) return empty;
@@ -116,7 +153,7 @@ export function loadRemoteKeyCache(filePath: string): LoadedRemoteKeyCache {
     }
   }
 
-  return { users, conversations, skippedUsers };
+  return { users, conversations, missingKeyFetches: parseMissingKeyFetches(parsed.missing_key_fetches), skippedUsers };
 }
 
 export function saveRemoteKeyCache(filePath: string, snapshot: RemoteKeyCacheSnapshot): void {
@@ -130,16 +167,24 @@ export function saveRemoteKeyCache(filePath: string, snapshot: RemoteKeyCacheSna
   }
   const conversations: Record<string, DiskConversation> = {};
   for (const [conversationId, saved] of snapshot.conversations) {
-    if (!saved.version || saved.key.byteLength === 0) continue;
+    const versions = conversationKeyVersions(saved);
+    if (versions.length === 0) continue;
+    const latest = versions[versions.length - 1]!;
     conversations[conversationId] = {
-      version: saved.version,
-      key_b64: Buffer.from(saved.key).toString("base64"),
+      version: latest.version,
+      key_b64: Buffer.from(latest.key).toString("base64"),
+      keys: versions.map((item) => ({
+        version: item.version,
+        key_b64: Buffer.from(item.key).toString("base64"),
+      })),
     };
   }
+  const missingKeyFetches = diskMissingKeyFetches(snapshot.missingKeyFetches);
   const body = {
     schema: REMOTE_KEY_CACHE_SCHEMA,
     users,
     conversations,
+    ...(missingKeyFetches ? { missing_key_fetches: missingKeyFetches } : {}),
   };
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;
@@ -208,10 +253,85 @@ function parseSigning(userId: string, value: unknown): SigningKeyEntry | undefin
   };
 }
 
+function parseMissingKeyFetches(value: unknown): Map<string, Map<string, MissingKeyFetchRecord>> {
+  const fetches = new Map<string, Map<string, MissingKeyFetchRecord>>();
+  if (!isRecord(value)) return fetches;
+  for (const [conversationId, versions] of Object.entries(value)) {
+    if (!isSafeId(conversationId) || !isRecord(versions)) continue;
+    const byVersion = new Map<string, MissingKeyFetchRecord>();
+    for (const [version, record] of Object.entries(versions)) {
+      const parsed = parseMissingKeyFetch(version, record);
+      if (parsed) byVersion.set(version, parsed);
+    }
+    if (byVersion.size > 0) fetches.set(conversationId, byVersion);
+  }
+  return fetches;
+}
+
+function parseMissingKeyFetch(version: string, value: unknown): MissingKeyFetchRecord | undefined {
+  if (!isSafeId(version) || !isRecord(value)) return undefined;
+  const attempts = value.attempts;
+  const retryAt = value.retry_at;
+  const outcome = value.outcome;
+  if (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 1) return undefined;
+  if (typeof retryAt !== "number" || !Number.isFinite(retryAt) || retryAt < 0) return undefined;
+  if (outcome !== "not_found" && outcome !== "failed") return undefined;
+  return { attempts, retryAt, outcome };
+}
+
+function diskMissingKeyFetches(
+  fetches: Map<string, Map<string, MissingKeyFetchRecord>> | undefined,
+): Record<string, Record<string, { attempts: number; retry_at: number; outcome: string }>> | undefined {
+  if (!fetches || fetches.size === 0) return undefined;
+  const disk: Record<string, Record<string, { attempts: number; retry_at: number; outcome: string }>> = {};
+  for (const [conversationId, versions] of fetches) {
+    const byVersion: Record<string, { attempts: number; retry_at: number; outcome: string }> = {};
+    for (const [version, record] of versions) {
+      if (!isSafeId(conversationId) || !isSafeId(version)) continue;
+      if (!Number.isInteger(record.attempts) || record.attempts < 1) continue;
+      if (!Number.isFinite(record.retryAt) || record.retryAt < 0) continue;
+      if (record.outcome !== "not_found" && record.outcome !== "failed") continue;
+      byVersion[version] = {
+        attempts: record.attempts,
+        retry_at: record.retryAt,
+        outcome: record.outcome,
+      };
+    }
+    if (Object.keys(byVersion).length > 0) disk[conversationId] = byVersion;
+  }
+  return Object.keys(disk).length > 0 ? disk : undefined;
+}
+
 function parseConversation(conversationId: string, value: unknown): CachedConversationKey | undefined {
   if (!isSafeId(conversationId) || !isRecord(value)) return undefined;
-  const version = requiredString(value.version);
-  const keyB64 = requiredString(value.key_b64);
+  const keys = new Map<string, Uint8Array>();
+  if (Array.isArray(value.keys)) {
+    for (const item of value.keys) {
+      if (!isRecord(item)) continue;
+      const parsed = parseKeyMaterial(requiredString(item.version), requiredString(item.key_b64));
+      if (parsed) keys.set(parsed.version, parsed.key);
+    }
+  }
+  const legacy = parseKeyMaterial(requiredString(value.version), requiredString(value.key_b64));
+  if (legacy && !keys.has(legacy.version)) keys.set(legacy.version, legacy.key);
+  if (keys.size === 0) return undefined;
+  const latest = latestKeyVersion(keys.keys());
+  if (!latest) return undefined;
+  const latestKey = keys.get(latest);
+  if (!latestKey) return undefined;
+  return {
+    version: latest,
+    key: latestKey,
+    keys: [...keys.entries()]
+      .sort((left, right) => compareKeyVersions(left[0], right[0]))
+      .map(([version, key]) => ({ version, key })),
+  };
+}
+
+function parseKeyMaterial(
+  version: string | undefined,
+  keyB64: string | undefined,
+): { version: string; key: Uint8Array } | undefined {
   if (!version || !keyB64) return undefined;
   let bytes: Buffer;
   try {
@@ -221,6 +341,20 @@ function parseConversation(conversationId: string, value: unknown): CachedConver
   }
   if (bytes.byteLength === 0) return undefined;
   return { version, key: Uint8Array.from(bytes) };
+}
+
+function conversationKeyVersions(saved: CachedConversationKey): CachedConversationKeyVersion[] {
+  const keys = new Map<string, Uint8Array>();
+  for (const item of saved.keys ?? []) {
+    if (!item.version || item.key.byteLength === 0) continue;
+    keys.set(item.version, item.key);
+  }
+  if (saved.version && saved.key.byteLength > 0 && !keys.has(saved.version)) {
+    keys.set(saved.version, saved.key);
+  }
+  return [...keys.entries()]
+    .sort((left, right) => compareKeyVersions(left[0], right[0]))
+    .map(([version, key]) => ({ version, key }));
 }
 
 function diskKey(key: RemotePublicKey): DiskRemoteKey {

@@ -7,7 +7,9 @@ import type {
   ChatCipher,
   ChatEntity,
   ChatMediaAttachment,
+  ConversationKeySet,
   DecryptEventsResult,
+  DecryptedEvent,
   EncryptMessageOptions,
   EncryptReplyOptions,
   LoadedChatIdentity,
@@ -16,6 +18,7 @@ import type {
   SendPayload,
   SigningKeyEntry,
 } from "./cipher.js";
+import { mergeConversationKeySets, missingConversationKeyVersion } from "./conversation-keys.js";
 
 /**
  * Crypto methods shared by the WASM `Chat` class and the public
@@ -37,6 +40,16 @@ export interface XdkLike {
   ): boolean;
   matchesRegisteredKey(publicKeyB64: string): boolean;
   decryptEvents(events: string[], signingKeys?: SigningKeyEntry[]): DecryptEventsResult;
+  /**
+   * `conversationKeys` is a plain version → key map (the `.keys` field), not
+   * the whole `{ keys, latestVersion }` result. Omitting it uses the cache,
+   * which keeps only the highest version per conversation.
+   */
+  decryptEvent?(
+    eventB64: string,
+    conversationKeys?: Record<string, Uint8Array> | null,
+    signingKeys?: SigningKeyEntry[],
+  ): DecryptedEvent;
   encryptMessage(params: {
     conversationId: string;
     text: string;
@@ -132,20 +145,62 @@ export function wrapCipher(inner: XdkLike, identity?: LoadedChatIdentity): ChatC
   const refreshSigning = () => {
     signing = inner.getPublicKeys().signing;
   };
+  /**
+   * Every version this process has unwrapped. The WASM cache keeps only the
+   * highest version per conversation, so older messages are retried through
+   * `decryptEvent` with this map.
+   */
+  const rememberedKeys: Record<string, Uint8Array> = {};
+  const remember = (set: ConversationKeySet | undefined) => {
+    if (!set?.keys) return;
+    for (const [version, key] of Object.entries(set.keys)) {
+      if (!version || !(key instanceof Uint8Array) || key.byteLength === 0) continue;
+      if (!rememberedKeys[version]) rememberedKeys[version] = key;
+    }
+  };
   return {
     identity,
     setSigningKeys(keys) {
       inner.setSigningKeys(keys);
     },
-    decryptEvents(eventsB64, signingKeys) {
-      const result = inner.decryptEvents(
-        eventsB64,
-        signingKeys && signingKeys.length > 0 ? signingKeys : undefined,
+    decryptEvents(eventsB64, signingKeys, priorKeys) {
+      const signing = signingKeys && signingKeys.length > 0 ? signingKeys : undefined;
+      remember(priorKeys);
+      const result = inner.decryptEvents(eventsB64, signing);
+      const extracted = normalizeConversationKeys(result.conversationKeys ?? result);
+      remember(extracted);
+      const known = mergeConversationKeySets(priorKeys, extracted, {
+        keys: rememberedKeys,
+        latestVersion: null,
+      });
+      const errors: Record<string, string> = { ...(result.errors ?? {}) };
+      const messages = [...(result.messages ?? [])];
+      const done = new Set(
+        messages.map((message) => message.originalB64).filter((blob): blob is string => Boolean(blob)),
       );
+      if (known && inner.decryptEvent) {
+        for (let index = 0; index < eventsB64.length; index += 1) {
+          const blob = eventsB64[index];
+          if (!blob || done.has(blob)) continue;
+          const errorKey = decryptErrorKey(errors, index, blob);
+          if (errorKey === undefined) continue;
+          const version = missingConversationKeyVersion(errors[errorKey] ?? "");
+          if (!version || !known.keys[version]) continue;
+          try {
+            const event = inner.decryptEvent(blob, known.keys, signing);
+            delete errors[errorKey];
+            messages.push({ event, originalB64: blob });
+            done.add(blob);
+          } catch {
+            // Keep the decryptEvents error. The key was present but this blob still failed.
+          }
+        }
+      }
       return {
-        messages: result.messages ?? [],
-        errors: result.errors ?? {},
-        conversationKeys: normalizeConversationKeys(result.conversationKeys ?? result),
+        messages,
+        errors,
+        // Caller-scoped keys only. `rememberedKeys` can hold other conversations.
+        conversationKeys: mergeConversationKeySets(priorKeys, extracted),
       };
     },
     verifyKeyBinding(identityPublicKey, signingPublicKey, identityPublicKeySignature) {
@@ -210,6 +265,17 @@ export function importIdentity(chat: XdkLike, privateKeysB64: string, version: s
   } finally {
     bytes.fill(0);
   }
+}
+
+function decryptErrorKey(
+  errors: Record<string, string>,
+  index: number,
+  blob: string,
+): string | undefined {
+  const indexKey = String(index);
+  if (errors[indexKey] !== undefined) return indexKey;
+  if (errors[blob] !== undefined) return blob;
+  return undefined;
 }
 
 function normalizeConversationKeys(raw: unknown): DecryptEventsResult["conversationKeys"] | undefined {
