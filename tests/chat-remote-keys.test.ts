@@ -16,6 +16,7 @@ import {
   remoteKeyCachePathBeside,
   saveRemoteKeyCache,
 } from "../src/chat/remote-key-cache.js";
+import { missingKeyFetchCooldownMs } from "../src/chat/conversation-keys.js";
 import { ChatService, type ChatServiceOptions } from "../src/chat/service.js";
 import type { RemotePublicKey } from "../src/chat/wire.js";
 import { Store } from "../src/store.js";
@@ -469,6 +470,7 @@ describe("remote public key cache", () => {
     expect(legacy.conversations.get(GROUP)?.version).toBe("99");
     expect(Array.from(legacy.conversations.get(GROUP)?.key ?? [])).toEqual(Array.from(older));
     expect(legacy.conversations.get(GROUP)?.keys.map((item) => item.version)).toEqual(["99"]);
+    expect(legacy.missingKeyFetches.size).toBe(0);
 
     saveRemoteKeyCache(file, {
       users: new Map(),
@@ -496,6 +498,63 @@ describe("remote public key cache", () => {
     expect(loaded.conversations.get(GROUP)?.version).toBe("100");
     expect(loaded.conversations.get(GROUP)?.keys.map((item) => item.version)).toEqual(["99", "100"]);
     expect(Array.from(loaded.conversations.get(GROUP)?.key ?? [])).toEqual(Array.from(newer));
+  });
+
+  it("round-trips missing-key fetch cooldowns and skips bad entries", () => {
+    const file = cachePath();
+    saveRemoteKeyCache(file, {
+      users: new Map(),
+      conversations: new Map(),
+      missingKeyFetches: new Map([
+        [GROUP, new Map([["1791414259993", { attempts: 2, retryAt: 99, outcome: "failed" }]])],
+      ]),
+    });
+    const loaded = loadRemoteKeyCache(file);
+    expect(loaded.missingKeyFetches.get(GROUP)?.get("1791414259993")).toEqual({
+      attempts: 2,
+      retryAt: 99,
+      outcome: "failed",
+    });
+    const raw = JSON.parse(readFileSync(file, "utf8")) as {
+      schema: number;
+      users: unknown;
+      conversations: unknown;
+      missing_key_fetches: Record<string, Record<string, unknown>>;
+    };
+    expect(raw.missing_key_fetches[GROUP]?.["1791414259993"]).toEqual({
+      attempts: 2,
+      retry_at: 99,
+      outcome: "failed",
+    });
+    expect(JSON.stringify(raw.missing_key_fetches)).not.toContain("key_b64");
+    raw.missing_key_fetches = {
+      [GROUP]: {
+        "1791414259993": { attempts: 1, retry_at: 50, outcome: "not_found" },
+        "0": { attempts: 0, retry_at: 1, outcome: "not_found" },
+        nope: { attempts: 1, retry_at: 1, outcome: "maybe" },
+      },
+      "bad\nid": { "1": { attempts: 1, retry_at: 1, outcome: "failed" } },
+    };
+    writeFileSync(file, JSON.stringify(raw));
+    const repaired = loadRemoteKeyCache(file);
+    expect([...repaired.missingKeyFetches.keys()]).toEqual([GROUP]);
+    expect(repaired.missingKeyFetches.get(GROUP)?.get("1791414259993")).toEqual({
+      attempts: 1,
+      retryAt: 50,
+      outcome: "not_found",
+    });
+    expect(repaired.missingKeyFetches.get(GROUP)?.size).toBe(1);
+  });
+});
+
+describe("missing key fetch cooldown", () => {
+  it("waits 6h, then 12h, then stays at 24h", () => {
+    const hour = 60 * 60 * 1000;
+    expect(missingKeyFetchCooldownMs(1)).toBe(6 * hour);
+    expect(missingKeyFetchCooldownMs(2)).toBe(12 * hour);
+    expect(missingKeyFetchCooldownMs(3)).toBe(24 * hour);
+    expect(missingKeyFetchCooldownMs(4)).toBe(24 * hour);
+    expect(missingKeyFetchCooldownMs(0)).toBe(6 * hour);
   });
 });
 
@@ -725,7 +784,8 @@ describe("multi-version conversation keys", () => {
     };
     const cipher = versionCipher();
     cipher.keyChanges.delete("kc-200");
-    const chat = service(http, cipher, cachePath());
+    const file = cachePath();
+    const chat = service(http, cipher, file);
     const pulled = await chat.pullNew(GROUP, "evt-0", 10);
     expect(gets).toEqual(["", "older"]);
     expect(pulled.events.map((event) => event.text)).toEqual(["!purge"]);
@@ -751,6 +811,7 @@ describe("multi-version conversation keys", () => {
     const second = await chat.pullNew(GROUP, "evt-purge", 10);
     expect(gets).toEqual(["again"]);
     expect(second.events.map((event) => event.text)).toEqual(["!purge"]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.size).toBe(0);
   });
 
   it("does not loop or move the watermark when the older-page fetch is rate limited", async () => {
@@ -868,5 +929,272 @@ describe("multi-version conversation keys", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  function undecryptablePage(token: string | undefined): RawChatEventsPage {
+    if (token === "page-2") return { data: [], meta: { next_token: "page-3" } };
+    if (token === "page-3") return { data: [], meta: { next_token: "page-4" } };
+    if (token) return { data: [], meta: { next_token: "page-5" } };
+    return {
+      data: [
+        {
+          id: "evt-purge",
+          sender_id: "owner-9",
+          created_at: "2026-10-07T23:05:00.000Z",
+          encoded_event: "msg-missing",
+        },
+        { id: "evt-0", sender_id: "owner-9", encoded_event: "old" },
+      ],
+      meta: { next_token: "page-2" },
+    };
+  }
+
+  it("does not refetch the same missing key version on later polls during cooldown", async () => {
+    const file = cachePath();
+    const started = 1_700_000_000_000;
+    let now = started;
+    const hour = 60 * 60 * 1000;
+    const gets: string[] = [];
+    const http = new FakeHttp();
+    http.getConversationEvents = async (_conversationId, params) => {
+      const token = params?.paginationToken ?? "";
+      gets.push(token);
+      return undecryptablePage(token || undefined);
+    };
+    const cipher = new VersionCipher();
+    cipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    const chat = service(http, cipher, file, { now: () => now, missingKeyAttempts: 50 });
+
+    const first = await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual(["", "page-2"]);
+    expect(first.watermarkId).toBeUndefined();
+    expect(first.events).toEqual([]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")).toEqual({
+      attempts: 1,
+      retryAt: started + 6 * hour,
+      outcome: "not_found",
+    });
+    const onDisk = JSON.parse(readFileSync(file, "utf8")) as { missing_key_fetches: unknown };
+    expect(JSON.stringify(onDisk.missing_key_fetches)).not.toContain("key_b64");
+
+    gets.length = 0;
+    now = started + 1_000;
+    expect((await chat.pullNew(GROUP, "evt-0", 10)).watermarkId).toBeUndefined();
+    now = started + 6 * hour - 1;
+    expect((await chat.pullNew(GROUP, "evt-0", 10)).watermarkId).toBeUndefined();
+    expect(gets).toEqual(["", ""]);
+
+    gets.length = 0;
+    now = started + 6 * hour;
+    expect((await chat.pullNew(GROUP, "evt-0", 10)).watermarkId).toBeUndefined();
+    expect(gets).toEqual(["", "page-3"]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")).toEqual({
+      attempts: 2,
+      retryAt: now + 12 * hour,
+      outcome: "not_found",
+    });
+
+    gets.length = 0;
+    now += 1_000;
+    await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual([""]);
+
+    gets.length = 0;
+    now = started + 6 * hour + 12 * hour;
+    await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual(["", "page-4"]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")).toMatchObject({
+      attempts: 3,
+      outcome: "not_found",
+      retryAt: now + 24 * hour,
+    });
+  });
+
+  it("fetches once per poll when two key versions are missing, then cools both down", async () => {
+    const file = cachePath();
+    let now = 2_000;
+    const gets: string[] = [];
+    const http = new FakeHttp();
+    http.getConversationEvents = async (_conversationId, params) => {
+      const token = params?.paginationToken ?? "";
+      gets.push(token);
+      if (token) return { data: [], meta: { next_token: "page-3" } };
+      return {
+        data: [
+          {
+            id: "evt-purge",
+            sender_id: "owner-9",
+            created_at: "2026-10-07T23:05:00.000Z",
+            encoded_event: "msg-missing",
+          },
+          {
+            id: "evt-other",
+            sender_id: "owner-9",
+            created_at: "2026-10-07T23:05:01.000Z",
+            encoded_event: "msg-other",
+          },
+          { id: "evt-0", sender_id: "owner-9", encoded_event: "old" },
+        ],
+        meta: { next_token: "page-2" },
+      };
+    };
+    const cipher = new VersionCipher();
+    cipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    cipher.messages.set("msg-other", { version: "1791331947497", text: "!ban", id: "evt-other" });
+    const chat = service(http, cipher, file, { now: () => now, missingKeyAttempts: 50 });
+    expect((await chat.pullNew(GROUP, "evt-0", 10)).watermarkId).toBeUndefined();
+    expect(gets).toEqual(["", "page-2"]);
+    const saved = loadRemoteKeyCache(file).missingKeyFetches.get(GROUP);
+    expect(saved?.get("1791414259993")?.outcome).toBe("not_found");
+    expect(saved?.get("1791331947497")?.outcome).toBe("not_found");
+
+    gets.length = 0;
+    now += 1_000;
+    await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual([""]);
+  });
+
+  it("keeps the missing-key fetch cooldown across a restart", async () => {
+    const file = cachePath();
+    let now = 5_000_000;
+    const http = new FakeHttp();
+    const gets: string[] = [];
+    http.getConversationEvents = async (_conversationId, params) => {
+      gets.push(params?.paginationToken ?? "");
+      return undecryptablePage(params?.paginationToken);
+    };
+    const cipher = new VersionCipher();
+    cipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    await service(http, cipher, file, { now: () => now, missingKeyAttempts: 50 }).pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual(["", "page-2"]);
+
+    now += 60_000;
+    const again: string[] = [];
+    const restartedHttp = new FakeHttp();
+    restartedHttp.getConversationEvents = async (_conversationId, params) => {
+      again.push(params?.paginationToken ?? "");
+      return undecryptablePage(params?.paginationToken);
+    };
+    const restartedCipher = new VersionCipher();
+    restartedCipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    const pulled = await service(restartedHttp, restartedCipher, file, {
+      now: () => now,
+      missingKeyAttempts: 50,
+    }).pullNew(GROUP, "evt-0", 10);
+    expect(again).toEqual([""]);
+    expect(pulled.watermarkId).toBeUndefined();
+    expect(pulled.events).toEqual([]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")?.attempts).toBe(1);
+  });
+
+  it("records a failed fetch and does not retry it during cooldown", async () => {
+    const file = cachePath();
+    let now = 8_000;
+    const gets: string[] = [];
+    const http = new FakeHttp();
+    http.getConversationEvents = async (_conversationId, params) => {
+      gets.push(params?.paginationToken ?? "");
+      if (params?.paginationToken) throw new Error("events upstream failed");
+      return undecryptablePage(undefined);
+    };
+    const cipher = new VersionCipher();
+    cipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    const chat = service(http, cipher, file, { now: () => now, missingKeyAttempts: 50 });
+    await expect(chat.pullNew(GROUP, "evt-0", 10)).rejects.toThrow(/events upstream failed/);
+    expect(gets).toEqual(["", "page-2"]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")).toEqual({
+      attempts: 1,
+      retryAt: now + 6 * 60 * 60 * 1000,
+      outcome: "failed",
+    });
+
+    gets.length = 0;
+    now += 5_000;
+    const held = await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual([""]);
+    expect(held.watermarkId).toBeUndefined();
+  });
+
+  it("does not start a version cooldown when the older-page fetch is rate limited", async () => {
+    const file = cachePath();
+    let now = 4_000;
+    const http = new FakeHttp();
+    let gets = 0;
+    http.getConversationEvents = async (_conversationId, params) => {
+      gets += 1;
+      if (params?.paginationToken) {
+        throw Object.assign(new Error("Rate limited"), { status: 429, retryAfterMs: 30_000 });
+      }
+      return undecryptablePage(undefined);
+    };
+    const cipher = new VersionCipher();
+    cipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    const chat = service(http, cipher, file, { now: () => now, missingKeyAttempts: 50 });
+    await expect(chat.pullNew(GROUP, "evt-0", 10)).rejects.toThrow(/Rate limited/);
+    expect(gets).toBe(2);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.size).toBe(0);
+
+    now += 1_000;
+    const held = await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toBe(3);
+    expect(held.watermarkId).toBeUndefined();
+    expect(loadRemoteKeyCache(file).missingKeyFetches.size).toBe(0);
+  });
+
+  it("does not hunt while public_keys is in backoff, and does not count that skip", async () => {
+    const file = cachePath();
+    saveRemoteKeyCache(file, {
+      users: new Map([["alice-1", { fetchedAt: 0, keys: [aliceKey()], signing: [] }]]),
+      conversations: new Map(),
+    });
+    let now = 10_000;
+    const http = new FakeHttp();
+    http.keyError = Object.assign(new Error("Rate limited"), { status: 429, retryAfterMs: 60_000 });
+    const gets: string[] = [];
+    http.getConversationEvents = async (_conversationId, params) => {
+      gets.push(params?.paginationToken ?? "");
+      if (params?.paginationToken) return { data: [], meta: { next_token: "page-3" } };
+      return {
+        data: [
+          {
+            id: "evt-purge",
+            sender_id: "alice-1",
+            created_at: "2026-10-07T23:05:00.000Z",
+            encoded_event: "msg-missing",
+          },
+          { id: "evt-0", sender_id: "alice-1", encoded_event: "old" },
+        ],
+        meta: { next_token: "older" },
+      };
+    };
+    const cipher = new VersionCipher();
+    cipher.messages.set("msg-missing", { version: "1791414259993", text: "!purge", id: "evt-purge" });
+    const chat = service(http, cipher, file, {
+      now: () => now,
+      remoteKeyTtlMs: 0,
+      missingKeyAttempts: 1,
+    });
+    const held = await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual([""]);
+    expect(held.watermarkId).toBeUndefined();
+    expect(loadRemoteKeyCache(file).missingKeyFetches.size).toBe(0);
+
+    gets.length = 0;
+    now += 1_000;
+    const still = await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual([""]);
+    expect(still.watermarkId).toBeUndefined();
+    expect(http.keyGets).toEqual(["alice-1"]);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.size).toBe(0);
+
+    gets.length = 0;
+    now += 60_000;
+    await chat.pullNew(GROUP, "evt-0", 10);
+    expect(gets).toEqual(["", "older"]);
+    expect(http.keyGets[0]).toBe("alice-1");
+    expect(http.keyGets.length).toBeGreaterThanOrEqual(2);
+    expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")?.outcome).toBe(
+      "not_found",
+    );
   });
 });

@@ -16,6 +16,7 @@ import {
   latestKeyVersion,
   mergeConversationKeySets,
   missingConversationKeyVersion,
+  missingKeyFetchCooldownMs,
 } from "./conversation-keys.js";
 import { isChatGroupId, watermarkKey } from "./ids.js";
 import { groupIdsFromInboxPage } from "./listen.js";
@@ -41,6 +42,7 @@ import {
   saveRemoteKeyCache,
   type CachedConversationKey,
   type CachedRemoteUser,
+  type MissingKeyFetchRecord,
 } from "./remote-key-cache.js";
 import { boundSigningEntries } from "./signing-keys.js";
 import {
@@ -117,12 +119,18 @@ export class ChatService {
   private readonly gaveUpKeyVersions = new Set<string>();
   private readonly skippedDecryptLogged = new Set<string>();
   /**
-   * Older-page cursor for a missing KeyChange. One extra GET per poll.
-   * `fetched` is set once an older page has actually been read.
+   * Older-page cursor for a missing KeyChange. At most one extra GET per
+   * conversation per poll, and only for versions whose fetch cooldown has
+   * expired. `fetched` is set once an older page has actually been read.
    */
   private readonly keyHunt = new Map<string, { nextToken?: string; exhausted: boolean; fetched: boolean }>();
   /** Key-change blobs from older pages that have not unwrapped yet. */
   private readonly pendingKeyBlobs = new Map<string, string[]>();
+  /**
+   * Persisted outcome of a missing-key events fetch, keyed by conversation
+   * then key version. While `retryAt` is in the future that pair is not fetched.
+   */
+  private readonly missingKeyFetches = new Map<string, Map<string, MissingKeyFetchRecord>>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
   private readonly remoteKeyCachePath?: string;
@@ -179,8 +187,10 @@ export class ChatService {
    * Ciphertext at or before the watermark is not decrypted again. Ciphertext
    * newer than the watermark that fails to decrypt is retried next poll — the
    * cursor does not move past it. A failure that names a conversation-key
-   * version this process does not hold triggers one older-page fetch per poll.
-   * After that version is given up, the cursor moves past the ciphertext.
+   * version this process does not hold triggers at most one older-page fetch
+   * for this conversation on this poll. Each version is fetched once, then
+   * waits out the cooldown stored beside the remote keys. After that version
+   * is given up, the cursor moves past the ciphertext.
    * Returns moderation events strictly newer than `watermarkId`, oldest first.
    */
   async pullNew(
@@ -208,8 +218,27 @@ export class ChatService {
       );
     let open = openMissing();
     if (open.length > 0) {
+      const sought = open.filter((version) => !this.missingKeyFetchCoolingDown(conversationId, version));
       const versionsBefore = this.conversationKeys.get(conversationId)?.size ?? 0;
-      const forced = await this.huntMissingConversationKeys(conversationId, pages, maxResults);
+      let forced: string[] = [];
+      let didFetch = false;
+      if (sought.length > 0 && !this.publicKeyBackoffActive()) {
+        try {
+          const hunted = await this.huntMissingConversationKeys(conversationId, pages, maxResults);
+          forced = hunted.blobs;
+          didFetch = hunted.didFetch;
+        } catch (error) {
+          if (rateLimitWaitMs(error) !== undefined) {
+            const wait = rateLimitWaitMs(error) ?? 15_000;
+            this.publicKeyBlockedUntil = Math.max(this.publicKeyBlockedUntil, this.now() + wait);
+            throw error;
+          }
+          this.noteMissingKeyFetches(conversationId, sought, "failed");
+          throw error;
+        }
+      } else {
+        forced = this.pendingKeyBlobs.get(conversationId) ?? [];
+      }
       const learned = (this.conversationKeys.get(conversationId)?.size ?? 0) > versionsBefore;
       if (learned || forced.length > 0) {
         batch = await this.decryptPageBatch(conversationId, pages, {
@@ -218,8 +247,13 @@ export class ChatService {
           forceKeyEvents: forced,
         });
       }
+      if (didFetch) this.noteMissingKeyFetches(conversationId, sought, "not_found");
       open = openMissing();
-      for (const version of open) this.noteMissingKeyAttempt(conversationId, version);
+      const blocked = this.publicKeyBackoffActive();
+      for (const version of open) {
+        if (blocked && !this.missingKeyFetchCoolingDown(conversationId, version)) continue;
+        this.noteMissingKeyAttempt(conversationId, version);
+      }
     }
     if (openMissing().length === 0) {
       this.keyHunt.delete(conversationId);
@@ -739,11 +773,12 @@ export class ChatService {
     conversationId: string,
     pages: RawChatEventsPage[],
     maxResults: number,
-  ): Promise<string[]> {
+  ): Promise<{ blobs: string[]; didFetch: boolean }> {
     const state = this.keyHunt.get(conversationId) ?? { exhausted: false, fetched: false };
     const pending = this.pendingKeyBlobs.get(conversationId) ?? [];
     let fetched: RawChatEventsPage | undefined;
-    if (!state.exhausted) {
+    let didFetch = false;
+    if (!state.exhausted && !this.publicKeyBackoffActive()) {
       const token = state.nextToken ?? pages.at(-1)?.meta?.next_token;
       if (token) {
         fetched = normalizeChatPage(
@@ -752,6 +787,7 @@ export class ChatService {
             paginationToken: token,
           }),
         );
+        didFetch = true;
         const next = fetched.meta?.next_token;
         this.keyHunt.set(conversationId, {
           nextToken: next,
@@ -766,7 +802,7 @@ export class ChatService {
       .map((raw) => raw.encoded_event)
       .filter((blob): blob is string => Boolean(blob));
     const blobs = uniqueStrings([...pending, ...metaKeys, ...timeline]);
-    if (blobs.length === 0) return pending;
+    if (blobs.length === 0) return { blobs: pending, didFetch };
 
     const absorbed = await this.decryptPageBatch(
       conversationId,
@@ -783,7 +819,55 @@ export class ChatService {
     const stillPending = [...retain].filter((blob) => !this.seenKeyEvents.has(blob)).slice(-MAX_PENDING_KEY_BLOBS);
     if (stillPending.length > 0) this.pendingKeyBlobs.set(conversationId, stillPending);
     else this.pendingKeyBlobs.delete(conversationId);
-    return blobs;
+    return { blobs, didFetch };
+  }
+
+  private publicKeyBackoffActive(): boolean {
+    return this.publicKeyBlockedUntil > this.now();
+  }
+
+  private missingKeyFetchCoolingDown(conversationId: string, version: string): boolean {
+    const record = this.missingKeyFetches.get(conversationId)?.get(version);
+    if (!record) return false;
+    return this.now() < record.retryAt;
+  }
+
+  /**
+   * One recorded fetch for each version still missing after the events page
+   * came back. Versions unwrapped by that page are cleared instead.
+   */
+  private noteMissingKeyFetches(
+    conversationId: string,
+    versions: readonly string[],
+    outcome: MissingKeyFetchRecord["outcome"],
+  ): void {
+    let changed = false;
+    for (const version of versions) {
+      if (this.hasConversationKey(conversationId, version)) {
+        if (this.clearMissingKeyFetch(conversationId, version)) changed = true;
+        continue;
+      }
+      let byVersion = this.missingKeyFetches.get(conversationId);
+      if (!byVersion) {
+        byVersion = new Map();
+        this.missingKeyFetches.set(conversationId, byVersion);
+      }
+      const attempts = (byVersion.get(version)?.attempts ?? 0) + 1;
+      byVersion.set(version, {
+        attempts,
+        retryAt: this.now() + missingKeyFetchCooldownMs(attempts),
+        outcome,
+      });
+      changed = true;
+    }
+    if (changed) this.persistRemoteKeyCache();
+  }
+
+  private clearMissingKeyFetch(conversationId: string, version: string): boolean {
+    const byVersion = this.missingKeyFetches.get(conversationId);
+    if (!byVersion?.delete(version)) return false;
+    if (byVersion.size === 0) this.missingKeyFetches.delete(conversationId);
+    return true;
   }
 
   private noteMissingKeyAttempt(conversationId: string, version: string): void {
@@ -1009,12 +1093,24 @@ export class ChatService {
       }
       if (ring.size > 0) this.conversationKeys.set(conversationId, ring);
     }
+    let fetchRecords = 0;
+    for (const [conversationId, byVersion] of loaded.missingKeyFetches) {
+      const ring = this.conversationKeys.get(conversationId);
+      const kept = new Map<string, MissingKeyFetchRecord>();
+      for (const [version, record] of byVersion) {
+        if (ring?.has(version)) continue;
+        kept.set(version, record);
+        fetchRecords += 1;
+      }
+      if (kept.size > 0) this.missingKeyFetches.set(conversationId, kept);
+    }
     if (this.signingByUser.size > 0) this.cipher.setSigningKeys(this.currentSigningKeys());
-    if (!loaded.invalid && (loaded.users.size > 0 || loaded.conversations.size > 0)) {
+    if (!loaded.invalid && (loaded.users.size > 0 || loaded.conversations.size > 0 || fetchRecords > 0)) {
       let versions = 0;
       for (const saved of loaded.conversations.values()) versions += Math.max(saved.keys.length, 1);
+      const cooldowns = fetchRecords > 0 ? `, ${fetchRecords} missing-key fetch cooldown(s)` : "";
       log.info(
-        `Loaded Chat remote key cache from ${this.remoteKeyCachePath} (${loaded.users.size} user(s), ${loaded.conversations.size} conversation(s), ${versions} conversation key version(s)).`,
+        `Loaded Chat remote key cache from ${this.remoteKeyCachePath} (${loaded.users.size} user(s), ${loaded.conversations.size} conversation(s), ${versions} conversation key version(s)${cooldowns}).`,
       );
     }
   }
@@ -1039,7 +1135,11 @@ export class ChatService {
       conversations.set(conversationId, { version: latest.version, key: latest.key, keys });
     }
     try {
-      saveRemoteKeyCache(this.remoteKeyCachePath, { users, conversations });
+      saveRemoteKeyCache(this.remoteKeyCachePath, {
+        users,
+        conversations,
+        missingKeyFetches: this.missingKeyFetches,
+      });
     } catch (error) {
       log.warn(`Could not write Chat remote key cache ${this.remoteKeyCachePath}`, error);
     }
@@ -1072,6 +1172,7 @@ export class ChatService {
       const attemptId = missingKeyAttemptId(conversationId, version);
       this.missingKeyAttempts.delete(attemptId);
       this.gaveUpKeyVersions.delete(attemptId);
+      this.clearMissingKeyFetch(conversationId, version);
     }
     if (changed) this.persistRemoteKeyCache();
   }
