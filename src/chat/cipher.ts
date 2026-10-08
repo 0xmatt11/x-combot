@@ -171,7 +171,16 @@ export interface ChatCipher {
   /** Set when the cipher was opened from a key file or a Juicebox unlock. */
   identity?: LoadedChatIdentity;
   setSigningKeys(keys: SigningKeyEntry[]): void;
-  decryptEvents(eventsB64: string[], signingKeys?: SigningKeyEntry[]): DecryptEventsResult;
+  /**
+   * `conversationKeys` are versions this process already unwrapped. Encrypt
+   * still uses the newest. Decrypt uses whichever version the message names,
+   * including versions older than the cipher's single in-memory cache slot.
+   */
+  decryptEvents(
+    eventsB64: string[],
+    signingKeys?: SigningKeyEntry[],
+    conversationKeys?: ConversationKeySet,
+  ): DecryptEventsResult;
   /**
    * True when `identityPublicKeySignature` is a valid binding of `signingPublicKey`
    * over the exact bytes of `identityPublicKey`.

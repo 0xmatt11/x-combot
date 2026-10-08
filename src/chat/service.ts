@@ -11,6 +11,12 @@ import type {
   SendMessageResult,
 } from "../types.js";
 import { logDecryptErrors } from "./decrypt-log.js";
+import {
+  MISSING_KEY_VERSION_ATTEMPTS,
+  latestKeyVersion,
+  mergeConversationKeySets,
+  missingConversationKeyVersion,
+} from "./conversation-keys.js";
 import { isChatGroupId, watermarkKey } from "./ids.js";
 import { groupIdsFromInboxPage } from "./listen.js";
 import {
@@ -46,6 +52,8 @@ import {
 } from "./wire.js";
 
 const MAX_CATCHUP_PAGES = 4;
+/** Key-change blobs kept for a later decrypt. This is not an HTTP retry loop. */
+const MAX_PENDING_KEY_BLOBS = 80;
 
 export interface ChatServiceOptions {
   /**
@@ -57,6 +65,18 @@ export interface ChatServiceOptions {
   remoteKeyTtlMs?: number;
   emptyRemoteKeyTtlMs?: number;
   decryptRefreshMinMs?: number;
+  /**
+   * Polls that may hold the cursor for one missing conversation-key version.
+   * Default is {@link MISSING_KEY_VERSION_ATTEMPTS}.
+   */
+  missingKeyAttempts?: number;
+}
+
+interface DecryptBatch {
+  events: DmEvent[];
+  errors: Record<string, string>;
+  errorsByBlob: Map<string, string>;
+  raws: RawChatEvent[];
 }
 
 export interface ChatPull {
@@ -87,8 +107,22 @@ export class ChatService {
   private readonly tokens = new Map<string, string>();
   /** Key-change blobs whose decrypt did not report an error. Failures are retried. */
   private readonly seenKeyEvents = new Set<string>();
-  /** Latest conversation key per chat, from decryptEvents — required for encryptStream. */
-  private readonly conversationKeys = new Map<string, { version: string; key: Uint8Array }>();
+  /**
+   * Every conversation-key version this process has unwrapped.
+   * Outbound encrypt uses the newest. Decrypt uses the version the message names.
+   */
+  private readonly conversationKeys = new Map<string, Map<string, Uint8Array>>();
+  /** Polls spent trying to fetch one conversation-id + key-version pair. */
+  private readonly missingKeyAttempts = new Map<string, number>();
+  private readonly gaveUpKeyVersions = new Set<string>();
+  private readonly skippedDecryptLogged = new Set<string>();
+  /**
+   * Older-page cursor for a missing KeyChange. One extra GET per poll.
+   * `fetched` is set once an older page has actually been read.
+   */
+  private readonly keyHunt = new Map<string, { nextToken?: string; exhausted: boolean; fetched: boolean }>();
+  /** Key-change blobs from older pages that have not unwrapped yet. */
+  private readonly pendingKeyBlobs = new Map<string, string[]>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
   private readonly remoteKeyCachePath?: string;
@@ -96,6 +130,7 @@ export class ChatService {
   private readonly remoteKeyTtlMs: number;
   private readonly emptyRemoteKeyTtlMs: number;
   private readonly decryptRefreshMinMs: number;
+  private readonly missingKeyAttemptLimit: number;
 
   /**
    * In-memory public_keys / decrypt cache. Does not fetch and does not read disk.
@@ -110,10 +145,12 @@ export class ChatService {
   } {
     let signingKeys = 0;
     for (const entries of this.signingByUser.values()) signingKeys += entries.length;
+    let conversationKeys = 0;
+    for (const ring of this.conversationKeys.values()) conversationKeys += ring.size;
     return {
       cachedUsers: this.remoteByUser.size,
       signingKeys,
-      conversationKeys: this.conversationKeys.size,
+      conversationKeys,
       backoffMs: Math.max(0, this.publicKeyBlockedUntil - nowMs),
     };
   }
@@ -129,6 +166,11 @@ export class ChatService {
     this.remoteKeyTtlMs = options?.remoteKeyTtlMs ?? REMOTE_PUBLIC_KEY_TTL_MS;
     this.emptyRemoteKeyTtlMs = options?.emptyRemoteKeyTtlMs ?? EMPTY_REMOTE_PUBLIC_KEY_TTL_MS;
     this.decryptRefreshMinMs = options?.decryptRefreshMinMs ?? DECRYPT_KEY_REFRESH_MIN_MS;
+    const attempts = options?.missingKeyAttempts;
+    this.missingKeyAttemptLimit =
+      typeof attempts === "number" && Number.isFinite(attempts) && attempts >= 1
+        ? Math.floor(attempts)
+        : MISSING_KEY_VERSION_ATTEMPTS;
     if (this.remoteKeyCachePath) this.hydrateRemoteKeyCache();
   }
 
@@ -136,8 +178,9 @@ export class ChatService {
    * Fetch the newest page (and older pages until the watermark is found).
    * Ciphertext at or before the watermark is not decrypted again. Ciphertext
    * newer than the watermark that fails to decrypt is retried next poll — the
-   * cursor does not move past it. Key-change events are still applied so a
-   * later successful verify can fill the conversation-key cache.
+   * cursor does not move past it. A failure that names a conversation-key
+   * version this process does not hold triggers one older-page fetch per poll.
+   * After that version is given up, the cursor moves past the ciphertext.
    * Returns moderation events strictly newer than `watermarkId`, oldest first.
    */
   async pullNew(
@@ -152,15 +195,50 @@ export class ChatService {
     for (const raw of newer) {
       if (raw.encoded_event) onlyEncoded.add(raw.encoded_event);
     }
-    const decrypted = await this.decryptPages(conversationId, pages, { onlyEncoded });
     // First sight of a conversation seeds the watermark in the poller and does not replay.
     if (watermarkId === undefined) {
+      await this.decryptPages(conversationId, pages, { onlyEncoded });
       return { newestId, events: [], watermarkId: newestId ?? "empty" };
     }
 
+    let batch = await this.decryptPageBatch(conversationId, pages, { onlyEncoded, logErrors: false });
+    const openMissing = () =>
+      missingVersionsOn(newer, batch.errorsByBlob).filter(
+        (version) => !this.gaveUpKeyVersions.has(missingKeyAttemptId(conversationId, version)),
+      );
+    let open = openMissing();
+    if (open.length > 0) {
+      const versionsBefore = this.conversationKeys.get(conversationId)?.size ?? 0;
+      const forced = await this.huntMissingConversationKeys(conversationId, pages, maxResults);
+      const learned = (this.conversationKeys.get(conversationId)?.size ?? 0) > versionsBefore;
+      if (learned || forced.length > 0) {
+        batch = await this.decryptPageBatch(conversationId, pages, {
+          onlyEncoded,
+          logErrors: false,
+          forceKeyEvents: forced,
+        });
+      }
+      open = openMissing();
+      for (const version of open) this.noteMissingKeyAttempt(conversationId, version);
+    }
+    if (openMissing().length === 0) {
+      this.keyHunt.delete(conversationId);
+      this.pendingKeyBlobs.delete(conversationId);
+    }
+    this.reportDecryptErrors(conversationId, batch);
+
     const newIds = new Set(newer.map((raw) => raw.id).filter((id): id is string => Boolean(id)));
-    const fresh = decrypted.filter((event) => newIds.has(event.id));
+    const fresh = batch.events.filter((event) => newIds.has(event.id));
     const decryptedIds = new Set(fresh.map((event) => event.id));
+    for (const raw of newer) {
+      if (!raw.id || !raw.encoded_event || decryptedIds.has(raw.id)) continue;
+      const message = batch.errorsByBlob.get(raw.encoded_event);
+      const version = message ? missingConversationKeyVersion(message) : undefined;
+      if (!version) continue;
+      if (!this.gaveUpKeyVersions.has(missingKeyAttemptId(conversationId, version))) continue;
+      this.warnSkippedCiphertext(conversationId, raw, version);
+      decryptedIds.add(raw.id);
+    }
     return {
       newestId,
       events: fresh.reverse(),
@@ -329,7 +407,9 @@ export class ChatService {
     const entities = mention
       ? ([[mention.start, mention.end, "mention"]] as EncryptReplyOptions["entities"])
       : undefined;
+    const saved = this.savedOutboundKey(conversationId, extra);
     const options: EncryptReplyOptions = {
+      ...saved,
       ...extra,
       ...(entities ? { entities } : {}),
     };
@@ -343,7 +423,7 @@ export class ChatService {
         ...(reply.previewText ? { replyToText: reply.previewText } : {}),
       });
     }
-    const hasOptions = Boolean(extra || entities);
+    const hasOptions = Boolean(extra || entities || saved.conversationKey);
     return this.cipher.encryptMessage(conversationId, text, hasOptions ? options : undefined);
   }
 
@@ -361,7 +441,7 @@ export class ChatService {
     >,
     caption?: MediaCaption,
   ): Promise<SendMessageResult> {
-    const latest = this.conversationKeys.get(conversationId);
+    const latest = this.latestConversationKey(conversationId);
     if (!latest) {
       throw new Error(
         `No conversation key cached for ${conversationId}. The bot must decrypt a KeyChange before sending Chat media.`,
@@ -546,6 +626,19 @@ export class ChatService {
     pages: RawChatEventsPage[],
     options?: { onlyEncoded?: ReadonlySet<string> },
   ): Promise<DmEvent[]> {
+    return (await this.decryptPageBatch(conversationId, pages, options)).events;
+  }
+
+  private async decryptPageBatch(
+    conversationId: string,
+    pages: RawChatEventsPage[],
+    options?: {
+      onlyEncoded?: ReadonlySet<string>;
+      logErrors?: boolean;
+      /** Key-change blobs to include even when they were already seen. */
+      forceKeyEvents?: readonly string[];
+    },
+  ): Promise<DecryptBatch> {
     const membersReady = await this.ensureMemberKeys(conversationId);
     const normalized = pages.map((page) => normalizeChatPage(page));
     const includeEncoded = (raw: RawChatEvent): boolean => {
@@ -571,35 +664,44 @@ export class ChatService {
 
     const encoded: string[] = [];
     const freshKeys: string[] = [];
+    const pushKey = (keyEvent: string) => {
+      if (!keyEvent || encoded.includes(keyEvent)) return;
+      freshKeys.push(keyEvent);
+      encoded.push(keyEvent);
+    };
     for (const page of normalized) {
       for (const keyEvent of page.meta?.conversation_key_events ?? []) {
         if (!keyEvent || this.seenKeyEvents.has(keyEvent)) continue;
-        freshKeys.push(keyEvent);
-        encoded.push(keyEvent);
+        pushKey(keyEvent);
       }
     }
+    for (const keyEvent of options?.forceKeyEvents ?? []) pushKey(keyEvent);
     const raws: RawChatEvent[] = [];
     for (const page of normalized) {
       for (const raw of page.data ?? []) {
         if (!includeEncoded(raw)) continue;
         raws.push(raw);
-        if (raw.encoded_event) encoded.push(raw.encoded_event);
+        if (raw.encoded_event && !encoded.includes(raw.encoded_event)) encoded.push(raw.encoded_event);
       }
     }
 
-    if (encoded.length === 0) return [];
+    const empty: DecryptBatch = { events: [], errors: {}, errorsByBlob: new Map(), raws };
+    if (encoded.length === 0) return empty;
     const signingKeys = this.currentSigningKeys();
-    const result = this.cipher.decryptEvents(encoded, signingKeys.length > 0 ? signingKeys : undefined);
+    const prior = this.conversationKeySet(conversationId);
+    const result = this.cipher.decryptEvents(
+      encoded,
+      signingKeys.length > 0 ? signingKeys : undefined,
+      prior,
+    );
     this.rememberConversationKeys(conversationId, result.conversationKeys);
     if (decryptErrorsNeedKeyRefresh(result.errors)) {
       this.noteDecryptKeyFailure(conversationId, senderIds);
     }
-    const messageFailed = raws.some(
-      (raw) => Boolean(raw.encoded_event && result.errors[raw.encoded_event]),
-    );
-    const firstSight =
-      messageFailed && this.store.getWatermark(watermarkKey(conversationId)) === undefined;
-    logDecryptErrors(conversationId, result.errors, Date.now(), { firstSight });
+    const errorsByBlob = errorsByEncodedBlob(encoded, result.errors);
+    if (options?.logErrors !== false) {
+      this.reportDecryptErrors(conversationId, { errors: result.errors, errorsByBlob, events: [], raws });
+    }
     if (membersReady) {
       const failed = failedDecryptBlobs(encoded, result.errors);
       for (const keyEvent of freshKeys) {
@@ -623,7 +725,131 @@ export class ChatService {
       }
       events.push(dm);
     }
-    return events;
+    return { events, errors: result.errors, errorsByBlob, raws };
+  }
+
+  /**
+   * One extra events page when a ciphertext names a key version we have not
+   * unwrapped. KeyChange blobs from that page are decrypted, then the caller
+   * retries the messages. A 429/402 propagates so the poller applies its backoff.
+   * Returns the blobs that were fed to decrypt, including ones still pending
+   * from an earlier page.
+   */
+  private async huntMissingConversationKeys(
+    conversationId: string,
+    pages: RawChatEventsPage[],
+    maxResults: number,
+  ): Promise<string[]> {
+    const state = this.keyHunt.get(conversationId) ?? { exhausted: false, fetched: false };
+    const pending = this.pendingKeyBlobs.get(conversationId) ?? [];
+    let fetched: RawChatEventsPage | undefined;
+    if (!state.exhausted) {
+      const token = state.nextToken ?? pages.at(-1)?.meta?.next_token;
+      if (token) {
+        fetched = normalizeChatPage(
+          await this.http.getConversationEvents(conversationId, {
+            maxResults,
+            paginationToken: token,
+          }),
+        );
+        const next = fetched.meta?.next_token;
+        this.keyHunt.set(conversationId, {
+          nextToken: next,
+          exhausted: !next,
+          fetched: true,
+        });
+      }
+    }
+
+    const metaKeys = (fetched?.meta?.conversation_key_events ?? []).filter((blob): blob is string => Boolean(blob));
+    const timeline = (fetched?.data ?? [])
+      .map((raw) => raw.encoded_event)
+      .filter((blob): blob is string => Boolean(blob));
+    const blobs = uniqueStrings([...pending, ...metaKeys, ...timeline]);
+    if (blobs.length === 0) return pending;
+
+    const absorbed = await this.decryptPageBatch(
+      conversationId,
+      [{ data: [], meta: { conversation_key_events: blobs } }],
+      { logErrors: false },
+    );
+    const retain = new Set<string>([...pending, ...metaKeys]);
+    for (const blob of timeline) {
+      const error = absorbed.errorsByBlob.get(blob);
+      if (!error) continue;
+      if (missingConversationKeyVersion(error)) continue;
+      retain.add(blob);
+    }
+    const stillPending = [...retain].filter((blob) => !this.seenKeyEvents.has(blob)).slice(-MAX_PENDING_KEY_BLOBS);
+    if (stillPending.length > 0) this.pendingKeyBlobs.set(conversationId, stillPending);
+    else this.pendingKeyBlobs.delete(conversationId);
+    return blobs;
+  }
+
+  private noteMissingKeyAttempt(conversationId: string, version: string): void {
+    const id = missingKeyAttemptId(conversationId, version);
+    if (this.gaveUpKeyVersions.has(id) || this.hasConversationKey(conversationId, version)) return;
+    const next = (this.missingKeyAttempts.get(id) ?? 0) + 1;
+    this.missingKeyAttempts.set(id, next);
+    const hunt = this.keyHunt.get(conversationId);
+    const pending = this.pendingKeyBlobs.get(conversationId) ?? [];
+    const confirmedUnavailable = Boolean(hunt?.exhausted && hunt.fetched && pending.length === 0);
+    if (next >= this.missingKeyAttemptLimit || confirmedUnavailable) {
+      this.gaveUpKeyVersions.add(id);
+    }
+  }
+
+  private warnSkippedCiphertext(conversationId: string, raw: RawChatEvent, version: string): void {
+    const eventId = raw.id ?? "unknown";
+    const mark = `${conversationId}\0${eventId}\0${version}`;
+    if (this.skippedDecryptLogged.has(mark)) return;
+    this.skippedDecryptLogged.add(mark);
+    const senderId = raw.sender_id?.trim() || "unknown";
+    const createdAt = raw.created_at?.trim() || "unknown";
+    log.warn(
+      `Skipped undecryptable Chat event ${eventId} in ${conversationId} from sender ${senderId} created at ${createdAt} (key version ${version}).`,
+    );
+  }
+
+  private reportDecryptErrors(conversationId: string, batch: DecryptBatch): void {
+    const messageFailed = batch.raws.some(
+      (raw) => Boolean(raw.encoded_event && batch.errorsByBlob.has(raw.encoded_event)),
+    );
+    const firstSight =
+      messageFailed && this.store.getWatermark(watermarkKey(conversationId)) === undefined;
+    logDecryptErrors(conversationId, batch.errors, Date.now(), { firstSight });
+  }
+
+  private savedOutboundKey(
+    conversationId: string,
+    extra?: EncryptMessageOptions,
+  ): Pick<EncryptMessageOptions, "conversationKey" | "conversationKeyVersion"> {
+    if (extra?.conversationKey) return {};
+    const latest = this.latestConversationKey(conversationId);
+    if (!latest) return {};
+    return { conversationKey: latest.key, conversationKeyVersion: latest.version };
+  }
+
+  private latestConversationKey(conversationId: string): { version: string; key: Uint8Array } | undefined {
+    const ring = this.conversationKeys.get(conversationId);
+    if (!ring || ring.size === 0) return undefined;
+    const version = latestKeyVersion(ring.keys());
+    if (!version) return undefined;
+    const key = ring.get(version);
+    if (!key || key.byteLength === 0) return undefined;
+    return { version, key };
+  }
+
+  private conversationKeySet(conversationId: string): ConversationKeySet | undefined {
+    const ring = this.conversationKeys.get(conversationId);
+    if (!ring || ring.size === 0) return undefined;
+    const keys: Record<string, Uint8Array> = {};
+    for (const [version, key] of ring) keys[version] = key;
+    return mergeConversationKeySets({ keys, latestVersion: null });
+  }
+
+  private hasConversationKey(conversationId: string, version: string): boolean {
+    return this.conversationKeys.get(conversationId)?.has(version) === true;
   }
 
   private async ensureMemberKeys(conversationId: string): Promise<boolean> {
@@ -775,12 +1001,20 @@ export class ChatService {
       this.signingByUser.set(userId, entries);
     }
     for (const [conversationId, saved] of loaded.conversations) {
-      this.conversationKeys.set(conversationId, { version: saved.version, key: saved.key });
+      const ring = new Map<string, Uint8Array>();
+      const versions = saved.keys.length > 0 ? saved.keys : [{ version: saved.version, key: saved.key }];
+      for (const item of versions) {
+        if (!item.version || item.key.byteLength === 0) continue;
+        ring.set(item.version, item.key);
+      }
+      if (ring.size > 0) this.conversationKeys.set(conversationId, ring);
     }
     if (this.signingByUser.size > 0) this.cipher.setSigningKeys(this.currentSigningKeys());
     if (!loaded.invalid && (loaded.users.size > 0 || loaded.conversations.size > 0)) {
+      let versions = 0;
+      for (const saved of loaded.conversations.values()) versions += Math.max(saved.keys.length, 1);
       log.info(
-        `Loaded Chat remote key cache from ${this.remoteKeyCachePath} (${loaded.users.size} user(s), ${loaded.conversations.size} conversation key(s)).`,
+        `Loaded Chat remote key cache from ${this.remoteKeyCachePath} (${loaded.users.size} user(s), ${loaded.conversations.size} conversation(s), ${versions} conversation key version(s)).`,
       );
     }
   }
@@ -798,8 +1032,11 @@ export class ChatService {
       });
     }
     const conversations = new Map<string, CachedConversationKey>();
-    for (const [conversationId, saved] of this.conversationKeys) {
-      conversations.set(conversationId, { version: saved.version, key: saved.key });
+    for (const [conversationId, ring] of this.conversationKeys) {
+      const latest = this.latestConversationKey(conversationId);
+      if (!latest) continue;
+      const keys = [...ring.entries()].map(([version, key]) => ({ version, key }));
+      conversations.set(conversationId, { version: latest.version, key: latest.key, keys });
     }
     try {
       saveRemoteKeyCache(this.remoteKeyCachePath, { users, conversations });
@@ -819,16 +1056,24 @@ export class ChatService {
     conversationKeys: ConversationKeySet | undefined,
   ): void {
     if (!conversationKeys?.keys) return;
-    const version = pickConversationKeyVersion(conversationKeys.keys, conversationKeys.latestVersion);
-    if (!version) return;
-    const key = conversationKeys.keys[version];
-    if (!key || key.byteLength === 0) return;
-    const existing = this.conversationKeys.get(conversationId);
-    if (existing && compareKeyVersions(version, existing.version) < 0) return;
-    const next = Uint8Array.from(key);
-    if (existing && existing.version === version && sameBytes(existing.key, next)) return;
-    this.conversationKeys.set(conversationId, { version, key: next });
-    this.persistRemoteKeyCache();
+    let ring = this.conversationKeys.get(conversationId);
+    let changed = false;
+    for (const [version, key] of Object.entries(conversationKeys.keys)) {
+      if (!version || !(key instanceof Uint8Array) || key.byteLength === 0) continue;
+      if (!ring) {
+        ring = new Map();
+        this.conversationKeys.set(conversationId, ring);
+      }
+      const next = Uint8Array.from(key);
+      const existing = ring.get(version);
+      if (existing) continue;
+      ring.set(version, next);
+      changed = true;
+      const attemptId = missingKeyAttemptId(conversationId, version);
+      this.missingKeyAttempts.delete(attemptId);
+      this.gaveUpKeyVersions.delete(attemptId);
+    }
+    if (changed) this.persistRemoteKeyCache();
   }
 }
 
@@ -879,23 +1124,6 @@ function extensionForMime(mime: string): string {
   return "jpg";
 }
 
-function pickConversationKeyVersion(
-  keys: Record<string, Uint8Array>,
-  latestVersion: string | null,
-): string | undefined {
-  if (latestVersion && keys[latestVersion]) return latestVersion;
-  const versions = Object.keys(keys);
-  if (versions.length === 0) return undefined;
-  return versions.sort((a, b) => compareKeyVersions(a, b)).at(-1);
-}
-
-function compareKeyVersions(a: string, b: string): number {
-  const na = Number(a);
-  const nb = Number(b);
-  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
-  return a.localeCompare(b);
-}
-
 function selectLoadedKey(
   keys: RemotePublicKey[],
   identity: { version: string; publicKey: string },
@@ -920,12 +1148,41 @@ function decryptErrorsNeedKeyRefresh(errors: Record<string, string>): boolean {
   return false;
 }
 
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let i = 0; i < a.byteLength; i += 1) {
-    if (a[i] !== b[i]) return false;
+function missingKeyAttemptId(conversationId: string, version: string): string {
+  return `${conversationId}\0${version}`;
+}
+
+function missingVersionsOn(raws: RawChatEvent[], errorsByBlob: Map<string, string>): string[] {
+  const versions: string[] = [];
+  for (const raw of raws) {
+    if (!raw.encoded_event) continue;
+    const message = errorsByBlob.get(raw.encoded_event);
+    if (!message) continue;
+    const version = missingConversationKeyVersion(message);
+    if (version && !versions.includes(version)) versions.push(version);
   }
-  return true;
+  return versions;
+}
+
+function errorsByEncodedBlob(encoded: string[], errors: Record<string, string>): Map<string, string> {
+  const byBlob = new Map<string, string>();
+  for (const [key, message] of Object.entries(errors)) {
+    const index = Number(key);
+    if (Number.isInteger(index) && encoded[index]) byBlob.set(encoded[index]!, message);
+    else if (encoded.includes(key)) byBlob.set(key, message);
+  }
+  return byBlob;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    unique.push(value);
+  }
+  return unique;
 }
 
 function failedDecryptBlobs(encoded: string[], errors: Record<string, string>): Set<string> {

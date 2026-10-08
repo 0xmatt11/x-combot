@@ -413,4 +413,51 @@ describe("chat-xdk WASM boundary", () => {
     ).toBe(true);
     expect(cipher.loadedIdentity()?.version).toBe(generated.file.version);
   });
+
+  it("decrypts with an older conversation key the single-version cache does not hold", () => {
+    const older = new Uint8Array(32).fill(1);
+    const newer = new Uint8Array(32).fill(2);
+    const decryptEventKeys: Record<string, Uint8Array>[] = [];
+    const inner = {
+      getPublicKeys: () => ({ identity: "", signing: "" }),
+      decryptEvents(events: string[]) {
+        const errors: Record<string, string> = {};
+        for (let index = 0; index < events.length; index += 1) {
+          if (events[index]?.startsWith("msg")) {
+            errors[String(index)] =
+              "Message encrypted with key version '100' but no matching key found. Available versions: [200].";
+          }
+        }
+        return {
+          messages: [],
+          errors,
+          conversationKeys: { keys: { "200": newer }, latestVersion: "200" },
+        };
+      },
+      decryptEvent(blob: string, keys: Record<string, Uint8Array>) {
+        decryptEventKeys.push(keys);
+        if (blob.startsWith("msg") && keys["100"]) {
+          return { type: "message", content: { text: "!purge" } };
+        }
+        throw new Error("no matching key");
+      },
+    } as unknown as XdkLike;
+    const cipher = wrapCipher(inner);
+    const result = cipher.decryptEvents(["kc-200", "msg-old"], undefined, {
+      keys: { "100": older },
+      latestVersion: "100",
+    });
+    expect(result.errors).toEqual({});
+    expect(result.messages.map((message) => message.event.content?.text)).toEqual(["!purge"]);
+    expect(result.messages[0]?.originalB64).toBe("msg-old");
+    expect(result.conversationKeys?.latestVersion).toBe("200");
+    expect(result.conversationKeys?.keys["100"]).toBe(older);
+    expect(result.conversationKeys?.keys["200"]).toBe(newer);
+    expect(decryptEventKeys[0]?.["100"]).toBe(older);
+
+    const remembered = cipher.decryptEvents(["msg-old"]);
+    expect(remembered.errors).toEqual({});
+    expect(remembered.messages[0]?.event.content?.text).toBe("!purge");
+    expect(decryptEventKeys[1]?.["100"]).toBe(older);
+  });
 });

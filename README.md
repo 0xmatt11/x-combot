@@ -133,7 +133,7 @@ A restart reads the cache before any public_keys request. Cached users are not f
 
 `CHAT_REMOTE_KEYS_PATH` moves the file. The default is `data/chat-remote-keys.json`, beside `CHAT_KEYS_PATH`. Delete it to force a refetch. It is gitignored. Do not commit it.
 
-Conversation keys recovered while decrypting are stored in the same file so a restart can send Chat media before the next KeyChange. Those bytes decrypt the group, so they stay in this mode `0600` file and are not logged. A newer decrypted version replaces the saved one. `chat:rotate` still requests member keys when the API is not in backoff, and uses a non-empty cached list if that request is rate limited.
+Conversation keys recovered while decrypting are stored in the same file so a restart can send Chat text and media before the next KeyChange. Those bytes decrypt the group, so they stay in this mode `0600` file and are not logged. Every version this process can unwrap is kept. Outbound messages use the newest. A file written by an older build (one version per conversation) still loads. `chat:rotate` still requests member keys when the API is not in backoff, and uses a non-empty cached list if that request is rate limited.
 
 ### Which groups
 
@@ -193,7 +193,7 @@ Two paths feed the same command layer. They are not exclusive.
 
 **Activity push** — `chat.received` over a stream or a webhook, so back-to-back commands do not wait on the poll. Same scopes as OAuth. No extra scope.
 
-Each Chat conversation stores `chat_events:<id>` in SQLite `watermarks`. The first poll records the newest event id and does not run commands already in the thread. After that, the cursor moves only through events that decrypted. A newer ciphertext that fails to decrypt stays in place and is retried, which is how a KeyChange the process could not verify yet gets another chance once signing keys load. Decrypt failures are logged at most once a minute per conversation. History wrapped to a different device holds the cursor until you rotate onto the key this process holds; it is not skipped.
+Each Chat conversation stores `chat_events:<id>` in SQLite `watermarks`. The first poll records the newest event id and does not run commands already in the thread. After that, the cursor moves only through events that decrypted. A newer ciphertext that fails to decrypt stays in place and is retried, which is how a KeyChange the process could not verify yet gets another chance once signing keys load. A message encrypted with an older conversation-key version is decrypted with the saved key for that version. If that version is missing, the poll fetches one older events page (KeyChange blobs included) and retries. That fetch follows the usual API backoff and does not loop. After several misses, or when older pages are exhausted and the version still will not unwrap, the cursor moves past that ciphertext and one warning names the conversation, sender, time, and key version. Decrypt failures are otherwise logged at most once a minute per conversation. History wrapped to a different device holds the cursor until you rotate onto the key this process holds, or those attempts run out.
 
 `processed_events` records event ids the engine has already handled. Activity and the poll can both see the same message; the second pass is a no-op. Leave lines use a second key so the two paths do not announce the same departure twice.
 
