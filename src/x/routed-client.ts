@@ -1,8 +1,10 @@
 import type { ChatService } from "../chat/service.js";
 import { isChatGroupId } from "../chat/ids.js";
 import type {
+  DeleteBatchResult,
   DeleteHint,
   DeleteResult,
+  DeleteTarget,
   DmEvent,
   MediaCaption,
   OutboundAudio,
@@ -116,5 +118,15 @@ export class RoutedXClient implements XClient {
       return this.chat.deleteEvent(eventId, hint);
     }
     return this.dm.deleteEvent(eventId, hint);
+  }
+
+  deleteEvents(
+    conversationId: string,
+    targets: readonly DeleteTarget[],
+  ): Promise<DeleteBatchResult> {
+    if (this.chat && isChatGroupId(conversationId)) {
+      return this.chat.deleteMessages(conversationId, targets);
+    }
+    return this.dm.deleteEvents(conversationId, targets);
   }
 }

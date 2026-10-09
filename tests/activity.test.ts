@@ -194,6 +194,22 @@ describe("Activity Chat parsing", () => {
     const sentEnvelope = envelope();
     (sentEnvelope.data as { event_type: string }).event_type = "chat.sent";
     expect(parseActivityChat(sentEnvelope)?.eventType).toBe("chat.sent");
+    expect(
+      parseActivityChat({
+        data: {
+          event_type: "chat.sent",
+          payload: {
+            conversation_id: GROUP,
+            message_id: "uuid-1",
+            sequence_id: "4242",
+          },
+        },
+      }),
+    ).toMatchObject({
+      eventType: "chat.sent",
+      clientMessageId: "uuid-1",
+      raw: { id: "uuid-1", sequence_id: "4242" },
+    });
   });
 
   it("splits NDJSON and drops heartbeat blanks", () => {
@@ -244,6 +260,37 @@ describe("Activity intake", () => {
     const other = envelope({ conversation_id: "g999" });
     await intake.handle(other);
     expect(cipher.texts).toEqual(["someone CHAT_HELP_OK"]);
+  });
+
+  it("records a chat.sent sequence and does not run the echoed command", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(GROUP);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-help", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "bot-1",
+      id: "mid-1",
+      content: { contentType: "text", text: "!help" },
+    });
+    const service = new ChatService(new FakeHttp(), cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+    );
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
+    const sent = envelope({
+      id: "server-evt",
+      message_id: "mid-1",
+      sender_id: "bot-1",
+      sequence_id: "4242",
+    });
+    (sent.data as { event_type: string }).event_type = "chat.sent";
+    await intake.handle(sent);
+    expect(cipher.texts).toEqual([]);
+    expect(store.lookupChatMessage("mid-1")?.sequenceId).toBe("4242");
   });
 
   it("moderates every encrypted group when no allowlist is set", async () => {

@@ -1,8 +1,17 @@
 import { log } from "../log.js";
 import type { Store } from "../store.js";
+import {
+  CHAT_DELETE_BATCH_LIMIT,
+  deleteErrorStatus,
+  deleteRetryAfterMs,
+  emptyDeleteBatch,
+  isDeletePermissionError,
+} from "./delete-batch.js";
 import type {
+  DeleteBatchResult,
   DeleteHint,
   DeleteResult,
+  DeleteTarget,
   DmEvent,
   MediaCaption,
   OutboundAudio,
@@ -180,6 +189,8 @@ export class ChatService {
   private readonly missingKeyFetches = new Map<string, Map<string, MissingKeyFetchRecord>>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
+  /** After a delete 429/402, skip further delete calls until this time. */
+  private deleteBlockedUntil = 0;
   private readonly remoteKeyCachePath?: string;
   private readonly now: () => number;
   private readonly remoteKeyTtlMs: number;
@@ -208,6 +219,11 @@ export class ChatService {
       conversationKeys,
       backoffMs: Math.max(0, this.publicKeyBlockedUntil - nowMs),
     };
+  }
+
+  /** How long delete calls stay blocked after a 429/402. Zero when X can be called. */
+  deleteBackoffMs(nowMs = this.now()): number {
+    return Math.max(0, this.deleteBlockedUntil - nowMs);
   }
 
   constructor(
@@ -494,9 +510,17 @@ export class ChatService {
       const body = sendMessageBody(payload, this.tokens.get(conversationId));
       try {
         const sent = await this.http.sendChatMessage(conversationId, body);
+        const dmEventId = sent.messageId || payload.messageId;
+        const sequenceId =
+          sent.sequenceId?.trim() ||
+          this.sequenceIdFromEncodedEvent(conversationId, sent.encodedMessageEvent);
+        if (sequenceId) {
+          this.store.rememberChatMessage(dmEventId, conversationId, sequenceId);
+        }
         return {
-          dmEventId: sent.messageId || payload.messageId,
+          dmEventId,
           dmConversationId: conversationId,
+          ...(sequenceId ? { sequenceId } : {}),
         };
       } catch (error) {
         const lighter: ReplyQuote | undefined =
@@ -622,36 +646,188 @@ export class ChatService {
   async deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult> {
     const indexed = this.store.lookupChatMessage(eventId);
     const conversationId = hint?.conversationId || indexed?.conversationId;
-    const sequenceId = hint?.sequenceId || indexed?.sequenceId;
     if (!conversationId || !isChatGroupId(conversationId)) {
       return {
         deleted: false,
         error: "Not an encrypted Chat message this process has indexed.",
       };
     }
-    if (!sequenceId) {
-      return {
-        deleted: false,
-        error:
-          "Missing X Chat sequence id. Delete needs a message this bot decrypted (sequence_id from the event), then POST /2/chat/conversations/:id/messages/delete.",
-      };
-    }
-    try {
-      const signature = this.cipher.prepareMessageDelete(conversationId, [sequenceId], true);
-      const body = deleteMessagesBody(signature, this.cipher.signingPublicKey(), [sequenceId], true);
-      const result = await this.http.deleteChatMessages(conversationId, body);
-      if (!result.deleted) {
-        return {
-          deleted: false,
-          error:
-            "X Chat did not delete that message. delete_for_all works for your own messages, and for other people's messages only when this account is a group admin.",
-        };
+    const batch = await this.deleteMessages(conversationId, [
+      { eventId, sequenceId: hint?.sequenceId || indexed?.sequenceId },
+    ]);
+    return deleteResultFromBatch(eventId, batch);
+  }
+
+  /**
+   * Delete every target that has a sequence id, in as few requests as possible.
+   * One action signature covers each chunk of {@link CHAT_DELETE_BATCH_LIMIT}.
+   * A 429 or 402 stops the rest of the list and arms {@link deleteBackoffMs}.
+   * A later call inside that window does not hit X.
+   * Any other 4xx (and a 200 that reports `deleted: false`) splits the chunk
+   * in half down to one id, so one undeletable message does not sink the rest.
+   * A 429 at any split level stops immediately.
+   */
+  async deleteMessages(
+    conversationId: string,
+    targets: readonly DeleteTarget[],
+  ): Promise<DeleteBatchResult> {
+    const result = emptyDeleteBatch();
+    const ready: { eventId: string; sequenceId: string }[] = [];
+    for (const target of targets) {
+      const eventId = target.eventId?.trim();
+      if (!eventId) continue;
+      const sequenceId =
+        target.sequenceId?.trim() || this.store.lookupChatMessage(eventId)?.sequenceId?.trim();
+      if (!sequenceId) {
+        result.missingSequenceIds.push(eventId);
+        continue;
       }
-      return { deleted: true };
+      ready.push({ eventId, sequenceId });
+    }
+    if (ready.length === 0) return result;
+
+    const blockedFor = this.deleteBlockedUntil - this.now();
+    if (blockedFor > 0) {
+      result.blocked = { retryAfterMs: blockedFor };
+      result.rateLimited = {
+        retryAfterMs: blockedFor,
+        skippedIds: ready.map((target) => target.eventId),
+      };
+      log.info(
+        `Chat delete skipped in ${conversationId}; backoff has ${blockedFor}ms left`,
+      );
+      return result;
+    }
+
+    for (let offset = 0; offset < ready.length; offset += CHAT_DELETE_BATCH_LIMIT) {
+      const chunk = ready.slice(offset, offset + CHAT_DELETE_BATCH_LIMIT);
+      const outcome = await this.deleteChunk(conversationId, chunk, result);
+      if (outcome === "stop") {
+        const rest = ready.slice(offset + chunk.length);
+        this.addSkipped(result, rest);
+        break;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Sequence id from a send, when X put one on the JSON or inside
+   * `encoded_message_event`. The documented send body only requires
+   * `encoded_message_event` and does not include `sequence_id`. Decrypt
+   * yields a sequence only when that blob actually carries one.
+   */
+  private sequenceIdFromEncodedEvent(
+    conversationId: string,
+    encoded: string | undefined,
+  ): string | undefined {
+    const blob = encoded?.trim();
+    if (!blob) return undefined;
+    try {
+      const signingKeys = this.currentSigningKeys();
+      const decrypted = this.cipher.decryptEvents(
+        [blob],
+        signingKeys.length > 0 ? signingKeys : undefined,
+        this.conversationKeySet(conversationId),
+      );
+      const sequence = decrypted.messages[0]?.event.sequenceId;
+      return typeof sequence === "string" && sequence.trim() ? sequence.trim() : undefined;
     } catch (error) {
+      log.warn("Chat send response could not be decrypted for a sequence id", error);
+      return undefined;
+    }
+  }
+
+  private async deleteChunk(
+    conversationId: string,
+    targets: readonly { eventId: string; sequenceId: string }[],
+    result: DeleteBatchResult,
+  ): Promise<"ok" | "stop"> {
+    if (targets.length === 0) return "ok";
+    const blockedFor = this.deleteBlockedUntil - this.now();
+    if (blockedFor > 0) {
+      this.addSkipped(result, targets, blockedFor);
+      if (!result.blocked) result.blocked = { retryAfterMs: blockedFor };
+      return "stop";
+    }
+    const sequenceIds = targets.map((target) => target.sequenceId);
+    try {
+      const signature = this.cipher.prepareMessageDelete(conversationId, sequenceIds, true);
+      const body = deleteMessagesBody(signature, this.cipher.signingPublicKey(), sequenceIds, true);
+      const response = await this.http.deleteChatMessages(conversationId, body);
+      if (!response.deleted) {
+        return this.failChunk(conversationId, targets, result, {
+          message: "X did not delete those messages.",
+          splittable: true,
+        });
+      }
+      for (const target of targets) result.deletedIds.push(target.eventId);
+      return "ok";
+    } catch (error) {
+      const wait = deleteRetryAfterMs(error);
+      if (wait !== undefined) {
+        this.deleteBlockedUntil = this.now() + wait;
+        this.addSkipped(result, targets, wait);
+        log.warn(
+          `Chat delete rate limited in ${conversationId}; retry after ${wait}ms (${targets.length} sequence id(s) not retried)`,
+        );
+        return "stop";
+      }
+      const status = deleteErrorStatus(error);
       const message = error instanceof Error ? error.message : String(error);
-      log.warn(`Chat delete failed for ${eventId}: ${message}`);
-      return { deleted: false, error: message };
+      const splittable = status !== undefined && status >= 400 && status < 500;
+      return this.failChunk(conversationId, targets, result, { status, message, splittable });
+    }
+  }
+
+  private failChunk(
+    conversationId: string,
+    targets: readonly { eventId: string; sequenceId: string }[],
+    result: DeleteBatchResult,
+    failure: { status?: number; message: string; splittable: boolean },
+  ): Promise<"ok" | "stop"> {
+    if (failure.splittable && targets.length > 1) {
+      const mid = Math.floor(targets.length / 2);
+      return this.splitChunk(conversationId, targets, mid, result);
+    }
+    for (const target of targets) result.rejectedIds.push(target.eventId);
+    if (isDeletePermissionError(failure.status, failure.message)) result.permissionDenied = true;
+    const ids = targets.map((target) => target.eventId).join(", ");
+    log.warn(
+      `Chat delete failed in ${conversationId} for ${ids}: ${failure.message}`,
+    );
+    return Promise.resolve("ok");
+  }
+
+  private async splitChunk(
+    conversationId: string,
+    targets: readonly { eventId: string; sequenceId: string }[],
+    mid: number,
+    result: DeleteBatchResult,
+  ): Promise<"ok" | "stop"> {
+    const left = await this.deleteChunk(conversationId, targets.slice(0, mid), result);
+    if (left === "stop") {
+      this.addSkipped(result, targets.slice(mid));
+      return "stop";
+    }
+    return this.deleteChunk(conversationId, targets.slice(mid), result);
+  }
+
+  private addSkipped(
+    result: DeleteBatchResult,
+    targets: readonly { eventId: string }[],
+    retryAfterMs?: number,
+  ): void {
+    if (targets.length === 0) return;
+    const ids = targets.map((target) => target.eventId);
+    const wait = retryAfterMs ?? result.rateLimited?.retryAfterMs ?? this.deleteBackoffMs();
+    if (!result.rateLimited) {
+      result.rateLimited = { retryAfterMs: wait, skippedIds: [...ids] };
+      return;
+    }
+    if (retryAfterMs !== undefined) result.rateLimited.retryAfterMs = retryAfterMs;
+    for (const id of ids) {
+      if (!result.rateLimited.skippedIds.includes(id)) result.rateLimited.skippedIds.push(id);
     }
   }
 
@@ -1403,6 +1579,28 @@ function nextReplyQuote(quote: ReplyQuote): ReplyQuote | undefined {
   if (quote === "bounded") return "preview";
   if (quote === "preview") return "none";
   return undefined;
+}
+
+function deleteResultFromBatch(eventId: string, batch: DeleteBatchResult): DeleteResult {
+  if (batch.deletedIds.includes(eventId)) return { deleted: true };
+  if (batch.missingSequenceIds.includes(eventId)) {
+    return { deleted: false, error: "Missing X Chat sequence id." };
+  }
+  const wait = batch.blocked?.retryAfterMs ?? batch.rateLimited?.retryAfterMs;
+  if (
+    wait !== undefined &&
+    (batch.blocked || batch.rateLimited?.skippedIds.includes(eventId))
+  ) {
+    return { deleted: false, error: `Rate limited; retry after ${wait}ms` };
+  }
+  if (batch.permissionDenied) {
+    return {
+      deleted: false,
+      error:
+        "This account can delete its own messages, and other people's messages only when it is a group admin.",
+    };
+  }
+  return { deleted: false, error: "X Chat did not delete that message." };
 }
 
 function rateLimitWaitMs(error: unknown): number | undefined {

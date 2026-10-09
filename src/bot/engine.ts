@@ -3342,6 +3342,44 @@ export class ModerationEngine {
             `History reads are rate-limited in ${conversationId}; purging ${targets.length} remembered message(s)`,
           );
         }
+        if (isChatGroupId(conversationId)) {
+          const batch = await this.client.deleteEvents(
+            conversationId,
+            targets.map((target) => ({
+              eventId: target.id,
+              ...(target.sequenceId ? { sequenceId: target.sequenceId } : {}),
+            })),
+          );
+          for (const id of batch.deletedIds) actions.deletes.push(id);
+          if (batch.rateLimited) {
+            log.warn(
+              `Chat deletes are rate-limited in ${conversationId}; retry after ${batch.rateLimited.retryAfterMs}ms` +
+                (batch.blocked ? " (backoff, X was not called)" : ""),
+            );
+          }
+          await this.reply(
+            conversationId,
+            formatPurgeReply({
+              deleted: batch.deletedIds.length,
+              attempted: targets.length,
+              requested: command.count,
+              capped: command.capped === true,
+              chat: true,
+              fromMemoryOnly: listed.fromMemoryOnly === true,
+              missingSequence: batch.missingSequenceIds.length,
+              rejected: batch.rejectedIds.length,
+              permissionDenied: batch.permissionDenied,
+              rateLimit: batch.rateLimited
+                ? {
+                    retryAfterMs: batch.rateLimited.retryAfterMs,
+                    blocked: Boolean(batch.blocked),
+                  }
+                : undefined,
+            }),
+            actions,
+          );
+          return;
+        }
         let deleted = 0;
         for (const target of targets) {
           const ok = await this.tryDelete(target.id, actions, {
@@ -3357,7 +3395,7 @@ export class ModerationEngine {
             attempted: targets.length,
             requested: command.count,
             capped: command.capped === true,
-            chat: isChatGroupId(conversationId),
+            chat: false,
             fromMemoryOnly: listed.fromMemoryOnly === true,
           }),
           actions,
@@ -4726,16 +4764,52 @@ export class ModerationEngine {
     const id = sent.dmEventId?.trim();
     const conversation = (sent.dmConversationId || conversationId).trim();
     if (!id || !conversation || !isGroupConversation(conversation)) return;
+    const sequenceId = sent.sequenceId?.trim();
+    const createdAt = new Date().toISOString();
     this.purgeMemory.remember({
       id,
       eventType: "MessageCreate",
       conversationId: conversation,
       senderId: this.config.botUserId,
-      createdAt: new Date().toISOString(),
+      createdAt,
       participantIds: [],
       participants: [],
       mentions: [],
+      ...(sequenceId ? { sequenceId } : {}),
     });
+    if (sequenceId && isChatGroupId(conversation)) {
+      this.store.rememberChatMessage(id, conversation, sequenceId, createdAt);
+    }
+  }
+
+  /**
+   * Learn a sequence id for a message this account already sent.
+   * The send response and Activity `chat.sent` both call this.
+   * The row stays keyed by the client message id when that row exists.
+   */
+  noteOutboundSequence(input: {
+    conversationId: string;
+    sequenceId: string;
+    ids: readonly string[];
+    senderId?: string;
+    createdAt?: string;
+  }): void {
+    const conversationId = input.conversationId.trim();
+    const sequenceId = input.sequenceId.trim();
+    if (!conversationId || !sequenceId || !isGroupConversation(conversationId)) return;
+    this.purgeMemory.attachSequence({
+      conversationId,
+      sequenceId,
+      ids: input.ids,
+      ...(input.senderId ? { senderId: input.senderId } : {}),
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    });
+    if (!isChatGroupId(conversationId)) return;
+    for (const id of input.ids) {
+      const trimmed = id.trim();
+      if (!trimmed) continue;
+      this.store.rememberChatMessage(trimmed, conversationId, sequenceId, input.createdAt);
+    }
   }
 
   /** Newest MessageCreate rows from memory, excluding the `!purge` line. */
@@ -5407,25 +5481,81 @@ function formatPurgeReply(input: {
   capped: boolean;
   chat: boolean;
   fromMemoryOnly?: boolean;
+  missingSequence?: number;
+  rejected?: number;
+  permissionDenied?: boolean;
+  rateLimit?: { retryAfterMs?: number; blocked: boolean };
 }): string {
   const capNote = input.capped ? `Capped at ${PURGE_MAX}. ` : "";
-  if (input.fromMemoryOnly) {
-    const base = `${capNote}Deleted ${input.deleted} of ${input.requested} from recent memory because history was rate-limited.`;
-    if (input.deleted === input.attempted) return base;
-    return `${base} ${purgeDeleteLimit(input.chat)}`;
+  if (!input.chat) {
+    if (input.fromMemoryOnly) {
+      const base = `${capNote}Deleted ${input.deleted} of ${input.requested} from recent memory because history was rate-limited.`;
+      if (input.deleted === input.attempted) return base;
+      return `${base} ${classicDeleteLimit()}`;
+    }
+    const counts =
+      input.attempted < input.requested
+        ? `Deleted ${input.deleted} of ${input.attempted} recent messages (asked for ${input.requested}).`
+        : `Deleted ${input.deleted} of ${input.attempted}.`;
+    if (input.deleted === input.attempted) return `${capNote}${counts}`;
+    return `${capNote}${counts} ${classicDeleteLimit()}`;
   }
-  const counts =
-    input.attempted < input.requested
-      ? `Deleted ${input.deleted} of ${input.attempted} recent messages (asked for ${input.requested}).`
-      : `Deleted ${input.deleted} of ${input.attempted}.`;
-  if (input.deleted === input.attempted) return `${capNote}${counts}`;
-  return `${capNote}${counts} ${purgeDeleteLimit(input.chat)}`;
+
+  const parts: string[] = [capNote + chatPurgeHead(input)];
+  const missing = input.missingSequence ?? 0;
+  const rejected = input.rejected ?? 0;
+  if (input.rateLimit && !input.rateLimit.blocked) {
+    parts.push(formatDeleteRateLimit(input.rateLimit.retryAfterMs, false));
+  }
+  if (missing > 0) {
+    parts.push(
+      `${missing} couldn't be deleted because the bot never saw their X id.`,
+    );
+  }
+  if (rejected > 0 && input.permissionDenied) {
+    parts.push(
+      `${rejected} couldn't be deleted because this account can delete its own messages, and other people's messages only when it is a group admin.`,
+    );
+  } else if (rejected > 0) {
+    parts.push(`${rejected} couldn't be deleted.`);
+  }
+  return parts.join(" ");
 }
 
-function purgeDeleteLimit(chat: boolean): string {
-  return chat
-    ? "X Chat delete-for-all (POST /2/chat/conversations/:id/messages/delete) works for messages this account sent, and for other people's messages only when this account is a group admin. The bot also needs each message's sequence id."
-    : "X only lets the bot delete its own events (DELETE /2/dm_events/:id).";
+function chatPurgeHead(input: {
+  deleted: number;
+  attempted: number;
+  requested: number;
+  fromMemoryOnly?: boolean;
+  rateLimit?: { retryAfterMs?: number; blocked: boolean };
+}): string {
+  if (input.rateLimit?.blocked && input.deleted === 0) {
+    const of = input.attempted > 0 ? input.attempted : input.requested;
+    return `Deleted 0 of ${of}: ${formatDeleteRateLimit(input.rateLimit.retryAfterMs, true)}`;
+  }
+  if (input.fromMemoryOnly) {
+    return `Deleted ${input.deleted} of ${input.requested} from recent memory because history was rate-limited.`;
+  }
+  if (input.attempted < input.requested) {
+    return `Deleted ${input.deleted} of ${input.attempted} recent messages (asked for ${input.requested}).`;
+  }
+  return `Deleted ${input.deleted} of ${input.attempted}.`;
+}
+
+/** `blocked` is the "still inside the previous window" sentence. */
+function formatDeleteRateLimit(retryAfterMs: number | undefined, blocked: boolean): string {
+  const minutes = historyRateLimitMinutes(retryAfterMs);
+  if (minutes === undefined) {
+    return blocked
+      ? "deletes are rate-limited for a few more min."
+      : "X rate-limited deletes; try again in a few minutes.";
+  }
+  if (blocked) return `deletes are rate-limited for about ${minutes} more min.`;
+  return `X rate-limited deletes; try again in about ${minutes} min.`;
+}
+
+function classicDeleteLimit(): string {
+  return "X only lets the bot delete its own events (DELETE /2/dm_events/:id).";
 }
 
 /**
@@ -5524,6 +5654,7 @@ function trackBotOutbound(
       track(conversationId, () => client.sendAudio(conversationId, audio)),
     sendDirectMessage: (participantId, text) => client.sendDirectMessage(participantId, text),
     deleteEvent: (eventId, hint) => client.deleteEvent(eventId, hint),
+    deleteEvents: (conversationId, targets) => client.deleteEvents(conversationId, targets),
   };
 }
 

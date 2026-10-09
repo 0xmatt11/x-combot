@@ -155,6 +155,36 @@ describe("purge memory", () => {
     }
   });
 
+  it("attaches a sequence id without moving the row and keeps it on a later remember", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "purge-memory-"));
+    const file = path.join(dir, "chat-recent-messages.json");
+    try {
+      const memory = createPurgeMemory({ filePath: file, writeDelayMs: 0 });
+      memory.remember(message({ id: "uuid-1", text: "bot reply" }));
+      memory.remember(message({ id: "newer", text: "after" }));
+      memory.attachSequence({
+        conversationId: groupId,
+        sequenceId: "seq-own",
+        ids: ["uuid-1", "server-9"],
+      });
+      const rows = memory.list(groupId);
+      expect(rows.map((event) => event.id)).toEqual(["newer", "uuid-1"]);
+      expect(rows[1]?.sequenceId).toBe("seq-own");
+      expect(rows[1]?.aliasIds).toContain("server-9");
+      const raw = fs.readFileSync(file, "utf8");
+      expect(raw).toContain("uuid-1");
+      expect(raw).toContain("seq-own");
+      expect(raw).not.toContain("bot reply");
+
+      memory.remember(message({ id: "server-9", aliasIds: ["uuid-1"], text: "echo" }));
+      const merged = memory.list(groupId).find((event) => event.sequenceId === "seq-own");
+      expect(merged?.sequenceId).toBe("seq-own");
+      expect(JSON.stringify(memory.list(groupId))).not.toContain("echo");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("ignores plaintext fields smuggled into the file", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "purge-memory-"));
     const file = path.join(dir, "chat-recent-messages.json");

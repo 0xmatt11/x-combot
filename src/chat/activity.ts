@@ -52,6 +52,8 @@ export interface ParsedActivityChat {
   conversationId: string;
   raw: RawChatEvent;
   keyEvents: string[];
+  /** Client message id (`message_id`), even when `payload.id` is a different string. */
+  clientMessageId?: string;
 }
 
 /**
@@ -70,16 +72,20 @@ export function parseActivityChat(body: unknown): ParsedActivityChat | undefined
     stringOf(payload.conversation_id ?? payload.conversationId),
   );
   const encoded = stringOf(payload.encoded_event ?? payload.encodedEvent);
-  if (!conversationId || !encoded) return undefined;
+  const clientMessageId = stringOf(payload.message_id ?? payload.messageId);
+  const sequenceId = stringOf(payload.sequence_id ?? payload.sequenceId);
+  if (!conversationId) return undefined;
+  if (eventType === "chat.received" && !encoded) return undefined;
+  if (eventType === "chat.sent" && !encoded && !sequenceId && !clientMessageId) return undefined;
   const raw = normalizeRawChatEvent({
-    id: stringOf(payload.id ?? payload.message_id ?? payload.messageId),
+    id: stringOf(payload.id ?? clientMessageId),
     sender_id: stringOf(payload.sender_id ?? payload.senderId),
     conversation_id: conversationId,
     created_at: stringOf(payload.created_at ?? payload.createdAt),
     created_at_msec: (payload.created_at_msec ?? payload.createdAtMsec) as string | number | undefined,
     encoded_event: encoded,
     conversation_token: stringOf(payload.conversation_token ?? payload.conversationToken),
-    sequence_id: stringOf(payload.sequence_id ?? payload.sequenceId),
+    sequence_id: sequenceId,
   });
   return {
     eventType,
@@ -87,6 +93,7 @@ export function parseActivityChat(body: unknown): ParsedActivityChat | undefined
     conversationId,
     raw,
     keyEvents: collectKeyEvents(payload),
+    ...(clientMessageId ? { clientMessageId } : {}),
   };
 }
 
@@ -246,7 +253,11 @@ export class ChatActivityIntake {
       }
       return;
     }
-    if (parsed?.eventType === "chat.sent") return;
+    if (parsed?.eventType === "chat.sent") {
+      if (!acceptsChatGroup(this.policy, parsed.conversationId)) return;
+      await this.rememberSentSequence(parsed);
+      return;
+    }
 
     const signal = parseActivityGroupSignal(body);
     if (!signal) return;
@@ -255,6 +266,62 @@ export class ChatActivityIntake {
       `Activity ${signal.eventType} named ${signal.conversationId}. The catch-up poll will seed a watermark and will not replay history. Moderation waits for !auth unless this group is already authorized.`,
     );
     this.onSeen?.(signal.conversationId, undefined);
+  }
+
+  /**
+   * `chat.sent` is this account's own echo. It is not moderated.
+   * A sequence id on the payload, or on the decrypted event, is stored
+   * against the client message id so `!purge` can delete that reply.
+   */
+  private async rememberSentSequence(parsed: ParsedActivityChat): Promise<void> {
+    const ids: string[] = [];
+    const push = (value: string | undefined) => {
+      const trimmed = value?.trim();
+      if (trimmed && !ids.includes(trimmed)) ids.push(trimmed);
+    };
+    push(parsed.clientMessageId);
+    push(parsed.raw.id);
+    let sequenceId = parsed.raw.sequence_id?.trim();
+    let senderId = parsed.raw.sender_id;
+    let createdAt = parsed.raw.created_at;
+    // Decrypt only when the payload omitted the sequence or the client message
+    // id. A server event id alone cannot be matched to the uuid we stored at
+    // send time; that uuid is inside the ciphertext. Skipping a complete
+    // payload avoids a false key-rotation warning when our own echo will not decrypt.
+    const needsDecrypt =
+      Boolean(parsed.raw.encoded_event) && (!sequenceId || !parsed.clientMessageId);
+    if (needsDecrypt && parsed.raw.encoded_event) {
+      try {
+        const events = await this.chat.ingestActivity({
+          conversationId: parsed.conversationId,
+          raw: parsed.raw,
+          keyEvents: parsed.keyEvents,
+        });
+        for (const event of events) {
+          push(event.id);
+          for (const alias of event.aliasIds ?? []) push(alias);
+          if (!sequenceId && event.sequenceId) sequenceId = event.sequenceId;
+          senderId = senderId || event.senderId;
+          createdAt = createdAt || event.createdAt;
+        }
+      } catch (error) {
+        log.warn(
+          `Activity chat.sent could not be decrypted in ${parsed.conversationId}`,
+          error,
+        );
+      }
+    }
+    if (!sequenceId || ids.length === 0) return;
+    this.engine.noteOutboundSequence({
+      conversationId: parsed.conversationId,
+      sequenceId,
+      ids,
+      ...(senderId ? { senderId } : {}),
+      ...(createdAt ? { createdAt } : {}),
+    });
+    log.debug(
+      `Activity chat.sent recorded sequence ${sequenceId} for ${ids[0]} in ${parsed.conversationId}`,
+    );
   }
 }
 

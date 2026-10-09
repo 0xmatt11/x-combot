@@ -4,9 +4,13 @@ import { classicDmLinkSignals } from "../bot/linkroast.js";
 import { log } from "../log.js";
 import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
 import type { RawChatConversationsPage, RawChatEventsPage } from "../chat/http.js";
+import { deleteOneByOne } from "../chat/delete-batch.js";
+import { isChatGroupId } from "../chat/ids.js";
 import type {
+  DeleteBatchResult,
   DeleteHint,
   DeleteResult,
+  DeleteTarget,
   DmEvent,
   Mention,
   OutboundAudio,
@@ -346,6 +350,15 @@ export class LiveXClient implements XClient {
     return response;
   }
 
+  async deleteEvents(
+    conversationId: string,
+    targets: readonly DeleteTarget[],
+  ): Promise<DeleteBatchResult> {
+    return deleteOneByOne(conversationId, targets, (eventId, hint) => this.deleteEvent(eventId, hint), {
+      chat: isChatGroupId(conversationId),
+    });
+  }
+
   async deleteEvent(eventId: string, _hint?: DeleteHint): Promise<DeleteResult> {
     try {
       const payload = await this.request<{ data?: { deleted?: boolean } }>(
@@ -473,12 +486,25 @@ export class LiveXClient implements XClient {
   async sendChatMessage(
     conversationId: string,
     body: Record<string, string>,
-  ): Promise<{ messageId: string }> {
-    await this.request(
-      `/2/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
-      { method: "POST", json: body },
-    );
-    return { messageId: body.message_id ?? "" };
+  ): Promise<{ messageId: string; sequenceId?: string; encodedMessageEvent?: string }> {
+    const payload = await this.request<{
+      data?: {
+        sequence_id?: unknown;
+        sequenceId?: unknown;
+        encoded_message_event?: unknown;
+      };
+    }>(`/2/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
+      method: "POST",
+      json: body,
+    });
+    const data = payload.data;
+    const sequenceId = firstResponseString(data?.sequence_id, data?.sequenceId);
+    const encodedMessageEvent = firstResponseString(data?.encoded_message_event);
+    return {
+      messageId: body.message_id ?? "",
+      ...(sequenceId ? { sequenceId } : {}),
+      ...(encodedMessageEvent ? { encodedMessageEvent } : {}),
+    };
   }
 
   async deleteChatMessages(
@@ -638,6 +664,15 @@ export class LiveXClient implements XClient {
       this.refreshPromise = undefined;
     }
   }
+}
+
+/** First non-empty string among response fields. Numbers are accepted as ids. */
+function firstResponseString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return undefined;
 }
 
 /**
