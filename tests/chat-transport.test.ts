@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { parseChatConversationIds } from "../src/chat/ids.js";
@@ -5,7 +6,10 @@ import { chatEventToDm, cipherReplayKey } from "../src/chat/normalize.js";
 import { ChatActivityIntake } from "../src/chat/activity.js";
 import { chatListenPolicy } from "../src/chat/listen.js";
 import { ChatPoller } from "../src/chat/poller.js";
-import { ChatService } from "../src/chat/service.js";
+import {
+  ChatService,
+  DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES,
+} from "../src/chat/service.js";
 import type {
   ChatCipher,
   ChatMediaAttachment,
@@ -1351,6 +1355,244 @@ describe("ChatService.sendImage", () => {
     expect(attachment.width).toBe(1);
     expect(attachment.height).toBe(1);
     expect(result).toEqual({ dmEventId: "mid-aud", dmConversationId: "g1" });
+  });
+});
+
+describe("Chat reply quote size", () => {
+  const stores: Store[] = [];
+  const tooLarge = (id: string) =>
+    new Error(
+      `X API POST /2/chat/conversations/${id}/messages -> 400: {"errors":[{"message":"Message is too large"}]}`,
+    );
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.CHAT_REPLY_EVENT_MAX_BYTES;
+    for (const store of stores) store.close();
+    stores.length = 0;
+  });
+
+  function open() {
+    const cipher = new FakeCipher();
+    const http = new FakeHttp();
+    const store = new Store(":memory:");
+    stores.push(store);
+    const service = new ChatService(http, cipher, store);
+    return { cipher, http, service };
+  }
+
+  function quoteCaption(rawEvent: string) {
+    return {
+      text: "@alice",
+      mention: { username: "alice" as const, start: 0, end: 6 },
+      replyTo: {
+        sequenceId: "55",
+        senderId: "alice-1",
+        previewText: "!blackjack stand",
+        rawEvent,
+      },
+    };
+  }
+
+  it("keeps the default above the chat-xdk fixture message and its reply", () => {
+    const vectors = JSON.parse(
+      readFileSync(new URL("./fixtures/sdk_vectors.json", import.meta.url), "utf8"),
+    ) as { event_message_b64: string; event_reply_valid_b64: string };
+    expect(vectors.event_message_b64.length).toBe(428);
+    expect(vectors.event_reply_valid_b64.length).toBe(980);
+    expect(vectors.event_reply_valid_b64.length).toBeLessThan(DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES);
+  });
+
+  it("embeds a short raw event and drops one past the threshold, keeping the mention", async () => {
+    const { cipher, service } = open();
+    const hand = "FULL-HAND-RESULT";
+    await service.sendText(GROUP, hand, quoteCaption("blob-stand"));
+    expect(cipher.replies[0]).toMatchObject({
+      text: hand,
+      options: {
+        entities: [[0, 6, "mention"]],
+        replyToEvent: "blob-stand",
+        replyToSequenceId: "55",
+        replyToSenderId: "alice-1",
+        replyToText: "!blackjack stand",
+      },
+    });
+
+    cipher.replies.length = 0;
+    const huge = "x".repeat(DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES + 1);
+    await service.sendText(GROUP, hand, quoteCaption(huge));
+    expect(cipher.replies[0]?.options?.replyToEvent).toBeUndefined();
+    expect(cipher.replies[0]).toMatchObject({
+      text: hand,
+      options: {
+        entities: [[0, 6, "mention"]],
+        replyToSequenceId: "55",
+        replyToSenderId: "alice-1",
+        replyToText: "!blackjack stand",
+      },
+    });
+  });
+
+  it("honors CHAT_REPLY_EVENT_MAX_BYTES and ignores a non-integer", async () => {
+    const { cipher, service } = open();
+    process.env.CHAT_REPLY_EVENT_MAX_BYTES = "8";
+    await service.sendText(GROUP, "hand", quoteCaption("123456789"));
+    expect(cipher.replies[0]?.options?.replyToEvent).toBeUndefined();
+    expect(cipher.replies[0]?.options?.replyToSequenceId).toBe("55");
+
+    cipher.replies.length = 0;
+    process.env.CHAT_REPLY_EVENT_MAX_BYTES = "nope";
+    await service.sendText(GROUP, "hand", quoteCaption("123456789"));
+    expect(cipher.replies[0]?.options?.replyToEvent).toBe("123456789");
+  });
+
+  it("retries a too-large reply with the sequence and preview, then as a plain message", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { cipher, http, service } = open();
+    const hand = "FULL-HAND-RESULT";
+    let failures = 2;
+    http.sendChatMessage = async (id, body) => {
+      http.sends.push(body);
+      if (failures > 0) {
+        failures -= 1;
+        throw tooLarge(id);
+      }
+      return { messageId: body.message_id ?? "ok" };
+    };
+
+    const sent = await service.sendText(GROUP, hand, quoteCaption("blob-stand"));
+    expect(sent.dmConversationId).toBe(GROUP);
+    expect(cipher.replies).toHaveLength(2);
+    expect(cipher.texts).toEqual([hand, hand, hand]);
+    expect(cipher.replies[0]?.options?.replyToEvent).toBe("blob-stand");
+    expect(cipher.replies[1]?.options).toMatchObject({
+      replyToSequenceId: "55",
+      replyToText: "!blackjack stand",
+      entities: [[0, 6, "mention"]],
+    });
+    expect(cipher.replies[1]?.options?.replyToEvent).toBeUndefined();
+    expect(cipher.replies[1]?.options?.replyToSenderId).toBeUndefined();
+    expect(cipher.replies).toHaveLength(2);
+    expect(http.sends).toHaveLength(3);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.includes("without the embedded quote"))).toHaveLength(1);
+    expect(lines.join("\n")).not.toContain(hand);
+    expect(lines.join("\n")).not.toContain("blob-stand");
+  });
+
+  it("does not retry a too-large send that was not a reply", async () => {
+    const { http, service } = open();
+    let calls = 0;
+    http.sendChatMessage = async (id) => {
+      calls += 1;
+      throw tooLarge(id);
+    };
+    await expect(service.sendText(GROUP, "FULL-HAND-RESULT")).rejects.toThrow(/Message is too large/);
+    expect(calls).toBe(1);
+  });
+
+  it("retries a too-large media caption on the same upload", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cipher = new FakeCipher();
+    const key = new Uint8Array(32).fill(7);
+    cipher.events.set("blob-99", { type: "message", id: "e1", content: { text: "hi" } });
+    cipher.conversationKeys = { keys: { "99": key }, latestVersion: "99" };
+    const http = new FakeHttp();
+    http.pages.push({ data: [{ id: "blob-99", encoded_event: "blob-99", sender_id: "alice-1" }] });
+    let uploads = 0;
+    http.uploadChatMedia = async () => {
+      uploads += 1;
+      return "hash-inline";
+    };
+    let failures = 1;
+    http.sendChatMessage = async (id, body) => {
+      http.sends.push(body);
+      if (failures > 0) {
+        failures -= 1;
+        throw tooLarge(id);
+      }
+      return { messageId: "mid-img" };
+    };
+    const store = new Store(":memory:");
+    stores.push(store);
+    const service = new ChatService(http, cipher, store);
+    await service.listHistory({ conversationId: GROUP });
+    await service.sendImage(GROUP, {
+      url: "https://cdn.example/a.jpg",
+      bytes: Uint8Array.from([1, 2, 3, 4]),
+      mimeType: "image/jpeg",
+      caption: quoteCaption("blob-cmd"),
+    });
+    expect(uploads).toBe(1);
+    expect(cipher.replies).toHaveLength(2);
+    expect(cipher.replies[0]?.text).toBe("@alice");
+    expect(cipher.replies[0]?.options?.replyToEvent).toBe("blob-cmd");
+    expect(cipher.replies[1]?.options?.replyToEvent).toBeUndefined();
+    expect(cipher.replies[1]?.options?.replyToSequenceId).toBe("55");
+    expect(cipher.replies[1]?.options?.replyToText).toBe("!blackjack stand");
+    expect(cipher.replies[1]?.options?.entities).toEqual([[0, 6, "mention"]]);
+    expect(cipher.replies[1]?.options?.attachments?.[0]?.mediaHashKey).toBe("hash-inline");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("@alice");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("blob-cmd");
+  });
+
+  it("delivers a settled blackjack stand when the first reply send is too large", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cipher = new FakeCipher();
+    const http = new FakeHttp();
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(GROUP);
+    const service = new ChatService(http, cipher, store);
+    const client = new MockXClient({ id: "bot-1", username: "miladybot", name: "Bot" });
+    const alice = { id: "u-alice", username: "alice", name: "Alice" };
+    client.addUser(alice);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(client, service),
+      runtime(),
+    );
+    let failNext = false;
+    const send = http.sendChatMessage.bind(http);
+    http.sendChatMessage = async (id, body) => {
+      if (failNext) {
+        failNext = false;
+        throw tooLarge(id);
+      }
+      return send(id, body);
+    };
+    const base = {
+      eventType: "MessageCreate" as const,
+      conversationId: GROUP,
+      senderId: alice.id,
+      sender: alice,
+      participantIds: [] as string[],
+      participants: [],
+      mentions: [],
+    };
+    await engine.processEvent({ ...base, id: "deal", text: "!blackjack" });
+    failNext = true;
+    const stood = await engine.processEvent({
+      ...base,
+      id: "stand",
+      text: "!blackjack stand",
+      sequenceId: "77",
+      encodedEvent: "blob-stand",
+    });
+    const delivered = stood.replies[0] ?? "";
+    expect(delivered).toMatch(/Dealer|wins|Push|bust/i);
+    expect(delivered).toContain("@alice");
+    expect(cipher.texts.filter((text) => text === delivered)).toHaveLength(2);
+    const standReplies = cipher.replies.filter((row) => row.text === delivered);
+    expect(standReplies[0]?.options?.replyToEvent).toBe("blob-stand");
+    expect(standReplies[1]?.options?.replyToEvent).toBeUndefined();
+    expect(standReplies[1]?.options?.replyToSenderId).toBeUndefined();
+    expect(standReplies[1]?.options?.replyToSequenceId).toBe("77");
+    expect(standReplies[1]?.options?.replyToText).toBe("!blackjack stand");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(delivered);
+    const again = await engine.processEvent({ ...base, id: "later", text: "!hit" });
+    expect(again.replies[0]).toMatch(/No blackjack hand/);
   });
 });
 

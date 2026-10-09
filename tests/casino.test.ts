@@ -679,6 +679,33 @@ describe("casino commands", () => {
     expect(client.sent.some((row) => row.text.includes(alice.id))).toBe(false);
   });
 
+  it("logs a settled blackjack stand that could not be sent, without the hand text", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { engine, client } = setup();
+    const original = client.sendMessage.bind(client);
+    let sends = 0;
+    client.sendMessage = async (conversationId, text, caption) => {
+      sends += 1;
+      if (sends > 1) {
+        throw new Error(
+          'X API POST /2/chat/conversations/g1/messages -> 400: {"errors":[{"message":"Message is too large"}]}',
+        );
+      }
+      return original(conversationId, text, caption);
+    };
+    await engine.processEvent(message({ id: "bj1", senderId: alice.id, text: "!blackjack" }));
+    await engine.processEvent(message({ id: "bj2", senderId: alice.id, text: "!blackjack stand" }));
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    const missed = lines.find((line) => line.includes("Casino result was not delivered"));
+    expect(missed).toContain(`conversation=${groupId}`);
+    expect(missed).toContain("command=blackjack stand");
+    expect(missed).not.toMatch(/Fun chips|Dealer|🃏/);
+    client.sendMessage = original;
+    await engine.processEvent(message({ id: "bj3", senderId: alice.id, text: "!hit" }));
+    expect(client.sent.at(-1)?.text).toMatch(/No blackjack hand/);
+  });
+
   it("routes !stand to the open poker hand", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
     const { engine, client } = setup();

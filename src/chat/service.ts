@@ -57,6 +57,53 @@ const MAX_CATCHUP_PAGES = 4;
 /** Key-change blobs kept for a later decrypt. This is not an HTTP retry loop. */
 const MAX_PENDING_KEY_BLOBS = 80;
 
+/**
+ * Max length of the base64 raw event passed as `replyToEvent`.
+ *
+ * chat-xdk embeds that signed event in the reply so recipients can validate
+ * the preview. A message that is already a reply contains its parent, so
+ * each hop of a reply-to-reply chain grows by about the parent length.
+ * Fixture sizes in `tests/fixtures/sdk_vectors.json`: a text message is 428
+ * bytes and a reply to it is 980. Encrypting a reply copies the parent into
+ * the ciphertext and adds about 380 bytes (428 → 808, 980 → 1360). X then
+ * rejects the POST with 400 "Message is too large". A live blackjack chain
+ * (`!blackjack`, then `hit`, then `stand`) dies on that third reply.
+ *
+ * 4096 stays above the fixture message, the fixture reply, and a normal
+ * command quote, and stops embedding once a nested raw event has pushed the
+ * parent past a few kilobytes. The sequence id, sender, and preview text
+ * still thread the reply. Override with `CHAT_REPLY_EVENT_MAX_BYTES`
+ * (a non-negative integer). Anything else uses this default.
+ */
+export const DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES = 4096;
+
+/** `CHAT_REPLY_EVENT_MAX_BYTES`, or {@link DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES}. */
+export function chatReplyEventMaxBytes(): number {
+  const raw = process.env.CHAT_REPLY_EVENT_MAX_BYTES?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) return DEFAULT_CHAT_REPLY_EVENT_MAX_BYTES;
+  return parsed;
+}
+
+/** How much of the parent quote `encryptReply` should carry. */
+type ReplyQuote = "bounded" | "preview" | "none";
+
+/**
+ * X's 400 `{"errors":[{"message":"Message is too large"}]}` on
+ * `POST /2/chat/conversations/:id/messages`. Other 400s are not this.
+ */
+export function isChatMessageTooLarge(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/message is too large/i.test(message)) return false;
+  if (error && typeof error === "object" && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    if (status === 400) return true;
+    if (typeof status === "number") return false;
+  }
+  return /\b400\b/.test(message);
+}
+
 export interface ChatServiceOptions {
   /**
    * Disk cache for member public keys and recovered conversation keys.
@@ -328,21 +375,12 @@ export class ChatService {
     text: string,
     caption?: MediaCaption,
   ): Promise<SendMessageResult> {
-    let payload;
-    try {
-      payload = this.encryptOutbound(conversationId, text, caption);
-    } catch (error) {
+    return this.postOutbound(conversationId, text, caption, undefined, (error) => {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
+      return new Error(
         `Cannot encrypt a Chat reply in ${conversationId}: ${message}. The bot needs a verified KeyChange (meta.conversation_key_events) wrapped to its registered public key. If this account was added before \`npm run chat:register\`, run \`npm run chat:rotate -- ${conversationId} --confirm\` so a new key is wrapped for every current member.`,
       );
-    }
-    const body = sendMessageBody(payload, this.tokens.get(conversationId));
-    const sent = await this.http.sendChatMessage(conversationId, body);
-    return {
-      dmEventId: sent.messageId || payload.messageId,
-      dmConversationId: conversationId,
-    };
+    });
   }
 
   /**
@@ -428,14 +466,66 @@ export class ChatService {
   }
 
   /**
+   * Encrypt and POST one Chat message.
+   * A reply that X rejects as too large is retried once with the sequence id
+   * and preview text only, then once as a normal message carrying the same
+   * text. One warning is logged for that fallback. The warning has no message
+   * text and no raw event.
+   */
+  private async postOutbound(
+    conversationId: string,
+    text: string,
+    caption: MediaCaption | undefined,
+    extra: EncryptMessageOptions | undefined,
+    encryptFailed: (error: unknown) => Error,
+  ): Promise<SendMessageResult> {
+    const reply = caption?.replyTo;
+    const quoting = Boolean(reply && (reply.rawEvent || reply.sequenceId));
+    let quote: ReplyQuote = quoting ? "bounded" : "none";
+    let warned = false;
+    for (;;) {
+      if (quote === "preview" && !reply?.sequenceId) quote = "none";
+      let payload: ReturnType<ChatCipher["encryptMessage"]>;
+      try {
+        payload = this.encryptOutbound(conversationId, text, caption, extra, quote);
+      } catch (error) {
+        throw encryptFailed(error);
+      }
+      const body = sendMessageBody(payload, this.tokens.get(conversationId));
+      try {
+        const sent = await this.http.sendChatMessage(conversationId, body);
+        return {
+          dmEventId: sent.messageId || payload.messageId,
+          dmConversationId: conversationId,
+        };
+      } catch (error) {
+        const lighter: ReplyQuote | undefined =
+          quoting && isChatMessageTooLarge(error) ? nextReplyQuote(quote) : undefined;
+        if (!lighter) throw error;
+        if (!warned) {
+          warned = true;
+          log.warn(
+            `Chat reply was too large for X; resending without the embedded quote. conversation=${conversationId}`,
+          );
+        }
+        quote = lighter;
+      }
+    }
+  }
+
+  /**
    * `encryptReply` when the caption names a Chat message. Otherwise
    * `encryptMessage`. A mention entity is the `@handle` byte range.
+   * `bounded` omits `replyToEvent` once the raw event exceeds
+   * {@link chatReplyEventMaxBytes}. `preview` keeps the sequence id and
+   * preview text only. `none` is a normal message.
    */
   private encryptOutbound(
     conversationId: string,
     text: string,
     caption?: MediaCaption,
     extra?: EncryptMessageOptions,
+    quote: ReplyQuote = "bounded",
   ): ReturnType<ChatCipher["encryptMessage"]> {
     const mention = caption?.mention;
     const entities = mention
@@ -447,15 +537,31 @@ export class ChatService {
       ...extra,
       ...(entities ? { entities } : {}),
     };
-    const reply = caption?.replyTo;
+    const reply = quote === "none" ? undefined : caption?.replyTo;
     if (reply && (reply.rawEvent || reply.sequenceId)) {
-      return this.cipher.encryptReply(conversationId, text, {
-        ...options,
-        ...(reply.rawEvent ? { replyToEvent: reply.rawEvent } : {}),
-        ...(reply.sequenceId ? { replyToSequenceId: reply.sequenceId } : {}),
-        ...(reply.senderId ? { replyToSenderId: reply.senderId } : {}),
-        ...(reply.previewText ? { replyToText: reply.previewText } : {}),
-      });
+      if (quote === "preview") {
+        if (reply.sequenceId) {
+          return this.cipher.encryptReply(conversationId, text, {
+            ...options,
+            replyToSequenceId: reply.sequenceId,
+            ...(reply.previewText ? { replyToText: reply.previewText } : {}),
+          });
+        }
+      } else {
+        const rawEvent =
+          reply.rawEvent && reply.rawEvent.length <= chatReplyEventMaxBytes()
+            ? reply.rawEvent
+            : undefined;
+        if (rawEvent || reply.sequenceId) {
+          return this.cipher.encryptReply(conversationId, text, {
+            ...options,
+            ...(rawEvent ? { replyToEvent: rawEvent } : {}),
+            ...(reply.sequenceId ? { replyToSequenceId: reply.sequenceId } : {}),
+            ...(reply.senderId ? { replyToSenderId: reply.senderId } : {}),
+            ...(reply.previewText ? { replyToText: reply.previewText } : {}),
+          });
+        }
+      }
     }
     const hasOptions = Boolean(extra || entities || saved.conversationKey);
     return this.cipher.encryptMessage(conversationId, text, hasOptions ? options : undefined);
@@ -487,9 +593,11 @@ export class ChatService {
     }
     const mediaHashKey = await this.http.uploadChatMedia(conversationId, ciphertext);
     const label = mediaLabel(attachment.mediaType);
-    let payload;
-    try {
-      payload = this.encryptOutbound(conversationId, caption?.text ?? "", caption, {
+    return this.postOutbound(
+      conversationId,
+      caption?.text ?? "",
+      caption,
+      {
         conversationKey: latest.key,
         conversationKeyVersion: latest.version,
         attachments: [
@@ -503,17 +611,12 @@ export class ChatService {
             ...(attachment.durationMillis !== undefined ? { durationMillis: attachment.durationMillis } : {}),
           },
         ],
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Cannot encrypt a Chat ${label} in ${conversationId}: ${message}`);
-    }
-    const body = sendMessageBody(payload, this.tokens.get(conversationId));
-    const sent = await this.http.sendChatMessage(conversationId, body);
-    return {
-      dmEventId: sent.messageId || payload.messageId,
-      dmConversationId: conversationId,
-    };
+      },
+      (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return new Error(`Cannot encrypt a Chat ${label} in ${conversationId}: ${message}`);
+      },
+    );
   }
 
   async deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult> {
@@ -1294,6 +1397,12 @@ function failedDecryptBlobs(encoded: string[], errors: Record<string, string>): 
     else if (encoded.includes(key)) failed.add(key);
   }
   return failed;
+}
+
+function nextReplyQuote(quote: ReplyQuote): ReplyQuote | undefined {
+  if (quote === "bounded") return "preview";
+  if (quote === "preview") return "none";
+  return undefined;
 }
 
 function rateLimitWaitMs(error: unknown): number | undefined {
