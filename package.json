@@ -13,6 +13,7 @@
     "oauth": "tsx scripts/oauth.ts",
     "chat:register": "tsx scripts/chat-register.ts",
     "chat:rotate": "tsx scripts/chat-rotate.ts",
+    "history:export": "tsx scripts/history-export.ts",
     "imagine:browser": "tsx scripts/imagine-browser.ts"
   },
   "keywords": [
