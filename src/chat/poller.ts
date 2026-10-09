@@ -1,8 +1,11 @@
+import { eventReplayKeys, leaveReplayKey, ModerationEngine } from "../bot/engine.js";
+import { parseCommand, parseUnknownBang } from "../bot/parser.js";
+import { HANG_HEARTBEAT_MS, HANG_WALL_JUMP_MS } from "../hang-watchdog.js";
 import { drainEngineLlmRetries } from "../llm/chat-retry.js";
 import { log } from "../log.js";
 import { nextPollDelayMs } from "../poller.js";
 import type { Store } from "../store.js";
-import { ModerationEngine } from "../bot/engine.js";
+import type { DmEvent } from "../types.js";
 import { watermarkKey } from "./ids.js";
 import { acceptsChatGroup, initialPollIds, type ChatListenPolicy, chatListenPolicy } from "./listen.js";
 import type { ChatService } from "./service.js";
@@ -19,6 +22,29 @@ export const CHAT_DISCOVERY_PAGE_SIZE = 50;
  * A small allowlist is still polled in full every tick.
  */
 export const CHAT_POLLS_PER_TICK = 8;
+/** Wake catch-up answers commands newer than this. Older ones are marked handled. */
+export const DEFAULT_CHAT_WAKE_COMMAND_MAX_AGE_MS = 30 * 60 * 1000;
+
+export interface WakeCatchupCounts {
+  answered: number;
+  stale: number;
+  alreadyHandled: number;
+}
+
+const EMPTY_WAKE: WakeCatchupCounts = { answered: 0, stale: 0, alreadyHandled: 0 };
+
+/**
+ * One INFO line per wake. Counts only. The line never includes message text.
+ * `backoff` means the history read was skipped because a 429/402 wait is still running.
+ */
+export function formatWakeCatchupLog(
+  counts: WakeCatchupCounts,
+  options?: { backoff?: boolean },
+): string {
+  const line =
+    `Wake catch-up: answered ${counts.answered}, skipped stale ${counts.stale}, skipped already handled ${counts.alreadyHandled}`;
+  return options?.backoff ? `${line}; rate-limit backoff active` : line;
+}
 
 export interface ChatPollerOptions {
   policy?: ChatListenPolicy;
@@ -30,13 +56,34 @@ export interface ChatPollerOptions {
    * when the tick is waiting out an API error. Does not add a request.
    */
   onPipeline?: (state: "ok" | "degraded", detail?: string) => void;
+  /**
+   * Commands older than this on a wake catch-up are marked handled and not
+   * answered. Unset is 30 minutes. `0` skips every command with a past timestamp.
+   */
+  wakeCommandMaxAgeMs?: number;
+  /** Clock for command age, backoff, and a timer that fires late after a VM pause. */
+  now?: () => number;
 }
 
 export class ChatPoller {
   private stopped = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking = false;
-  private wakeNow = false;
+  /** A kick arrived while a normal poll was in flight. Run one wake when it finishes. */
+  private wakeQueued = false;
+  /** The in-flight tick is the wake catch-up. A second kick does not start another read. */
+  private wakeInFlight = false;
+  /** The watchdog kick landed during this wake, so it must not be counted again. */
+  private kickDuringWake = false;
+  /** `clock()` value when the scheduled timer is due. */
+  private armedAt: number | undefined;
+  /** History reads wait until this `clock()` value after a 429/402. */
+  private backoffUntil = 0;
+  /**
+   * A timer that fired late already performed this resume's catch-up.
+   * Ignore `kick()` until this `clock()` value so the watchdog does not read again.
+   */
+  private ignoreKickUntil = 0;
   private idleMs: number;
   private readonly policy: ChatListenPolicy;
   private readonly ids = new Set<string>();
@@ -49,6 +96,8 @@ export class ChatPoller {
   private inboxListed = false;
   private discoveryDisabled = false;
   private readonly onPipeline?: (state: "ok" | "degraded", detail?: string) => void;
+  private readonly wakeCommandMaxAgeMs: number;
+  private readonly clock: () => number;
 
   constructor(
     private readonly chat: ChatService,
@@ -68,6 +117,10 @@ export class ChatPoller {
     this.discoveryMaxPages = options.discoveryMaxPages ?? CHAT_DISCOVERY_MAX_PAGES;
     this.maxPollsPerTick = options.maxPollsPerTick ?? CHAT_POLLS_PER_TICK;
     this.onPipeline = options.onPipeline;
+    const maxAge = options.wakeCommandMaxAgeMs;
+    this.wakeCommandMaxAgeMs =
+      maxAge === undefined ? DEFAULT_CHAT_WAKE_COMMAND_MAX_AGE_MS : maxAge;
+    this.clock = options.now ?? (() => Date.now());
   }
 
   get conversationIds(): readonly string[] {
@@ -95,24 +148,35 @@ export class ChatPoller {
 
   stop(): void {
     this.stopped = true;
-    this.wakeNow = false;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = undefined;
+    this.wakeQueued = false;
+    this.kickDuringWake = false;
+    this.ignoreKickUntil = 0;
+    this.clearTimer();
   }
 
   /**
-   * Run the next poll as soon as the current one finishes. Used after a VM
-   * resume or a dead Activity socket, when the scheduled timer may be stale.
+   * One history read per tracked encrypted group, right away.
+   * Used after a VM resume or a dead Activity socket. A 429/402 backoff still
+   * in effect skips the read and does not add a retry. A timer that already
+   * fired late for this resume is the catch-up; this does not read again.
    */
-  kick(): void {
-    if (this.stopped) return;
-    this.wakeNow = true;
-    if (this.ticking) return;
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = undefined;
+  kick(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.wakeInFlight) {
+      this.kickDuringWake = true;
+      return Promise.resolve();
     }
-    void this.tick();
+    if (this.clock() < this.ignoreKickUntil) return Promise.resolve();
+    if (this.backoffActive()) {
+      log.info(formatWakeCatchupLog(EMPTY_WAKE, { backoff: true }));
+      return Promise.resolve();
+    }
+    if (this.ticking) {
+      this.wakeQueued = true;
+      return Promise.resolve();
+    }
+    this.clearTimer();
+    return this.tick({ wake: true });
   }
 
   /**
@@ -132,13 +196,18 @@ export class ChatPoller {
     );
   }
 
-  async tick(): Promise<void> {
+  async tick(options?: { wake?: boolean }): Promise<void> {
     if (this.stopped || this.ticking) return;
+    const dueAt = this.armedAt;
+    this.armedAt = undefined;
+    const late = dueAt !== undefined && this.clock() - dueAt > HANG_WALL_JUMP_MS;
+    const wake = options?.wake === true || late;
     this.ticking = true;
+    this.wakeInFlight = wake;
     let delayMs = this.intervalMs;
     let reason: "backoff" | "idle" | undefined;
     try {
-      const result = await this.pollOnce();
+      const result = await this.pollOnce({ wake });
       await drainEngineLlmRetries(this.engine);
       if (result.sawNew || result.seeded) {
         this.idleMs = this.intervalMs;
@@ -147,47 +216,63 @@ export class ChatPoller {
       }
       delayMs = this.idleMs;
       if (delayMs > this.intervalMs) reason = "idle";
+      this.backoffUntil = 0;
       this.onPipeline?.("ok");
     } catch (error) {
       log.error("Chat poll failed", error);
       this.idleMs = this.intervalMs;
       delayMs = nextPollDelayMs(this.intervalMs, error);
-      if (delayMs > this.intervalMs) reason = "backoff";
+      if (delayMs > this.intervalMs) {
+        reason = "backoff";
+        this.backoffUntil = this.clock() + delayMs;
+      } else {
+        this.backoffUntil = 0;
+      }
       this.onPipeline?.(
         "degraded",
         reason === "backoff" ? `backoff ${Math.max(1, Math.ceil(delayMs / 1000))}s` : "poll failed",
       );
     } finally {
       this.ticking = false;
+      const sawKick = this.kickDuringWake;
+      this.kickDuringWake = false;
+      this.wakeInFlight = false;
+      if (late && !sawKick) this.ignoreKickUntil = this.clock() + HANG_HEARTBEAT_MS;
+      const queued = this.wakeQueued && reason !== "backoff" && !wake;
+      this.wakeQueued = false;
       if (!this.stopped) {
         if (reason === "backoff") {
           log.warn(`Next Chat poll in ${delayMs}ms (API backoff)`);
         } else if (reason === "idle") {
           log.warn(`Next Chat poll in ${delayMs}ms (idle; no new events)`);
         }
-        const delay = this.wakeNow ? 0 : delayMs;
-        this.wakeNow = false;
-        if (this.timer) clearTimeout(this.timer);
-        this.timer = setTimeout(() => void this.tick(), delay);
+        this.schedule(queued ? 0 : delayMs, queued);
       }
     }
   }
 
-  async pollOnce(): Promise<{ sawNew: boolean; seeded: boolean }> {
-    await this.maybeDiscover();
-    let sawNew = false;
-    let seeded = false;
-    for (const conversationId of this.idsForThisTick()) {
-      try {
-        const outcome = await this.pollConversation(conversationId);
-        if (outcome.sawNew) sawNew = true;
-        if (outcome.seeded) seeded = true;
-      } catch (error) {
-        if (isApiBackoff(error)) throw error;
-        log.error(`Chat poll failed for ${conversationId}`, error);
+  async pollOnce(options?: { wake?: boolean }): Promise<{ sawNew: boolean; seeded: boolean }> {
+    const wake = options?.wake === true;
+    const counts: WakeCatchupCounts = { answered: 0, stale: 0, alreadyHandled: 0 };
+    try {
+      if (!wake) await this.maybeDiscover();
+      let sawNew = false;
+      let seeded = false;
+      const ids = wake ? [...this.ids] : this.idsForThisTick();
+      for (const conversationId of ids) {
+        try {
+          const outcome = await this.pollConversation(conversationId, wake ? counts : undefined);
+          if (outcome.sawNew) sawNew = true;
+          if (outcome.seeded) seeded = true;
+        } catch (error) {
+          if (isApiBackoff(error)) throw error;
+          log.error(`Chat poll failed for ${conversationId}`, error);
+        }
       }
+      return { sawNew, seeded };
+    } finally {
+      if (wake) log.info(formatWakeCatchupLog(counts));
     }
-    return { sawNew, seeded };
   }
 
   private noteConversation(conversationId: string): boolean {
@@ -281,8 +366,27 @@ export class ChatPoller {
     }
   }
 
+  private backoffActive(): boolean {
+    return this.clock() < this.backoffUntil;
+  }
+
+  private clearTimer(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.armedAt = undefined;
+  }
+
+  private schedule(delayMs: number, wake = false): void {
+    this.clearTimer();
+    this.armedAt = this.clock() + delayMs;
+    this.timer = setTimeout(() => {
+      void this.tick(wake ? { wake: true } : undefined);
+    }, delayMs);
+  }
+
   private async pollConversation(
     conversationId: string,
+    wakeCounts?: WakeCatchupCounts,
   ): Promise<{ sawNew: boolean; seeded: boolean }> {
     const key = watermarkKey(conversationId);
     const watermark = this.store.getWatermark(key);
@@ -298,7 +402,24 @@ export class ChatPoller {
     }
     try {
       for (const event of pulled.events) {
-        await this.engine.processEvent(event);
+        if (!wakeCounts) {
+          await this.engine.processEvent(event);
+          continue;
+        }
+        const disposition = wakeCommandDisposition(
+          this.store,
+          event,
+          this.clock(),
+          this.wakeCommandMaxAgeMs,
+        );
+        if (disposition === "stale") {
+          markEventHandled(this.store, event);
+          wakeCounts.stale += 1;
+          continue;
+        }
+        const actions = await this.engine.processEvent(event);
+        if (disposition === "handled") wakeCounts.alreadyHandled += 1;
+        else if (disposition === "fresh" && actions.replies.length > 0) wakeCounts.answered += 1;
       }
       return { sawNew: pulled.events.length > 0, seeded: false };
     } finally {
@@ -322,6 +443,49 @@ export function nextChatIdleDelayMs(currentMs: number, intervalMs: number, idleM
 }
 
 export { watermarkKey } from "./ids.js";
+
+function isAnswerableCommand(text: string | undefined): boolean {
+  return parseCommand(text) !== undefined || parseUnknownBang(text) !== undefined;
+}
+
+function commandIsStale(event: Pick<DmEvent, "text" | "createdAt">, nowMs: number, maxAgeMs: number): boolean {
+  if (!isAnswerableCommand(event.text)) return false;
+  if (!event.createdAt) return false;
+  const at = Date.parse(event.createdAt);
+  if (!Number.isFinite(at)) return false;
+  return nowMs - at > maxAgeMs;
+}
+
+/** Same keys as `ModerationEngine.alreadyHandled`: event id, seq key, aliases, leave key, sequence index. */
+function eventAlreadyHandled(store: Store, event: DmEvent): boolean {
+  const keys = eventReplayKeys(event);
+  const leaveKey = event.eventType === "ParticipantsLeave" ? leaveReplayKey(event) : undefined;
+  return (
+    keys.some((key) => store.hasProcessed(key)) ||
+    (leaveKey ? store.hasProcessed(leaveKey) : false) ||
+    (event.sequenceId
+      ? store.hasProcessedChatSequence(event.conversationId, event.sequenceId, event.id)
+      : false)
+  );
+}
+
+function markEventHandled(store: Store, event: DmEvent): void {
+  for (const key of eventReplayKeys(event)) store.markProcessed(key, event.createdAt);
+  const leaveKey = event.eventType === "ParticipantsLeave" ? leaveReplayKey(event) : undefined;
+  if (leaveKey) store.markProcessed(leaveKey, event.createdAt);
+}
+
+function wakeCommandDisposition(
+  store: Store,
+  event: DmEvent,
+  nowMs: number,
+  maxAgeMs: number,
+): "stale" | "handled" | "fresh" | "other" {
+  const command = isAnswerableCommand(event.text);
+  if (eventAlreadyHandled(store, event)) return command ? "handled" : "other";
+  if (commandIsStale(event, nowMs, maxAgeMs)) return "stale";
+  return command ? "fresh" : "other";
+}
 
 function isApiBackoff(error: unknown): boolean {
   const status = errorStatus(error);

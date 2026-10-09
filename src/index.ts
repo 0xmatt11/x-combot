@@ -343,6 +343,10 @@ async function main(): Promise<void> {
             ? CHAT_DISCOVERY_INTERVAL_MS
             : CHAT_DISCOVERY_INTERVAL_WITHOUT_ACTIVITY_MS,
           onPipeline: (state, detail) => health.noteChat(state, detail),
+          wakeCommandMaxAgeMs:
+            env.chatWakeCommandMaxAgeMinutes === undefined
+              ? undefined
+              : env.chatWakeCommandMaxAgeMinutes * 60_000,
         },
       )
     : undefined;

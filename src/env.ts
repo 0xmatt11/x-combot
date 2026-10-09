@@ -58,6 +58,20 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
+/** Whole minutes. Unset stays unset so the poller can default to 30. `0` is valid. */
+function optionalWakeCommandMaxAgeMinutes(name: string): number | undefined {
+  const value = optional(name);
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be a whole number of minutes >= 0`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${name} must be a whole number of minutes >= 0`);
+  }
+  return parsed;
+}
+
 /** Whole minutes, 1 through 7 days. Unset stays unset so the caller can default. */
 const MAX_PUBLIC_KEY_SUMMARY_MINUTES = 7 * 24 * 60;
 
@@ -322,6 +336,11 @@ export interface Env {
   /** When unset, classic DM polling is skipped while encrypted Chat is active. */
   dmPoll?: boolean;
   chatPollIdleMaxMs?: number;
+  /**
+   * Wake catch-up answers commands newer than this many minutes.
+   * Unset is 30. Older commands are marked handled and not answered.
+   */
+  chatWakeCommandMaxAgeMinutes?: number;
   activityEnabled?: boolean;
   activityTransport?: "stream" | "webhook" | "both";
   activitySubscribe?: boolean;
@@ -470,6 +489,9 @@ export function loadEnv(requireOwner = true): Env {
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,
     dmPoll: optionalBool("DM_POLL"),
     chatPollIdleMaxMs: optionalNumber("CHAT_POLL_IDLE_MAX_MS"),
+    chatWakeCommandMaxAgeMinutes: optionalWakeCommandMaxAgeMinutes(
+      "CHAT_WAKE_COMMAND_MAX_AGE_MINUTES",
+    ),
     activityEnabled: optionalBool("ACTIVITY_ENABLED"),
     activityTransport: optionalActivityTransport("ACTIVITY_TRANSPORT"),
     activitySubscribe: optionalBool("ACTIVITY_SUBSCRIBE"),
