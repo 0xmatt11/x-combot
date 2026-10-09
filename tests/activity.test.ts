@@ -432,7 +432,58 @@ describe("Activity intake", () => {
     expect(parseActivityChat(seen[1])).toBeUndefined();
   });
 
-  it("keeps a summarize when Chat history is rate-limited instead of dropping it", async () => {
+  it("answers a summarize from local history without waiting on a rate-limited events list", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(GROUP);
+    const cipher = new FakeCipher();
+    cipher.events.set("b64-sum", {
+      type: "message",
+      sequenceId: "55",
+      senderId: "alice-1",
+      content: { contentType: "text", text: "!summarize" },
+    });
+    const http = new FakeHttp();
+    let historyReads = 0;
+    http.getConversationEvents = async () => {
+      historyReads += 1;
+      const error = new Error("Rate limited; retry after 40ms") as Error & {
+        status: number;
+        retryAfterMs: number;
+      };
+      error.status = 429;
+      error.retryAfterMs = 40;
+      throw error;
+    };
+    const slept: number[] = [];
+    const llm = new MockLlmClient("local summary");
+    const service = new ChatService(http, cipher, store);
+    const engine = new ModerationEngine(
+      store,
+      new RoutedXClient(new MockXClient({ id: "bot-1", username: "miladybot" }), service),
+      runtime(),
+      llm,
+      {
+        sleep: async (ms) => {
+          slept.push(ms);
+        },
+      },
+    );
+    const intake = new ChatActivityIntake(service, engine, chatListenPolicy({ allowIds: [GROUP] }));
+
+    await expect(
+      intake.handle(envelope({ encoded_event: "b64-sum", id: "evt-sum" })),
+    ).resolves.toBeUndefined();
+    await engine.waitForBackgroundWork();
+
+    expect(historyReads).toBe(0);
+    expect(slept).toEqual([]);
+    expect(llm.calls.length).toBeGreaterThan(0);
+    expect(cipher.texts.some((text) => text.includes("local summary"))).toBe(true);
+    expect(store.listLlmRetries()).toHaveLength(0);
+  });
+
+  it("keeps a summarize when local history is off and the events list is rate-limited", async () => {
     const store = new Store(":memory:");
     stores.push(store);
     store.authorizeChat(GROUP);
@@ -462,6 +513,7 @@ describe("Activity intake", () => {
       runtime(),
       llm,
       {
+        chatHistory: { enabled: false },
         sleep: async (ms) => {
           slept.push(ms);
         },

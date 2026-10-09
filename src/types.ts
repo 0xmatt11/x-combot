@@ -225,7 +225,14 @@ export type DmEventType =
   | "MessageCreate"
   | "ParticipantsJoin"
   | "ParticipantsLeave"
-  | "ReactionAdd";
+  | "ReactionAdd"
+  /** Encrypted edit of an existing message. Not a command. */
+  | "MessageEdit"
+  /** Delete delivered by X (author or moderator). Not a command. */
+  | "MessageDelete";
+
+/** How a membership event is stored. `add` is a member add; `join` is group create. */
+export type MembershipKind = "join" | "leave" | "add";
 
 /**
  * Who a Chat (or future DM) message is replying to.
@@ -302,6 +309,23 @@ export interface DmEvent {
    * `processed_events` records these so a later catch-up does not run the command again.
    */
   aliasIds?: string[];
+  /**
+   * Short media marker (`image`, `video`, `audio`, `gif`, `file`, `media`).
+   * Not the bytes. Absent when the message has no media attachment.
+   */
+  media?: string;
+  /** `ParticipantsJoin` / `ParticipantsLeave`: add, join, or leave. */
+  membershipKind?: MembershipKind;
+  /**
+   * MessageEdit / MessageDelete target. Not copied onto `sequenceId` or
+   * `aliasIds`, so claiming the edit does not mark the original as handled.
+   */
+  targetSequenceId?: string;
+  targetEventId?: string;
+  /** Every sequence id named on a MessageDelete. */
+  targetSequenceIds?: string[];
+  /** Every message id named on a MessageDelete. */
+  targetEventIds?: string[];
 }
 
 /** Extra context for delete. Classic DM ignores it; Chat uses the sequence id. */

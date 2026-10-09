@@ -45,6 +45,7 @@ import {
   requireActivityAppBearer,
 } from "./chat/activity-subscribe.js";
 import { startActivityWebhook, type ActivityWebhook } from "./chat/activity-webhook.js";
+import { CHAT_HISTORY_PRUNE_INTERVAL_MS } from "./bot/chat-history.js";
 import { CHAT_WATERMARK_PREFIX, isChatGroupId } from "./chat/ids.js";
 import { resolveChatListen, type ChatListenPolicy } from "./chat/listen.js";
 import {
@@ -277,8 +278,28 @@ async function main(): Promise<void> {
         pendingDir: defaultFeatureRequestPendingDir(env.databasePath),
       },
       recentMessagesPath: env.chatRecentMessagesPath,
+      chatHistory: {
+        enabled: env.chatHistoryEnabled,
+        maxMessages: env.chatHistoryMaxMessages,
+        maxDays: env.chatHistoryMaxDays,
+        includeDeleted: env.chatHistoryIncludeDeleted,
+      },
     },
   );
+  if (env.chatHistoryEnabled) {
+    log.info(
+      `Chat history is on in ${env.databasePath} (plaintext, mode 0600). Retention ${env.chatHistoryMaxMessages} messages or ${env.chatHistoryMaxDays} days per conversation. Deleted rows stay in LLM context: ${env.chatHistoryIncludeDeleted}. Backfill is one events page after each successful Chat poll.`,
+    );
+  } else {
+    log.info("Chat history is off (CHAT_HISTORY_ENABLED=false). !ask reads X history directly.");
+  }
+  const historyPrune = env.chatHistoryEnabled
+    ? setInterval(() => {
+        engine.pruneChatHistory();
+        store.restrictFilePermissions();
+      }, CHAT_HISTORY_PRUNE_INTERVAL_MS)
+    : undefined;
+  historyPrune?.unref();
   log.info(
     `!purge keeps recent message ids in ${env.chatRecentMessagesPath} (no message text).`,
   );
@@ -348,6 +369,7 @@ async function main(): Promise<void> {
               ? undefined
               : env.chatWakeCommandMaxAgeMinutes * 60_000,
           wakeMaxGroups: env.chatWakeMaxGroups,
+          historyBackfill: env.chatHistoryEnabled,
         },
       )
     : undefined;
@@ -413,6 +435,7 @@ async function main(): Promise<void> {
   const shutdown = () => {
     log.info("Shutting down");
     hangWatch.stop();
+    if (historyPrune) clearInterval(historyPrune);
     llmRetryDrain.stop();
     poller.stop();
     chatPoller?.stop();

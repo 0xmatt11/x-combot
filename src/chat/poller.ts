@@ -78,6 +78,11 @@ export interface ChatPollerOptions {
    * Unset is 1. Groups past the cap stay on the normal poll rotation.
    */
   wakeMaxGroups?: number;
+  /**
+   * After a successful poll or wake catch-up, fetch one older history page.
+   * Off in tests. Production turns it on with CHAT_HISTORY_ENABLED.
+   */
+  historyBackfill?: boolean;
 }
 
 export class ChatPoller {
@@ -116,6 +121,7 @@ export class ChatPoller {
   private readonly clock: () => number;
   /** Latest Activity arrival or pulled event time, in epoch ms. Not persisted. */
   private readonly lastActiveAt = new Map<string, number>();
+  private readonly historyBackfill: boolean;
 
   constructor(
     private readonly chat: ChatService,
@@ -140,6 +146,10 @@ export class ChatPoller {
       maxAge === undefined ? DEFAULT_CHAT_WAKE_COMMAND_MAX_AGE_MS : maxAge;
     this.wakeMaxGroups = options.wakeMaxGroups ?? DEFAULT_CHAT_WAKE_MAX_GROUPS;
     this.clock = options.now ?? (() => Date.now());
+    this.historyBackfill = options.historyBackfill === true;
+    if (this.historyBackfill) {
+      for (const id of this.ids) this.engine.noteChatForHistory(id);
+    }
   }
 
   get conversationIds(): readonly string[] {
@@ -235,6 +245,12 @@ export class ChatPoller {
     try {
       const result = await this.pollOnce({ wake });
       await drainEngineLlmRetries(this.engine);
+      // Wake catch-up uses the same history route. Backfill waits until that
+      // read has succeeded, and a kick already queued for this tick goes first.
+      const deferForWake = this.wakeQueued && !wake;
+      if (this.historyBackfill && !deferForWake && !this.backoffActive()) {
+        await this.engine.backfillChatHistory(this.clock());
+      }
       if (result.sawNew || result.seeded) {
         this.idleMs = this.intervalMs;
       } else {
@@ -319,6 +335,7 @@ export class ChatPoller {
     if (this.ids.has(conversationId)) return false;
     this.ids.add(conversationId);
     this.pending.add(conversationId);
+    if (this.historyBackfill) this.engine.noteChatForHistory(conversationId);
     log.info(
       `Tracking encrypted Chat group ${conversationId}. First sight seeds a watermark and does not replay older messages. Commands stay off until the owner sends !auth, unless this group was already authorized.`,
     );

@@ -205,6 +205,9 @@ llm:
     - "@bot"
   context_mode: recent
   none_recent_messages: 3
+  # Classic DMs, and encrypted groups when CHAT_HISTORY_ENABLED=false.
+  # With local history on, !ask recent uses 100 unless this conversation
+  # set llm_recent_messages.
   recent_messages: 20
   full_max_messages: 200
   full_max_chars: 24000
