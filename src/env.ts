@@ -58,6 +58,19 @@ function optionalNumber(name: string): number | undefined {
   return parsed;
 }
 
+/** Whole minutes, 1 through 7 days. Unset stays unset so the caller can default. */
+const MAX_PUBLIC_KEY_SUMMARY_MINUTES = 7 * 24 * 60;
+
+function optionalPublicKeySummaryMinutes(name: string): number | undefined {
+  const value = optional(name);
+  if (value === undefined) return undefined;
+  const message = `${name} must be a whole number of minutes from 1 to ${MAX_PUBLIC_KEY_SUMMARY_MINUTES}`;
+  if (!/^[1-9]\d*$/.test(value)) throw new Error(message);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > MAX_PUBLIC_KEY_SUMMARY_MINUTES) throw new Error(message);
+  return parsed;
+}
+
 function optionalAdultImageProvider(name: string): AdultImageProviderName | undefined {
   const value = optional(name);
   if (!value) return undefined;
@@ -294,6 +307,11 @@ export interface Env {
    */
   chatRemoteKeysPath: string;
   /**
+   * Minutes between public_keys fetch summaries. Unset is 60.
+   * One INFO line per window, and only when that window fetched at least once.
+   */
+  chatPublicKeysSummaryMinutes?: number;
+  /**
    * Recent message ids for `!purge` (mode 0600). Not message text.
    * Default sits beside `chatKeysPath`.
    */
@@ -443,6 +461,7 @@ export function loadEnv(requireOwner = true): Env {
       optional("CHAT_REMOTE_KEYS_PATH") ??
         remoteKeyCachePathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
     ),
+    chatPublicKeysSummaryMinutes: optionalPublicKeySummaryMinutes("CHAT_PUBLIC_KEYS_SUMMARY_MINUTES"),
     chatRecentMessagesPath: path.resolve(
       optional("CHAT_RECENT_MESSAGES_PATH") ??
         recentMessagesPathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),

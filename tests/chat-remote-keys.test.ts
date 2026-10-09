@@ -17,7 +17,8 @@ import {
   saveRemoteKeyCache,
 } from "../src/chat/remote-key-cache.js";
 import { missingKeyFetchCooldownMs } from "../src/chat/conversation-keys.js";
-import { ChatService, type ChatServiceOptions } from "../src/chat/service.js";
+import { ChatService, DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS, type ChatServiceOptions } from "../src/chat/service.js";
+import { loadEnv } from "../src/env.js";
 import type { RemotePublicKey } from "../src/chat/wire.js";
 import { Store } from "../src/store.js";
 
@@ -1196,5 +1197,240 @@ describe("multi-version conversation keys", () => {
     expect(loadRemoteKeyCache(file).missingKeyFetches.get(GROUP)?.get("1791414259993")?.outcome).toBe(
       "not_found",
     );
+  });
+});
+
+function infoLines(spy: { mock: { calls: unknown[][] } }): string[] {
+  return spy.mock.calls.map((call) => String(call[0]));
+}
+
+function summaryLines(spy: { mock: { calls: unknown[][] } }): string[] {
+  return infoLines(spy).filter((line) => /public_keys: \d+ ok/.test(line));
+}
+
+describe("public_keys fetch summary", () => {
+  it("seeds the last success from the newest cached fetched_at and does not count cache hits", async () => {
+    const file = cachePath();
+    const newer = Date.parse("2026-10-08T20:22:40.000Z");
+    const older = newer - 60 * 60 * 1000;
+    const secret = "realm-token-do-not-log";
+    saveRemoteKeyCache(file, {
+      users: new Map([
+        [
+          "user-older",
+          { fetchedAt: older, keys: [aliceKey({ userId: "user-older", publicKey: secret })], signing: [] },
+        ],
+        [
+          "user-newer",
+          {
+            fetchedAt: newer,
+            keys: [aliceKey({ userId: "user-newer", publicKey: "NEWER_KEY_MATERIAL" })],
+            signing: [],
+          },
+        ],
+      ]),
+      conversations: new Map(),
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const http = new FakeHttp();
+      http.memberIds = ["user-older", "user-newer"];
+      http.pages.push({ data: [{ id: "evt-1", sender_id: "user-newer", encoded_event: "blob" }] });
+      http.getUserPublicKeys = async () => {
+        throw new Error("public_keys must not be called");
+      };
+      const chat = service(http, new FakeCipher(), file, { now: () => newer + 60_000 });
+      expect(chat.publicKeyHealth()).toMatchObject({
+        cachedUsers: 2,
+        lastSuccessAtMs: newer,
+        fetchesOk: 0,
+        fetchesFailed: 0,
+      });
+      const startup = infoLines(info).find((line) => line.includes("public_keys cache:"));
+      expect(startup).toContain("public_keys cache: 2 users, newest fetched_at 2026-10-08T20:22Z");
+      expect(startup).not.toContain(secret);
+      expect(startup).not.toContain("NEWER_KEY_MATERIAL");
+      expect(startup).not.toContain("user-older");
+      expect(startup).not.toContain("user-newer");
+      await chat.listHistory({ conversationId: GROUP });
+      expect(chat.publicKeyHealth().fetchesOk).toBe(0);
+      expect(chat.publicKeyHealth().fetchesFailed).toBe(0);
+      expect(chat.publicKeyHealth().lastSuccessAtMs).toBe(newer);
+      expect(summaryLines(info)).toEqual([]);
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("logs an empty cache and a one-user cache without key material", () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      service(new FakeHttp(), new FakeCipher(), cachePath());
+      expect(infoLines(info).some((line) => line.includes("public_keys cache: 0 users, newest fetched_at none"))).toBe(
+        true,
+      );
+
+      const file = cachePath();
+      const fetchedAt = Date.parse("2026-10-08T20:22:00.000Z");
+      saveRemoteKeyCache(file, {
+        users: new Map([
+          ["alice-1", { fetchedAt, keys: [aliceKey({ publicKey: "SOLO_KEY_MATERIAL" })], signing: [] }],
+        ]),
+        conversations: new Map(),
+      });
+      info.mockClear();
+      service(new FakeHttp(), new FakeCipher(), file);
+      const startup = infoLines(info).find((line) => line.includes("public_keys cache:"));
+      expect(startup).toContain("public_keys cache: 1 user, newest fetched_at 2026-10-08T20:22Z");
+      expect(startup).not.toContain("SOLO_KEY_MATERIAL");
+      expect(startup).not.toContain("alice-1");
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("counts a failed fetch once and does not count a backoff skip", async () => {
+    const file = cachePath();
+    const fetchedAt = Date.parse("2026-10-08T20:22:00.000Z");
+    saveRemoteKeyCache(file, {
+      users: new Map([["alice-1", { fetchedAt, keys: [aliceKey()], signing: [] }]]),
+      conversations: new Map(),
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const http = new FakeHttp();
+      http.memberIds = ["alice-1", "bob-2"];
+      http.keyError = Object.assign(new Error("Rate limited secret-key-material"), {
+        status: 429,
+        retryAfterMs: 30_000,
+      });
+      http.pages.push({ data: [{ id: "evt-1", sender_id: "alice-1", encoded_event: "blob" }] });
+      const chat = service(http, new FakeCipher(), file, {
+        now: () => fetchedAt + 10_000,
+        remoteKeyTtlMs: 0,
+      });
+      await expect(chat.listHistory({ conversationId: GROUP })).rejects.toThrow(/backoff/);
+      expect(http.keyGets).toEqual(["alice-1"]);
+      expect(chat.publicKeyHealth()).toMatchObject({
+        fetchesOk: 0,
+        fetchesFailed: 1,
+        lastSuccessAtMs: fetchedAt,
+        cachedUsers: 1,
+      });
+      const logged = infoLines(info).filter((line) => line.includes("public_keys")).join("\n");
+      expect(logged).not.toContain("secret-key-material");
+      expect(logged).not.toContain("alice-1");
+      expect(logged).not.toContain("bob-2");
+      expect(summaryLines(info)).toEqual([]);
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("logs one summary for many users, then stays quiet when the next window has no fetch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2026-10-08T20:22:00.000Z"));
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const http = new FakeHttp();
+      http.memberIds = ["alice-1", "bob-2"];
+      http.keysByUser.set("alice-1", [aliceKey({ juiceboxConfig: { token: "realm-token-do-not-log" } })]);
+      http.keysByUser.set("bob-2", [aliceKey({ userId: "bob-2", publicKey: "BOB_SECRET_KEY_MATERIAL" })]);
+      const cipher = new FakeCipher();
+      cipher.events.set("blob", { type: "message", content: { text: "hi" } });
+      const chat = service(http, cipher, undefined, { now: () => Date.now() });
+      await chat.listHistory({ conversationId: GROUP });
+      await chat.listHistory({ conversationId: GROUP });
+      expect(http.keyGets).toEqual(["alice-1", "bob-2"]);
+      expect(chat.publicKeyHealth()).toMatchObject({
+        fetchesOk: 2,
+        fetchesFailed: 0,
+        lastSuccessAtMs: Date.parse("2026-10-08T20:22:00.000Z"),
+        cachedUsers: 2,
+      });
+      expect(summaryLines(info)).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS - 1);
+      expect(summaryLines(info)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(summaryLines(info)).toHaveLength(1);
+      const line = summaryLines(info)[0] ?? "";
+      expect(line).toContain(
+        "public_keys: 2 ok, 0 failed in the last 60m; last success 2026-10-08T20:22Z; 2 users cached",
+      );
+      expect(line).not.toContain("alice-1");
+      expect(line).not.toContain("bob-2");
+      expect(line).not.toContain("BOB_SECRET_KEY_MATERIAL");
+      expect(line).not.toContain("ALICESPKI");
+      expect(line).not.toContain("realm-token-do-not-log");
+      expect(line).not.toContain("juicebox");
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS);
+      expect(summaryLines(info)).toHaveLength(1);
+      expect(chat.publicKeyHealth().fetchesOk).toBe(2);
+      expect(chat.publicKeyHealth().fetchesFailed).toBe(0);
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses a custom summary interval and reports failures without a success", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2026-10-08T18:00:00.000Z"));
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const interval = 15 * 60 * 1000;
+      const http = new FakeHttp();
+      http.pages.push({ data: [] });
+      http.keyError = new Error("nope alice-1 secret-key-material");
+      const chat = service(http, new FakeCipher(), undefined, {
+        now: () => Date.now(),
+        publicKeySummaryIntervalMs: interval,
+      });
+      await chat.listHistory({ conversationId: GROUP });
+      expect(chat.publicKeyHealth()).toMatchObject({ fetchesOk: 0, fetchesFailed: 1, cachedUsers: 0 });
+      expect(chat.publicKeyHealth().lastSuccessAtMs).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(interval - 1);
+      expect(summaryLines(info)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      const line = summaryLines(info)[0] ?? "";
+      expect(line).toContain("public_keys: 0 ok, 1 failed in the last 15m; no success yet; 0 users cached");
+      expect(line).not.toContain("alice-1");
+      expect(line).not.toContain("secret-key-material");
+    } finally {
+      info.mockRestore();
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads CHAT_PUBLIC_KEYS_SUMMARY_MINUTES and rejects values outside 1 to 10080", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    const previous = process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES;
+    try {
+      delete process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES;
+      expect(loadEnv(true).chatPublicKeysSummaryMinutes).toBeUndefined();
+      process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES = "15";
+      expect(loadEnv(true).chatPublicKeysSummaryMinutes).toBe(15);
+      process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES = "10080";
+      expect(loadEnv(true).chatPublicKeysSummaryMinutes).toBe(10080);
+      for (const bad of ["0", "-1", "15.5", "10081", "hourly"]) {
+        process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES = bad;
+        expect(() => loadEnv(true)).toThrow(/CHAT_PUBLIC_KEYS_SUMMARY_MINUTES/);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES;
+      else process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES = previous;
+    }
   });
 });

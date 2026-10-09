@@ -38,6 +38,7 @@ import {
   DECRYPT_KEY_REFRESH_MIN_MS,
   EMPTY_REMOTE_PUBLIC_KEY_TTL_MS,
   REMOTE_PUBLIC_KEY_TTL_MS,
+  formatPublicKeyFetchedAt,
   loadRemoteKeyCache,
   saveRemoteKeyCache,
   type CachedConversationKey,
@@ -54,6 +55,11 @@ import {
 } from "./wire.js";
 
 const MAX_CATCHUP_PAGES = 4;
+/** One INFO summary of public_keys fetches. Not one line per user. */
+export const DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS = 60 * 60 * 1000;
+const MIN_PUBLIC_KEY_SUMMARY_INTERVAL_MS = 60 * 1000;
+/** setInterval delays above this are treated as 1ms by Node. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /** Key-change blobs kept for a later decrypt. This is not an HTTP retry loop. */
 const MAX_PENDING_KEY_BLOBS = 80;
 
@@ -119,6 +125,11 @@ export interface ChatServiceOptions {
    * Default is {@link MISSING_KEY_VERSION_ATTEMPTS}.
    */
   missingKeyAttempts?: number;
+  /**
+   * How often to log one public_keys summary. Default is 60 minutes.
+   * The timer is unref'd so a short script is not held open.
+   */
+  publicKeySummaryIntervalMs?: number;
 }
 
 interface DecryptBatch {
@@ -180,6 +191,21 @@ export class ChatService {
   private readonly missingKeyFetches = new Map<string, Map<string, MissingKeyFetchRecord>>();
   /** After public_keys 429/402, skip further fetches until this time. */
   private publicKeyBlockedUntil = 0;
+  /**
+   * Last successful public_keys GET. Seeded from the newest cached `fetched_at`
+   * so a restart does not look like the route has been idle.
+   */
+  private lastPublicKeySuccessAt?: number;
+  /** Successful public_keys GETs since this process started. Cache hits are not included. */
+  private publicKeyFetchesOk = 0;
+  /** Failed public_keys GETs since this process started. A backoff skip is not a fetch. */
+  private publicKeyFetchesFailed = 0;
+  /** Fetches since the last summary. Reset when that line is logged. */
+  private publicKeyWindowOk = 0;
+  private publicKeyWindowFailed = 0;
+  /** Earliest `now()` that may log the next summary. */
+  private nextPublicKeySummaryAt = 0;
+  private readonly publicKeySummaryIntervalMs: number;
   private readonly remoteKeyCachePath?: string;
   private readonly now: () => number;
   private readonly remoteKeyTtlMs: number;
@@ -197,6 +223,9 @@ export class ChatService {
     signingKeys: number;
     conversationKeys: number;
     backoffMs: number;
+    lastSuccessAtMs?: number;
+    fetchesOk: number;
+    fetchesFailed: number;
   } {
     let signingKeys = 0;
     for (const entries of this.signingByUser.values()) signingKeys += entries.length;
@@ -207,6 +236,9 @@ export class ChatService {
       signingKeys,
       conversationKeys,
       backoffMs: Math.max(0, this.publicKeyBlockedUntil - nowMs),
+      lastSuccessAtMs: this.lastPublicKeySuccessAt,
+      fetchesOk: this.publicKeyFetchesOk,
+      fetchesFailed: this.publicKeyFetchesFailed,
     };
   }
 
@@ -226,7 +258,10 @@ export class ChatService {
       typeof attempts === "number" && Number.isFinite(attempts) && attempts >= 1
         ? Math.floor(attempts)
         : MISSING_KEY_VERSION_ATTEMPTS;
+    this.publicKeySummaryIntervalMs = resolvePublicKeySummaryIntervalMs(options?.publicKeySummaryIntervalMs);
+    this.nextPublicKeySummaryAt = this.now() + this.publicKeySummaryIntervalMs;
     if (this.remoteKeyCachePath) this.hydrateRemoteKeyCache();
+    this.armPublicKeySummary();
   }
 
   /**
@@ -1096,9 +1131,11 @@ export class ChatService {
     }
     try {
       const keys = await this.http.getUserPublicKeys(userId);
+      this.recordPublicKeyFetch(true);
       this.rememberRemoteKeys(userId, keys);
       return keys;
     } catch (error) {
+      this.recordPublicKeyFetch(false);
       const wait = rateLimitWaitMs(error);
       if (wait !== undefined) this.publicKeyBlockedUntil = this.now() + wait;
       if (cached && (!refresh || cached.length > 0)) {
@@ -1167,6 +1204,75 @@ export class ChatService {
     return entries;
   }
 
+  /**
+   * Count one real `GET /2/users/{id}/public_keys`. Cache hits and backoff
+   * skips never get here. The summary names counts and a timestamp only.
+   */
+  private recordPublicKeyFetch(ok: boolean): void {
+    if (ok) {
+      this.publicKeyFetchesOk += 1;
+      this.publicKeyWindowOk += 1;
+      this.lastPublicKeySuccessAt = this.now();
+    } else {
+      this.publicKeyFetchesFailed += 1;
+      this.publicKeyWindowFailed += 1;
+    }
+    this.flushPublicKeySummary();
+  }
+
+  /** Log the open window once the interval has elapsed and it contained a fetch. */
+  private flushPublicKeySummary(): void {
+    const interval = this.publicKeySummaryIntervalMs;
+    if (!(interval > 0)) return;
+    const now = this.now();
+    if (now < this.nextPublicKeySummaryAt) return;
+    const ok = this.publicKeyWindowOk;
+    const failed = this.publicKeyWindowFailed;
+    this.publicKeyWindowOk = 0;
+    this.publicKeyWindowFailed = 0;
+    const overdue = now - this.nextPublicKeySummaryAt;
+    const steps = Math.floor(overdue / interval) + 1;
+    this.nextPublicKeySummaryAt += steps * interval;
+    if (ok + failed <= 0) return;
+    const minutes = Math.max(1, Math.round(interval / 60_000));
+    const success =
+      this.lastPublicKeySuccessAt === undefined
+        ? "no success yet"
+        : `last success ${formatPublicKeyFetchedAt(this.lastPublicKeySuccessAt)}`;
+    const cached = this.remoteByUser.size;
+    const users = cached === 1 ? "1 user cached" : `${cached} users cached`;
+    log.info(`public_keys: ${ok} ok, ${failed} failed in the last ${minutes}m; ${success}; ${users}`);
+  }
+
+  private armPublicKeySummary(): void {
+    const delay = Math.min(Math.floor(this.publicKeySummaryIntervalMs), MAX_TIMER_DELAY_MS);
+    const timer = setInterval(() => {
+      this.flushPublicKeySummary();
+    }, delay);
+    if (typeof timer === "object" && timer !== null && "unref" in timer) {
+      const unref = (timer as { unref?: unknown }).unref;
+      if (typeof unref === "function") unref.call(timer);
+    }
+  }
+
+  private seedLastPublicKeySuccess(users: Iterable<CachedRemoteUser>): void {
+    let newest: number | undefined;
+    for (const user of users) {
+      if (!Number.isFinite(user.fetchedAt) || user.fetchedAt < 0) continue;
+      if (newest === undefined || user.fetchedAt > newest) newest = user.fetchedAt;
+    }
+    if (newest !== undefined) this.lastPublicKeySuccessAt = newest;
+  }
+
+  private logPublicKeyCacheStartup(userCount: number): void {
+    const when =
+      this.lastPublicKeySuccessAt === undefined
+        ? "none"
+        : formatPublicKeyFetchedAt(this.lastPublicKeySuccessAt);
+    const users = userCount === 1 ? "1 user" : `${userCount} users`;
+    log.info(`public_keys cache: ${users}, newest fetched_at ${when}`);
+  }
+
   private hydrateRemoteKeyCache(): void {
     if (!this.remoteKeyCachePath) return;
     const loaded = loadRemoteKeyCache(this.remoteKeyCachePath);
@@ -1208,6 +1314,8 @@ export class ChatService {
       if (kept.size > 0) this.missingKeyFetches.set(conversationId, kept);
     }
     if (this.signingByUser.size > 0) this.cipher.setSigningKeys(this.currentSigningKeys());
+    this.seedLastPublicKeySuccess(loaded.users.values());
+    this.logPublicKeyCacheStartup(loaded.users.size);
     if (!loaded.invalid && (loaded.users.size > 0 || loaded.conversations.size > 0 || fetchRecords > 0)) {
       let versions = 0;
       for (const saved of loaded.conversations.values()) versions += Math.max(saved.keys.length, 1);
@@ -1403,6 +1511,12 @@ function nextReplyQuote(quote: ReplyQuote): ReplyQuote | undefined {
   if (quote === "bounded") return "preview";
   if (quote === "preview") return "none";
   return undefined;
+}
+
+function resolvePublicKeySummaryIntervalMs(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS;
+  if (value < MIN_PUBLIC_KEY_SUMMARY_INTERVAL_MS) return MIN_PUBLIC_KEY_SUMMARY_INTERVAL_MS;
+  return value;
 }
 
 function rateLimitWaitMs(error: unknown): number | undefined {

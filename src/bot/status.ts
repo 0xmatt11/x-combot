@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { formatPublicKeyFetchedAt } from "../chat/remote-key-cache.js";
 import {
   imaginePublicPoolFor,
   imaginePublicUrlsFor,
@@ -20,6 +21,16 @@ export interface StatusKeyHealth {
   conversationKeys: number;
   /** Milliseconds left on a 429/402 backoff. 0 when fetches are allowed. */
   backoffMs: number;
+  /**
+   * Epoch ms of the last successful public_keys GET.
+   * After a restart this is the newest `fetched_at` loaded from disk.
+   * Absent when this process has not seen a success and the cache had none.
+   */
+  lastSuccessAtMs?: number;
+  /** Successful public_keys GETs since process start. Cache hits are not included. */
+  fetchesOk?: number;
+  /** Failed public_keys GETs since process start. A backoff skip is not a fetch. */
+  fetchesFailed?: number;
 }
 
 export type PipelinePhase = "off" | "starting" | "ok" | "degraded";
@@ -221,10 +232,36 @@ function keysLine(keys: StatusKeyHealth | undefined): string {
   const counts = `${countLabel(keys.cachedUsers, "user", "users")} cached, ${countLabel(keys.signingKeys, "signing key", "signing keys")}, ${countLabel(keys.conversationKeys, "chat key", "chat keys")}`;
   if (keys.backoffMs > 0) {
     const sec = Math.max(1, Math.ceil(keys.backoffMs / 1000));
-    return `Keys: BACKOFF ${sec}s — GET /2/users/…/public_keys rate-limited. ${counts}. Decrypt stalls until this clears.`;
+    return withPublicKeyFetchNote(
+      `Keys: BACKOFF ${sec}s — GET /2/users/…/public_keys rate-limited. ${counts}. Decrypt stalls until this clears.`,
+      keys,
+    );
   }
-  if (keys.signingKeys === 0) return `Keys: no signing keys cached (${counts})`;
-  return `Keys: ok — ${counts}`;
+  if (keys.signingKeys === 0) return withPublicKeyFetchNote(`Keys: no signing keys cached (${counts})`, keys);
+  return withPublicKeyFetchNote(`Keys: ok — ${counts}`, keys);
+}
+
+function withPublicKeyFetchNote(sentence: string, keys: StatusKeyHealth): string {
+  const note = publicKeyFetchNote(keys);
+  if (!note) return sentence;
+  const body = sentence.endsWith(".") ? sentence : `${sentence}.`;
+  return `${body}${note}`;
+}
+
+function publicKeyFetchNote(keys: StatusKeyHealth): string {
+  if (keys.lastSuccessAtMs === undefined && keys.fetchesOk === undefined && keys.fetchesFailed === undefined) {
+    return "";
+  }
+  const tally = `${wholeCount(keys.fetchesOk)} ok, ${wholeCount(keys.fetchesFailed)} failed since startup`;
+  if (typeof keys.lastSuccessAtMs === "number" && Number.isFinite(keys.lastSuccessAtMs) && keys.lastSuccessAtMs >= 0) {
+    return ` Last success ${formatPublicKeyFetchedAt(keys.lastSuccessAtMs)} (${tally}).`;
+  }
+  return ` No public_keys success yet (${tally}).`;
+}
+
+function wholeCount(count: number | undefined): number {
+  if (typeof count !== "number" || !Number.isFinite(count)) return 0;
+  return Math.max(0, Math.floor(count));
 }
 
 function togglesLine(snapshot: StatusSnapshot): string {

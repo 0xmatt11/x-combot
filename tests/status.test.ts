@@ -143,6 +143,53 @@ describe("formatStatusReport", () => {
     expect(unloaded).toContain("Keys: n/a (Chat not loaded)");
   });
 
+  it("adds the last public_keys success and since-startup counts to the keys line", () => {
+    const at = Date.parse("2026-10-08T20:22:40.000Z");
+    const healthy = formatStatusReport(
+      snapshot({
+        keys: {
+          cachedUsers: 430,
+          signingKeys: 800,
+          conversationKeys: 12,
+          backoffMs: 0,
+          lastSuccessAtMs: at,
+          fetchesOk: 37,
+          fetchesFailed: 0,
+        },
+      }),
+    );
+    expect(healthy).toContain(
+      "Keys: ok — 430 users cached, 800 signing keys, 12 chat keys. Last success 2026-10-08T20:22Z (37 ok, 0 failed since startup).",
+    );
+
+    const backoff = formatStatusReport(
+      snapshot({
+        keys: {
+          cachedUsers: 3,
+          signingKeys: 8,
+          conversationKeys: 1,
+          backoffMs: 45_000,
+          lastSuccessAtMs: at,
+          fetchesOk: 1,
+          fetchesFailed: 2,
+        },
+      }),
+    );
+    expect(backoff).toContain(
+      "Keys: BACKOFF 45s — GET /2/users/…/public_keys rate-limited. 3 users cached, 8 signing keys, 1 chat key. Decrypt stalls until this clears. Last success 2026-10-08T20:22Z (1 ok, 2 failed since startup).",
+    );
+    expect(backoff).not.toMatch(/bearer|api[_-]?key|sk-|token|secret/i);
+
+    const none = formatStatusReport(
+      snapshot({
+        keys: { cachedUsers: 0, signingKeys: 0, conversationKeys: 0, backoffMs: 0, fetchesOk: 0, fetchesFailed: 2 },
+      }),
+    );
+    expect(none).toContain(
+      "Keys: no signing keys cached (0 users cached, 0 signing keys, 0 chat keys). No public_keys success yet (0 ok, 2 failed since startup).",
+    );
+  });
+
   it("keeps a multiline pipeline detail on one line and hides numeric troll ids", () => {
     const health = new RuntimeHealth();
     health.noteChat("degraded", "backoff 12s\nextra");
