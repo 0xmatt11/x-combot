@@ -828,17 +828,37 @@ Unknown bang commands (`!banana`, `!diediesillygoat`) use a dedicated prompt. Th
 
 | `llm.context_mode` | What is sent | Reads |
 | --- | --- | --- |
-| `none` | The question plus `none_recent_messages` (default 3) | One page if that window is > 0 |
-| `recent` (default) | Last N (`recent_messages`, default 20) | One page, capped at N |
-| `full` / `conversation` | Up to `full_max_messages` / `full_max_chars` | Up to `max_pages` (default 5) × 100 events |
+| `none` | The question plus `none_recent_messages` (default 3) | Local tail when Chat history is on. Otherwise one X page if that window is > 0 |
+| `recent` (default) | Last N. Encrypted groups use 100 unless the conversation set `llm_recent_messages`. Classic DMs and `CHAT_HISTORY_ENABLED=false` use `recent_messages` (default 20) | Local tail. X only when history is off |
+| `full` / `conversation` | Up to `full_max_messages` / `full_max_chars` | Local tail when history is on. Otherwise up to `max_pages` (default 5) × 100 events |
 
-Classic history is `GET /2/dm_conversations/:id/dm_events` (~30 days). `g…` groups decrypt `GET /2/chat/conversations/:id/events`. `!summarize` and `!analyze` always use the full fetch, still truncated by those caps. Truncation drops oldest messages by default. Prompts are not stored. Rate-limit timestamps are.
+Classic history is `GET /2/dm_conversations/:id/dm_events` (~30 days). `g…` groups keep a local copy and do not call `GET /2/chat/conversations/:id/events` to answer `!ask`, `@bot`, `!summarize`, or `!analyze`. See [Local Chat history](#local-chat-history). `!summarize` and `!analyze` still use the full window, truncated by those caps. Truncation drops oldest messages by default. The model prompt is not stored. The decrypted group transcript is, in SQLite. Rate-limit timestamps are.
 
 A Chat 429, 402, or 503, or any error with `retryAfterMs`, while loading that history does not drop the ask. The bot waits once (at most 5 seconds) and reads history again. `!ask` and `@bot` then answer with empty chat context if the read is still blocked, same as `!troll` continuing when timeline or chat history fails. `!summarize` and `!analyze` need that history, and a reply that cannot be sent is the same kind of block: the bot tags the requester (`X Chat is rate-limiting me right now. I'll retry this and reply when it clears.`) and stores the ask in SQLite `llm_retry_jobs`. Poll ticks and a 15 second timer drain that table. The row survives a restart. After 48 failed drains, or 6 hours, the bot says to send it again. The ciphertext of the original message is not written into the row; a later reply still tags the sender and threads when a sequence id was saved.
 
 `llm.allow: admins` gates `!ask`, summarize, analyze, and unknown-bang jokes to the owner, `ADMIN_IDS`, and per-group admins. The system prompt is `llm.system_prompt` in `config/default.yaml`. It tells the model it cannot kick users on X.
 
-Full history and summarize/analyze are extra pay-per-use reads on top of the poll loop.
+Full history and summarize/analyze on a classic group DM are extra pay-per-use reads on top of the poll loop. Encrypted groups answer from the local store.
+
+## Local Chat history
+
+Encrypted group plaintext is kept in the same SQLite file as the rest of the bot (`DATABASE_PATH`, default `data/bot.sqlite`). `CHAT_HISTORY_ENABLED` defaults to on. Set it to `false` and `!ask` goes back to reading X on each question.
+
+The file is chmod `0600` at startup, including `bot.sqlite-wal` and `bot.sqlite-shm` when those exist. `data/` is gitignored. Message text is not written to `logs/bot.log`. Backfill logs the conversation id, page count, rows stored, and whether that chat is done.
+
+Tables: `chat_history_messages`, `chat_history_membership`, `chat_history_backfill`, plus alias and delete-tombstone rows. Indexes: `(conversation_id, ts_ms)`, `(conversation_id, sender_id)`, and a unique key on `(conversation_id, message_id)` and on `(conversation_id, sequence_id)` when a sequence id is present. The same message seen from Activity, the poller, and a restart is one row. Text search uses FTS5 when this SQLite build has it, and `LIKE` otherwise.
+
+Each row stores the message id, sequence id, sender id, `@handle` or display name when we have one, timestamp, text, reply-to id, and a short media marker (`image`, `video`, `audio`, `gif`, `file`). Membership rows store join, add, and leave with who and when. The bot's own sends are included. So is every page the live poll and the wake catch-up already decrypted.
+
+Nothing is pruned unless an operator sets a cap. `CHAT_HISTORY_MAX_MESSAGES` and `CHAT_HISTORY_MAX_DAYS` default to unset, which is `0` and means unlimited. A positive value is an opt-in limit, applied at startup and once an hour. `0` on either variable leaves that dimension uncapped. The LLM tail is a `LIMIT` query, not a full-table load.
+
+`!purge` does not remove or rewrite that text. Rows X actually deleted get `deleted_in_x_at` and `deleted_by='purge'`. They still count for `!ask` and local search. `CHAT_HISTORY_INCLUDE_DELETED` defaults to true. Set it to `false` and those rows are left out of the prompt and out of search. The text stays on disk either way.
+
+Edits from X replace `text` and keep the previous body in `original_text`. Deletes from X set `deleted_in_x_at` and `deleted_by='x'` and leave the text. chat-xdk exposes an edit as a decrypted `message_edit` (`contentType` `messageEdit` / `message_edit`, or `type` `messageEdit`) with `updated_text` and the target sequence id. A user delete is a separate `messageDeleteEvent` on the protocol, not a field inside the encrypted message body. This bot records `type` `messageDelete` / `message_delete` when decrypt emits one and names target sequence or message ids. There is no captured live fixture of that event in this repo. If X never delivers user deletes on the Activity or events-list payloads this process decrypts, those deletes are not learned here. `!purge` still stamps the rows this account deleted.
+
+Backfill walks `GET /2/chat/conversations/:id/events` once per chat, from the newest page back to the start, and saves the cursor and a done flag. It runs for every group already known at startup and for a group the first time it is seen. It fetches at most one page per poll tick, and only after that tick's normal reads and any wake catch-up have succeeded. It does not run while a history 429/402 backoff is active. The first 429 or 402 stops the walk, arms that backoff, and the next tick resumes from the saved cursor. A finished chat is never walked again. Command handling does not wait on it. If the local store is empty, `!ask` answers with what is stored (possibly nothing) and does not call X for context.
+
+Questions are also searched locally (keyword, `@sender`, and today / yesterday / last week / last month). Matching lines are added to the prompt, including membership lines such as who was added. There is no separate search command.
 
 ## Environment
 
@@ -903,11 +923,15 @@ Full history and summarize/analyze are extra pay-per-use reads on top of the pol
 | `BOOBS_SEARCH_PROVIDER`, `BOOBS_SEARCH_API_KEY` | Search fallback. The key is only for `serpapi` and Azure `bing` |
 | `CONFIG_PATH` | Default `config/default.yaml` |
 | `DATABASE_PATH` | Default `data/bot.sqlite` |
+| `CHAT_HISTORY_ENABLED` | Default true. Plaintext history for encrypted groups. `false` makes `!ask` read X again |
+| `CHAT_HISTORY_MAX_MESSAGES` | Optional. Unset or `0` keeps every message. A positive number is a per-conversation cap, pruned at startup and hourly |
+| `CHAT_HISTORY_MAX_DAYS` | Optional. Unset or `0` keeps every day. A positive number drops older rows at startup and hourly |
+| `CHAT_HISTORY_INCLUDE_DELETED` | Default true. `false` leaves deleted-in-X rows out of the LLM prompt and local search. The text stays in SQLite |
 | `TOKEN_PATH` | Default `data/tokens.json` |
 
-`config/default.yaml` holds welcome and leave text (leave is on), rules, public help (including `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, and `!linkroast`; admin commands are `admin_help`, shown by `!admin`), flood (off by default: `max_messages: 0` disables it; `window_ms` stays 8000 and `mute_ms` stays 300000 so a group can turn it back on with `!set flood_max_messages` above 0), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine backend, Chrome profile, CDP URL, model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, `BOOBS_IMAGINE_APP`, the public CDN URLs (including `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS` and the three per-command video URL lists), the video model, duration, aspect ratio, and resolution, and the voice language are env-only. `!voice` personas are fixed in the bot. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits, reaction removals, and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
+`config/default.yaml` holds welcome and leave text (leave is on), rules, public help (including `!imagine`, `!video`, `!voice`, `!troll`, `!roast`, and `!linkroast`; admin commands are `admin_help`, shown by `!admin`), flood (off by default: `max_messages: 0` disables it; `window_ms` stays 8000 and `mute_ms` stays 300000 so a group can turn it back on with `!set flood_max_messages` above 0), warn limit (3, then a 1-hour mute), keyword and regex filters, poll interval, Activity catch-up, LLM context and rate limits (8 calls per user per conversation per minute), XP, and the adult-image switch (off). Imagine backend, Chrome profile, CDP URL, model, aspect ratio, `BOOBS_IMAGE_PROVIDER`, `BOOBS_IMAGINE_APP`, the public CDN URLs (including `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS` and the three per-command video URL lists), the video model, duration, aspect ratio, and resolution, and the voice language are env-only. `!voice` personas are fixed in the bot. Per-conversation `!set` values are stored in SQLite and merged on top. Chat message edits are stored and are not commands. Reaction removals and typing indicators are dropped. A reaction-add is used for XP only; it is not filtered or deleted.
 
-SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` list, the per-conversation `!troll all` flag and per-user troll-all cooldowns, the per-conversation `!linkroast` flag and per-user roast times, filed `!request` payloads (`feature_requests`), and the Chat message index used to turn a sequence id into a sender. It does not store prompts, image URLs, or the last-8 image memory (that list lives in the process).
+SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, watermarks, LLM and adult-image rate timestamps, XP, the per-conversation `!troll` list, the per-conversation `!troll all` flag and per-user troll-all cooldowns, the per-conversation `!linkroast` flag and per-user roast times, filed `!request` payloads (`feature_requests`), the Chat message index used to turn a sequence id into a sender, and the decrypted encrypted-group transcript (`chat_history_messages`, `chat_history_membership`). It does not store prompts or the last-8 image memory (that list lives in the process).
 
 ## Operations
 
@@ -924,6 +948,7 @@ A VM pause can leave `tsx src/index.ts` alive with a dead Activity socket and a 
 ```
 src/index.ts            # poll loops, Chat listen policy, Activity stream/webhook
 src/bot/engine.ts       # commands, XP, LLM dispatch
+src/bot/chat-history.ts # encrypted group transcript in SQLite
 src/bot/feature-request.ts # !request Q&A, pending JSON file, optional webhook, owner DM
 src/bot/parser.ts       # command and wake parsing
 src/bot/status.ts       # !status text from in-process health (no extra API calls)

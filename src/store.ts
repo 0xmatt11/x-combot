@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { ensureChatHistorySchema, restrictSqlitePermissions } from "./bot/chat-history.js";
 import { CHAT_WATERMARK_PREFIX, isChatGroupId } from "./chat/ids.js";
 import type { ConversationSettings } from "./types.js";
 
@@ -260,8 +261,11 @@ CREATE TABLE IF NOT EXISTS grow_loans (
 
 export class Store {
   readonly db: Database.Database;
+  /** `:memory:` or the path passed to the constructor. Used to chmod the file. */
+  readonly filename: string;
 
   constructor(filename: string) {
+    this.filename = filename;
     if (filename !== ":memory:") {
       fs.mkdirSync(path.dirname(filename), { recursive: true });
     }
@@ -271,6 +275,13 @@ export class Store {
     this.dropRemovedAlertTable();
     this.migrateTrollTargets();
     this.grandfatherChatAuthorizations();
+    ensureChatHistorySchema(this.db);
+    this.restrictFilePermissions();
+  }
+
+  /** `0600` on `bot.sqlite`, `-wal`, and `-shm`. No-op for `:memory:`. */
+  restrictFilePermissions(): void {
+    restrictSqlitePermissions(this.filename);
   }
 
   /**

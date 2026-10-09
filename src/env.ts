@@ -50,6 +50,15 @@ function optionalBool(name: string): boolean | undefined {
   throw new Error(`${name} must be true or false`);
 }
 
+function optionalNonNegativeInt(name: string): number | undefined {
+  const value = optional(name);
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a whole number from 0 up`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(`${name} must be a whole number from 0 up`);
+  return parsed;
+}
+
 function optionalNumber(name: string): number | undefined {
   const value = optional(name);
   if (!value) return undefined;
@@ -341,6 +350,20 @@ export interface Env {
    * Default sits beside `chatKeysPath`.
    */
   chatRecentMessagesPath: string;
+  /**
+   * Decrypted Chat history in the SQLite file. Default on.
+   * The database file is mode 0600 because it holds plaintext.
+   */
+  chatHistoryEnabled: boolean;
+  /** Rows kept per conversation. `0` (the default) keeps every row. */
+  chatHistoryMaxMessages: number;
+  /** Drop rows older than this many days. `0` (the default) keeps every day. */
+  chatHistoryMaxDays: number;
+  /**
+   * When false, LLM context and local search skip rows stamped deleted in X.
+   * Default true: those rows still count, text included.
+   */
+  chatHistoryIncludeDeleted: boolean;
   /** Juicebox PIN. Used only when no local key file exists. Never commit this. */
   chatPin?: string;
   chatPollIntervalMs?: number;
@@ -501,6 +524,10 @@ export function loadEnv(requireOwner = true): Env {
       optional("CHAT_RECENT_MESSAGES_PATH") ??
         recentMessagesPathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
     ),
+    chatHistoryEnabled: optionalBool("CHAT_HISTORY_ENABLED") ?? true,
+    chatHistoryMaxMessages: optionalNonNegativeInt("CHAT_HISTORY_MAX_MESSAGES") ?? 0,
+    chatHistoryMaxDays: optionalNonNegativeInt("CHAT_HISTORY_MAX_DAYS") ?? 0,
+    chatHistoryIncludeDeleted: optionalBool("CHAT_HISTORY_INCLUDE_DELETED") ?? true,
     chatPin: optional("CHAT_PIN"),
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,
     dmPoll: optionalBool("DM_POLL"),

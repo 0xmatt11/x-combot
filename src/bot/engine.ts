@@ -44,6 +44,15 @@ import {
   type LlmHandleOutcome,
 } from "../llm/chat-retry.js";
 import { createPurgeMemory, type PurgeMemory } from "./purge-memory.js";
+import {
+  CHAT_HISTORY_BACKFILL_PAGE_SIZE,
+  createChatHistory,
+  HistoryReadBackoff,
+  isHistoryEndpointBackoff,
+  LOCAL_ASK_RECENT_MESSAGES,
+  type ChatHistory,
+  type ChatHistoryOptions,
+} from "./chat-history.js";
 import { fetchConversationTurns } from "../llm/history.js";
 import {
   buildRoastMessages,
@@ -438,6 +447,11 @@ export interface EngineDeps {
    * Absent uses a one-second debounce.
    */
   recentMessagesWriteDelayMs?: number;
+  /**
+   * Local decrypted history in SQLite. Absent uses the defaults
+   * (on, no retention cap, deleted rows included in LLM context).
+   */
+  chatHistory?: ChatHistoryOptions;
 }
 
 /**
@@ -520,6 +534,10 @@ export class ModerationEngine {
   private ownedSearch?: WebSearch;
   /** Built on first use when `deps.llmWorkers` was not injected. Max 5 slots. */
   private ownedWorkers?: LlmWorkerPool;
+  /** Plaintext group history in this process's SQLite file. */
+  private readonly chatHistory: ChatHistory;
+  /** 429/402 on the Chat events list. Backfill will not run while this is open. */
+  private readonly historyBackoff = new HistoryReadBackoff();
 
   constructor(
     private readonly store: Store,
@@ -528,9 +546,13 @@ export class ModerationEngine {
     private readonly llmClient?: LlmClient,
     private readonly deps: EngineDeps = {},
   ) {
-    this.client = trackBotOutbound(client, (conversationId, sent) => {
-      this.rememberBotOutbound(conversationId, sent);
+    this.client = trackBotOutbound(client, (conversationId, sent, detail) => {
+      this.rememberBotOutbound(conversationId, sent, detail);
     });
+    this.chatHistory = createChatHistory(store.db, deps.chatHistory ?? {});
+    if (this.chatHistory.enabled && this.chatHistory.hasRetentionLimit()) {
+      this.chatHistory.prune();
+    }
     this.purgeMemory = createPurgeMemory({
       ...(deps.recentMessagesPath ? { filePath: deps.recentMessagesPath } : {}),
       ...(deps.recentMessagesWriteDelayMs !== undefined
@@ -564,6 +586,12 @@ export class ModerationEngine {
     };
 
     this.purgeMemory.remember(event);
+    this.recordChatHistory(event);
+
+    if (event.eventType === "MessageEdit" || event.eventType === "MessageDelete") {
+      this.alreadyHandled(event);
+      return actions;
+    }
 
     if (this.alreadyHandled(event)) {
       if (!event.conversationId || this.chatMayAct(event.conversationId)) {
@@ -1097,7 +1125,7 @@ export class ModerationEngine {
     const mode: LlmContextMode = request.kind === "ask" ? settings.llmContextMode : "full";
     const assembled = selectContextTurns(loaded.turns, mode, {
       noneRecentMessages: settings.llmNoneRecentMessages,
-      recentMessages: settings.llmRecentMessages,
+      recentMessages: loaded.recentCap ?? settings.llmRecentMessages,
       fullMaxMessages: settings.llmFullMaxMessages,
       fullMaxChars: settings.llmFullMaxChars,
       truncate: settings.llmTruncate,
@@ -1123,7 +1151,9 @@ export class ModerationEngine {
         question,
         askerLabel: await this.chatLabel(event.sender, senderId, conversationId),
         kind: request.kind,
-        extraContext: formatTimelineContext(timelines),
+        extraContext: [formatTimelineContext(timelines), loaded.searchContext]
+          .filter((part) => part && part.trim())
+          .join("\n\n") || undefined,
         toolNote: USER_CONTEXT_TOOL_NOTE,
       });
       answer = await runAgent({
@@ -1200,15 +1230,48 @@ export class ModerationEngine {
         turns: Awaited<ReturnType<typeof fetchConversationTurns>>["turns"];
         pages: number;
         degraded: boolean;
+        recentCap?: number;
+        searchContext?: string;
       }
     | { ok: false; retryAfterMs?: number }
   > {
     const mode: LlmContextMode = request.kind === "ask" ? settings.llmContextMode : "full";
+    const perConversation = this.store.getSettings(event.conversationId)?.llm_recent_messages;
+    const localRecent =
+      request.kind === "ask" && mode === "recent"
+        ? (perConversation ?? LOCAL_ASK_RECENT_MESSAGES)
+        : settings.llmRecentMessages;
     const fetchCap = isFullContextMode(mode)
       ? settings.llmFullMaxMessages
       : mode === "recent"
-        ? settings.llmRecentMessages
+        ? this.chatHistory.enabled && isChatGroupId(event.conversationId)
+          ? localRecent
+          : settings.llmRecentMessages
         : settings.llmNoneRecentMessages;
+    if (
+      this.chatHistory.enabled &&
+      isChatGroupId(event.conversationId) &&
+      fetchCap > 0
+    ) {
+      const turns = this.chatHistory.recentTurns(event.conversationId, fetchCap, {
+        excludeEventId: event.id,
+        includeDeleted: this.chatHistory.includeDeleted,
+      });
+      const searchContext = this.chatHistory.searchContext(
+        event.conversationId,
+        request.prompt,
+        Date.now(),
+        { excludeEventId: event.id, includeDeleted: this.chatHistory.includeDeleted },
+      );
+      return {
+        ok: true,
+        turns,
+        pages: 0,
+        degraded: turns.length === 0,
+        recentCap: mode === "recent" ? fetchCap : undefined,
+        ...(searchContext ? { searchContext } : {}),
+      };
+    }
     if (fetchCap <= 0) return { ok: true, turns: [], pages: 0, degraded: false };
 
     const attempt = () =>
@@ -1222,6 +1285,7 @@ export class ModerationEngine {
       const fetched = await attempt();
       return { ok: true, turns: fetched.turns, pages: fetched.pages, degraded: false };
     } catch (error) {
+      if (isChatGroupId(event.conversationId)) this.historyBackoff.note(error);
       if (!isRecoverableChatError(error)) throw error;
       if (!inlineRetry) return this.historyAfterRetry(event, request, error);
       const waitMs = boundedHistoryRetryMs(readRetryAfterMs(error));
@@ -1235,6 +1299,7 @@ export class ModerationEngine {
         const fetched = await attempt();
         return { ok: true, turns: fetched.turns, pages: fetched.pages, degraded: false };
       } catch (retryError) {
+        if (isChatGroupId(event.conversationId)) this.historyBackoff.note(retryError);
         if (!isRecoverableChatError(retryError)) throw retryError;
         return this.historyAfterRetry(event, request, retryError);
       }
@@ -1786,6 +1851,7 @@ export class ModerationEngine {
     const direct = namedUser(user, userId);
     if (direct) {
       this.namedUsers.set(userId, direct);
+      this.chatHistory.noteSender(userId, displayName(direct));
       return direct;
     }
     const cached = userId ? this.namedUsers.get(userId) : undefined;
@@ -1796,6 +1862,7 @@ export class ModerationEngine {
         const fetched = namedUser(await this.client.getUserById(userId), userId);
         if (fetched) {
           this.namedUsers.set(userId, fetched);
+          this.chatHistory.noteSender(userId, displayName(fetched));
           return fetched;
         }
       } catch (error) {
@@ -3351,6 +3418,10 @@ export class ModerationEngine {
             })),
           );
           for (const id of batch.deletedIds) actions.deletes.push(id);
+          this.stampPurged(
+            conversationId,
+            targets.filter((target) => batch.deletedIds.includes(target.id)),
+          );
           if (batch.rateLimited) {
             log.warn(
               `Chat deletes are rate-limited in ${conversationId}; retry after ${batch.rateLimited.retryAfterMs}ms` +
@@ -3381,13 +3452,18 @@ export class ModerationEngine {
           return;
         }
         let deleted = 0;
+        const purged: DmEvent[] = [];
         for (const target of targets) {
           const ok = await this.tryDelete(target.id, actions, {
             conversationId,
             ...(target.sequenceId ? { sequenceId: target.sequenceId } : {}),
           });
-          if (ok) deleted += 1;
+          if (ok) {
+            deleted += 1;
+            purged.push(target);
+          }
         }
+        this.stampPurged(conversationId, purged);
         await this.reply(
           conversationId,
           formatPurgeReply({
@@ -4751,7 +4827,8 @@ export class ModerationEngine {
         paginationToken = next;
       }
     } catch (error) {
-      if (isHistoryRateLimited(error)) {
+      if (isHistoryRateLimited(error) || isHistoryEndpointBackoff(error)) {
+        if (isChatGroupId(conversationId)) this.historyBackoff.note(error);
         return { status: "rate_limited", retryAfterMs: readRetryAfterMs(error) };
       }
       return { status: "failed", error };
@@ -4759,13 +4836,124 @@ export class ModerationEngine {
     return { status: "ok", events: selected };
   }
 
+  /**
+   * Queue a full history backfill for this encrypted group.
+   * A chat already marked done is left done.
+   */
+  noteChatForHistory(conversationId: string): void {
+    if (!isChatGroupId(conversationId)) return;
+    this.chatHistory.ensureBackfill(conversationId);
+  }
+
+  /** Drop rows past the retention caps. Safe to call on a timer. */
+  pruneChatHistory(nowMs = Date.now()): void {
+    const removed = this.chatHistory.prune(nowMs);
+    if (removed.messages > 0 || removed.membership > 0) {
+      log.info(
+        `Chat history prune removed messages=${removed.messages} membership=${removed.membership}`,
+      );
+    }
+  }
+
+  /**
+   * One events-list page for one conversation that is not done.
+   * Skips the call while a 429/402 history backoff is active.
+   * Throws that error so the poller can arm the same backoff.
+   * Never called from command handling.
+   */
+  async backfillChatHistory(nowMs = Date.now()): Promise<void> {
+    if (!this.chatHistory.enabled) return;
+    if (this.historyBackoff.active(nowMs)) return;
+    const next = this.chatHistory.nextBackfill();
+    if (!next) return;
+    let page: { events: DmEvent[]; nextToken?: string };
+    try {
+      page = await this.client.listConversationDmEvents({
+        conversationId: next.conversationId,
+        maxResults: CHAT_HISTORY_BACKFILL_PAGE_SIZE,
+        ...(next.cursor ? { paginationToken: next.cursor } : {}),
+      });
+    } catch (error) {
+      if (isHistoryEndpointBackoff(error)) {
+        const wait = this.historyBackoff.note(error, nowMs);
+        log.warn(
+          `Chat history backfill paused conversation=${next.conversationId} pages=${next.pages} stored=${next.stored} done=false retry_after_ms=${wait}`,
+        );
+        throw error;
+      }
+      this.chatHistory.touchBackfill(next.conversationId);
+      log.warn(
+        `Chat history backfill failed conversation=${next.conversationId} pages=${next.pages} stored=${next.stored}`,
+      );
+      return;
+    }
+    let added = 0;
+    for (const event of page.events) {
+      const counts = this.chatHistory.observe(event);
+      added += counts.messages + counts.membership;
+    }
+    const done = !page.nextToken;
+    const saved = this.chatHistory.saveBackfillPage({
+      conversationId: next.conversationId,
+      cursor: page.nextToken ?? null,
+      done,
+      added,
+    });
+    log.info(
+      `Chat history backfill conversation=${saved.conversationId} pages=${saved.pages} stored=${saved.stored} done=${saved.done}`,
+    );
+  }
+
+  private recordChatHistory(event: DmEvent): void {
+    if (!event.conversationId || !isChatGroupId(event.conversationId)) return;
+    const cached = event.senderId ? this.namedUsers.get(event.senderId) : undefined;
+    const label = displayName(event.sender ?? cached, event.senderId);
+    this.chatHistory.observe(event, label);
+  }
+
+  /** `!purge` keeps the text and only stamps rows X actually deleted. */
+  private stampPurged(conversationId: string, targets: readonly DmEvent[]): void {
+    if (!isChatGroupId(conversationId) || targets.length === 0) return;
+    const keys: string[] = [];
+    for (const target of targets) {
+      if (target.id) keys.push(target.id);
+      if (target.sequenceId) keys.push(target.sequenceId);
+      for (const alias of target.aliasIds ?? []) {
+        if (!alias.startsWith("cipher:")) keys.push(alias);
+      }
+    }
+    this.chatHistory.markDeleted(conversationId, keys, "purge", new Date().toISOString());
+  }
+
   /** Record a message this account just sent so a later `!purge` can delete it. */
-  private rememberBotOutbound(conversationId: string, sent: SendMessageResult): void {
+  private rememberBotOutbound(
+    conversationId: string,
+    sent: SendMessageResult,
+    detail: { text: string; media?: string },
+  ): void {
     const id = sent.dmEventId?.trim();
     const conversation = (sent.dmConversationId || conversationId).trim();
     if (!id || !conversation || !isGroupConversation(conversation)) return;
     const sequenceId = sent.sequenceId?.trim();
     const createdAt = new Date().toISOString();
+    const outbound: DmEvent = {
+      id,
+      eventType: "MessageCreate",
+      conversationId: conversation,
+      senderId: this.config.botUserId,
+      sender: {
+        id: this.config.botUserId,
+        ...(this.config.botUsername ? { username: this.config.botUsername } : {}),
+      },
+      createdAt,
+      text: detail.text,
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      ...(detail.media ? { media: detail.media } : {}),
+      ...(sequenceId ? { sequenceId } : {}),
+    };
+    this.recordChatHistory(outbound);
     this.purgeMemory.remember({
       id,
       eventType: "MessageCreate",
@@ -4804,6 +4992,7 @@ export class ModerationEngine {
       ...(input.senderId ? { senderId: input.senderId } : {}),
       ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     });
+    this.chatHistory.attachSequence(conversationId, input.ids, sequenceId);
     if (!isChatGroupId(conversationId)) return;
     for (const id of input.ids) {
       const trimmed = id.trim();
@@ -5623,15 +5812,20 @@ function formatPurgeHistoryWaitReply(retryAfterMs: number): string {
  */
 function trackBotOutbound(
   client: XClient,
-  remember: (conversationId: string, sent: SendMessageResult) => void,
+  remember: (
+    conversationId: string,
+    sent: SendMessageResult,
+    detail: { text: string; media?: string },
+  ) => void,
 ): XClient {
   const track = async (
     conversationId: string,
+    detail: { text: string; media?: string },
     send: () => Promise<SendMessageResult>,
   ): Promise<SendMessageResult> => {
     const sent = await send();
     try {
-      remember(conversationId, sent);
+      remember(conversationId, sent, detail);
     } catch {
       log.warn("Could not remember an outbound message for purge");
     }
@@ -5645,13 +5839,19 @@ function trackBotOutbound(
     listDmEvents: (params) => client.listDmEvents(params),
     listConversationDmEvents: (params) => client.listConversationDmEvents(params),
     sendMessage: (conversationId, text, caption) =>
-      track(conversationId, () => client.sendMessage(conversationId, text, caption)),
+      track(conversationId, { text }, () => client.sendMessage(conversationId, text, caption)),
     sendImage: (conversationId, image) =>
-      track(conversationId, () => client.sendImage(conversationId, image)),
+      track(conversationId, { text: image.caption?.text ?? "", media: "image" }, () =>
+        client.sendImage(conversationId, image),
+      ),
     sendVideo: (conversationId, video) =>
-      track(conversationId, () => client.sendVideo(conversationId, video)),
+      track(conversationId, { text: video.caption?.text ?? "", media: "video" }, () =>
+        client.sendVideo(conversationId, video),
+      ),
     sendAudio: (conversationId, audio) =>
-      track(conversationId, () => client.sendAudio(conversationId, audio)),
+      track(conversationId, { text: audio.caption?.text ?? "", media: "audio" }, () =>
+        client.sendAudio(conversationId, audio),
+      ),
     sendDirectMessage: (participantId, text) => client.sendDirectMessage(participantId, text),
     deleteEvent: (eventId, hint) => client.deleteEvent(eventId, hint),
     deleteEvents: (conversationId, targets) => client.deleteEvents(conversationId, targets),
