@@ -313,6 +313,34 @@ export interface DeleteHint {
 export interface SendMessageResult {
   dmEventId: string;
   dmConversationId: string;
+  /**
+   * X Chat sequence id for this send, when the response or a later
+   * `chat.sent` echo carried one. Absent on classic DMs.
+   */
+  sequenceId?: string;
+}
+
+/** One message a batch delete should remove. Chat needs `sequenceId`. */
+export interface DeleteTarget {
+  eventId: string;
+  sequenceId?: string;
+}
+
+/**
+ * Outcome of deleting several messages in one conversation.
+ * `blocked` means X was not called because a previous delete 429/402 is still open.
+ * `rateLimited` is set both for that skip and when this call itself was limited.
+ */
+export interface DeleteBatchResult {
+  deletedIds: string[];
+  /** Targets that had no sequence id. They were not sent to X. */
+  missingSequenceIds: string[];
+  /** X refused these after a non-rate-limit failure, down to a single id. */
+  rejectedIds: string[];
+  /** At least one rejection was HTTP 403 or a permission error. */
+  permissionDenied: boolean;
+  rateLimited?: { retryAfterMs: number; skippedIds: string[] };
+  blocked?: { retryAfterMs: number };
 }
 
 /**

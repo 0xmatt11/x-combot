@@ -26,9 +26,23 @@ export interface PurgeMemoryOptions {
   writeDelayMs?: number;
 }
 
+export interface PurgeSequenceNote {
+  conversationId: string;
+  sequenceId: string;
+  /** Client message id first, then any other id for the same send. */
+  ids: readonly string[];
+  senderId?: string;
+  createdAt?: string;
+}
+
 export interface PurgeMemory {
   /** Remember one inbound or outbound event. Non-messages and rows without an id are ignored. */
   remember(event: DmEvent): void;
+  /**
+   * Attach a sequence id to the row that already uses one of `ids`.
+   * Does not move that row. A new row is inserted only when none of the ids match.
+   */
+  attachSequence(note: PurgeSequenceNote): void;
   /** Newest first. Empty when this conversation has not been seen. */
   list(conversationId: string): readonly DmEvent[];
   /** Write the window now. No-op when there is no file. */
@@ -99,10 +113,47 @@ export function createPurgeMemory(limitOrOptions: number | PurgeMemoryOptions = 
       if (!event.id || !event.conversationId) return;
       const snapshot = snapshotPurgeEvent(event);
       const existing = byConversation.get(event.conversationId) ?? [];
+      const previous = existing.find((row) => samePurgeMessage(row, snapshot));
       const kept = existing.filter((row) => !samePurgeMessage(row, snapshot));
-      kept.unshift(snapshot);
+      kept.unshift(mergePurgeSnapshot(snapshot, previous));
       if (kept.length > cap) kept.length = cap;
       byConversation.set(event.conversationId, kept);
+      scheduleWrite();
+    },
+    attachSequence(note) {
+      const conversationId = note.conversationId.trim();
+      const sequenceId = note.sequenceId.trim();
+      const ids = uniqueIds(note.ids);
+      if (!conversationId || !sequenceId || ids.length === 0) return;
+      const probe = snapshotPurgeEvent({
+        id: ids[0] ?? "",
+        eventType: "MessageCreate",
+        conversationId,
+        sequenceId,
+        participantIds: [],
+        participants: [],
+        mentions: [],
+        ...(ids.length > 1 ? { aliasIds: ids.slice(1) } : {}),
+        ...(note.senderId ? { senderId: note.senderId } : {}),
+        ...(note.createdAt ? { createdAt: note.createdAt } : {}),
+      });
+      const existing = byConversation.get(conversationId) ?? [];
+      const index = existing.findIndex((row) => samePurgeMessage(row, probe));
+      if (index === -1) {
+        this.remember(probe);
+        return;
+      }
+      const row = existing[index];
+      if (!row) return;
+      const aliasIds = uniqueIds([
+        ...(row.aliasIds ?? []),
+        ...ids.filter((id) => id !== row.id),
+      ]);
+      existing[index] = {
+        ...row,
+        sequenceId,
+        ...(aliasIds.length > 0 ? { aliasIds } : {}),
+      };
       scheduleWrite();
     },
     list(conversationId) {
@@ -137,6 +188,37 @@ function snapshotPurgeEvent(event: DmEvent): DmEvent {
     ...(event.sequenceId ? { sequenceId: event.sequenceId } : {}),
     ...(aliasIds.length > 0 ? { aliasIds: [...aliasIds] } : {}),
   };
+}
+
+/**
+ * A later delivery of the same message must not drop a sequence id we already
+ * learned, and must keep the earlier id as an alias.
+ */
+function mergePurgeSnapshot(snapshot: DmEvent, previous: DmEvent | undefined): DmEvent {
+  if (!previous) return snapshot;
+  const sequenceId = snapshot.sequenceId || previous.sequenceId;
+  const aliasIds = uniqueIds([
+    ...(snapshot.aliasIds ?? []),
+    ...(previous.aliasIds ?? []),
+    ...(previous.id && previous.id !== snapshot.id ? [previous.id] : []),
+  ]);
+  return {
+    ...snapshot,
+    ...(sequenceId ? { sequenceId } : {}),
+    ...(aliasIds.length > 0 ? { aliasIds } : {}),
+  };
+}
+
+function uniqueIds(values: readonly (string | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    const id = value?.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    unique.push(id);
+  }
+  return unique;
 }
 
 /** Activity and the poller decrypt one message under different raw ids. */

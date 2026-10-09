@@ -1,6 +1,10 @@
+import { deleteOneByOne } from "../chat/delete-batch.js";
+import { isChatGroupId } from "../chat/ids.js";
 import type {
+  DeleteBatchResult,
   DeleteHint,
   DeleteResult,
+  DeleteTarget,
   DmEvent,
   MediaCaption,
   OutboundAudio,
@@ -199,6 +203,15 @@ export class MockXClient implements XClient {
     const dmEventId = `dm-${this.direct.length + 1}`;
     this.direct.push({ participantId, text });
     return { dmEventId, dmConversationId: `${this.bot.id}-${participantId}` };
+  }
+
+  deleteEvents(
+    conversationId: string,
+    targets: readonly DeleteTarget[],
+  ): Promise<DeleteBatchResult> {
+    return deleteOneByOne(conversationId, targets, (eventId, hint) => this.deleteEvent(eventId, hint), {
+      chat: isChatGroupId(conversationId),
+    });
   }
 
   async deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult> {

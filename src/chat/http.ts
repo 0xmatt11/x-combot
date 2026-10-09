@@ -44,7 +44,7 @@ export interface ChatHttp {
   sendChatMessage(
     conversationId: string,
     body: Record<string, string>,
-  ): Promise<{ messageId: string }>;
+  ): Promise<{ messageId: string; sequenceId?: string; encodedMessageEvent?: string }>;
   deleteChatMessages(
     conversationId: string,
     body: Record<string, unknown>,

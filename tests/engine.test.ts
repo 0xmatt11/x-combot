@@ -627,7 +627,7 @@ describe("ModerationEngine", () => {
     expect(client.deleted).toEqual(["5", "4"]);
   });
 
-  it("purges encrypted Chat with sequence ids and states the delete-for-all limit", async () => {
+  it("purges encrypted Chat and names a missing sequence separately from a permission failure", async () => {
     const { engine, client, store } = setup();
     const chatId = "g2029561975647150382";
     store.authorizeChat(chatId);
@@ -687,8 +687,11 @@ describe("ModerationEngine", () => {
     );
     expect(client.deleted).toEqual(["own-1", "member-ok"]);
     expect(client.sent.at(-1)?.text).toMatch(/Deleted 2 of 4\./);
-    expect(client.sent.at(-1)?.text).toMatch(/delete-for-all/);
+    expect(client.sent.at(-1)?.text).toMatch(
+      /1 couldn't be deleted because the bot never saw their X id/,
+    );
     expect(client.sent.at(-1)?.text).toMatch(/group admin/);
+    expect(client.sent.at(-1)?.text).not.toMatch(/messages\/delete/);
     expect(client.sent.at(-1)?.text).not.toMatch(/own events/);
   });
 

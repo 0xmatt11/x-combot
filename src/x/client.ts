@@ -1,6 +1,8 @@
 import type {
+  DeleteBatchResult,
   DeleteHint,
   DeleteResult,
+  DeleteTarget,
   DmEvent,
   MediaCaption,
   OutboundAudio,
@@ -53,6 +55,11 @@ export interface XClient {
   sendAudio(conversationId: string, audio: OutboundAudio): Promise<SendMessageResult>;
   sendDirectMessage(participantId: string, text: string): Promise<SendMessageResult>;
   deleteEvent(eventId: string, hint?: DeleteHint): Promise<DeleteResult>;
+  /**
+   * Delete many messages in one conversation.
+   * Encrypted Chat batches sequence ids. Classic DMs stay one HTTP call each.
+   */
+  deleteEvents(conversationId: string, targets: readonly DeleteTarget[]): Promise<DeleteBatchResult>;
 }
 
 export const DM_EVENT_FIELDS = [
