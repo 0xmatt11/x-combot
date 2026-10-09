@@ -23,6 +23,15 @@ export const EMPTY_REMOTE_PUBLIC_KEY_TTL_MS = 60 * 60 * 1000;
  */
 export const DECRYPT_KEY_REFRESH_MIN_MS = 15 * 60 * 1000;
 
+/**
+ * UTC minute stamp for logs and `!status`. No seconds, no key material.
+ * Example: `2026-10-08T20:22Z`.
+ */
+export function formatPublicKeyFetchedAt(ms: number): string {
+  if (!Number.isFinite(ms)) return "none";
+  return new Date(ms).toISOString().slice(0, 16) + "Z";
+}
+
 export interface CachedRemoteUser {
   fetchedAt: number;
   keys: RemotePublicKey[];

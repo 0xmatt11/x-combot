@@ -449,6 +449,10 @@ async function openChatService(
     }
     return new ChatService(chatHttpFromLive(client), cipher, store, {
       remoteKeyCachePath: env.chatRemoteKeysPath,
+      publicKeySummaryIntervalMs:
+        env.chatPublicKeysSummaryMinutes === undefined
+          ? undefined
+          : env.chatPublicKeysSummaryMinutes * 60_000,
     });
   } catch (error) {
     if (!listen.implicitAll) throw error;
