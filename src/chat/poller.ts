@@ -24,14 +24,24 @@ export const CHAT_DISCOVERY_PAGE_SIZE = 50;
 export const CHAT_POLLS_PER_TICK = 8;
 /** Wake catch-up answers commands newer than this. Older ones are marked handled. */
 export const DEFAULT_CHAT_WAKE_COMMAND_MAX_AGE_MS = 30 * 60 * 1000;
+/** History reads on a wake, most recently active group first. */
+export const DEFAULT_CHAT_WAKE_MAX_GROUPS = 1;
 
 export interface WakeCatchupCounts {
   answered: number;
   stale: number;
   alreadyHandled: number;
+  groupsChecked: number;
+  groupsDeferred: number;
 }
 
-const EMPTY_WAKE: WakeCatchupCounts = { answered: 0, stale: 0, alreadyHandled: 0 };
+const EMPTY_WAKE: WakeCatchupCounts = {
+  answered: 0,
+  stale: 0,
+  alreadyHandled: 0,
+  groupsChecked: 0,
+  groupsDeferred: 0,
+};
 
 /**
  * One INFO line per wake. Counts only. The line never includes message text.
@@ -42,7 +52,7 @@ export function formatWakeCatchupLog(
   options?: { backoff?: boolean },
 ): string {
   const line =
-    `Wake catch-up: answered ${counts.answered}, skipped stale ${counts.stale}, skipped already handled ${counts.alreadyHandled}`;
+    `Wake catch-up: answered ${counts.answered}, skipped stale ${counts.stale}, skipped already handled ${counts.alreadyHandled}, groups checked ${counts.groupsChecked}, groups deferred ${counts.groupsDeferred}`;
   return options?.backoff ? `${line}; rate-limit backoff active` : line;
 }
 
@@ -63,6 +73,11 @@ export interface ChatPollerOptions {
   wakeCommandMaxAgeMs?: number;
   /** Clock for command age, backoff, and a timer that fires late after a VM pause. */
   now?: () => number;
+  /**
+   * History reads on a wake, most recently active group first.
+   * Unset is 1. Groups past the cap stay on the normal poll rotation.
+   */
+  wakeMaxGroups?: number;
 }
 
 export class ChatPoller {
@@ -97,7 +112,10 @@ export class ChatPoller {
   private discoveryDisabled = false;
   private readonly onPipeline?: (state: "ok" | "degraded", detail?: string) => void;
   private readonly wakeCommandMaxAgeMs: number;
+  private readonly wakeMaxGroups: number;
   private readonly clock: () => number;
+  /** Latest Activity arrival or pulled event time, in epoch ms. Not persisted. */
+  private readonly lastActiveAt = new Map<string, number>();
 
   constructor(
     private readonly chat: ChatService,
@@ -120,6 +138,7 @@ export class ChatPoller {
     const maxAge = options.wakeCommandMaxAgeMs;
     this.wakeCommandMaxAgeMs =
       maxAge === undefined ? DEFAULT_CHAT_WAKE_COMMAND_MAX_AGE_MS : maxAge;
+    this.wakeMaxGroups = options.wakeMaxGroups ?? DEFAULT_CHAT_WAKE_MAX_GROUPS;
     this.clock = options.now ?? (() => Date.now());
   }
 
@@ -155,10 +174,11 @@ export class ChatPoller {
   }
 
   /**
-   * One history read per tracked encrypted group, right away.
-   * Used after a VM resume or a dead Activity socket. A 429/402 backoff still
-   * in effect skips the read and does not add a retry. A timer that already
-   * fired late for this resume is the catch-up; this does not read again.
+   * History reads for the most recently active tracked groups, right away.
+   * The cap is `CHAT_WAKE_MAX_GROUPS` (default 1). Used after a VM resume or a
+   * dead Activity socket. A 429/402 backoff still in effect skips the read and
+   * does not add a retry. A timer that already fired late for this resume is
+   * the catch-up; this does not read again.
    */
   kick(): Promise<void> {
     if (this.stopped) return Promise.resolve();
@@ -168,7 +188,12 @@ export class ChatPoller {
     }
     if (this.clock() < this.ignoreKickUntil) return Promise.resolve();
     if (this.backoffActive()) {
-      log.info(formatWakeCatchupLog(EMPTY_WAKE, { backoff: true }));
+      log.info(
+        formatWakeCatchupLog(
+          { ...EMPTY_WAKE, groupsDeferred: this.ids.size },
+          { backoff: true },
+        ),
+      );
       return Promise.resolve();
     }
     if (this.ticking) {
@@ -186,6 +211,7 @@ export class ChatPoller {
    */
   observeFromActivity(conversationId: string, eventId?: string): void {
     if (!acceptsChatGroup(this.policy, conversationId)) return;
+    this.noteActive(conversationId);
     this.noteConversation(conversationId);
     if (!eventId) return;
     const key = watermarkKey(conversationId);
@@ -253,19 +279,32 @@ export class ChatPoller {
 
   async pollOnce(options?: { wake?: boolean }): Promise<{ sawNew: boolean; seeded: boolean }> {
     const wake = options?.wake === true;
-    const counts: WakeCatchupCounts = { answered: 0, stale: 0, alreadyHandled: 0 };
+    const counts: WakeCatchupCounts = {
+      answered: 0,
+      stale: 0,
+      alreadyHandled: 0,
+      groupsChecked: 0,
+      groupsDeferred: 0,
+    };
     try {
       if (!wake) await this.maybeDiscover();
       let sawNew = false;
       let seeded = false;
-      const ids = wake ? [...this.ids] : this.idsForThisTick();
+      const ids = wake ? this.idsForWake(counts) : this.idsForThisTick();
       for (const conversationId of ids) {
+        if (wake) {
+          counts.groupsChecked += 1;
+          counts.groupsDeferred = this.ids.size - counts.groupsChecked;
+        }
         try {
           const outcome = await this.pollConversation(conversationId, wake ? counts : undefined);
           if (outcome.sawNew) sawNew = true;
           if (outcome.seeded) seeded = true;
         } catch (error) {
-          if (isApiBackoff(error)) throw error;
+          if (isApiBackoff(error)) {
+            if (wake) this.deferUntried(ids.slice(counts.groupsChecked), counts);
+            throw error;
+          }
           log.error(`Chat poll failed for ${conversationId}`, error);
         }
       }
@@ -284,6 +323,35 @@ export class ChatPoller {
       `Tracking encrypted Chat group ${conversationId}. First sight seeds a watermark and does not replay older messages. Commands stay off until the owner sends !auth, unless this group was already authorized.`,
     );
     return true;
+  }
+
+  private noteActive(conversationId: string, atMs?: number): void {
+    const stamp = atMs ?? this.clock();
+    if (!Number.isFinite(stamp)) return;
+    const prev = this.lastActiveAt.get(conversationId);
+    if (prev === undefined || stamp > prev) this.lastActiveAt.set(conversationId, stamp);
+  }
+
+  /** Most recently active first. Ties keep conversation-id order. No id is special-cased. */
+  private idsForWake(counts: WakeCatchupCounts): string[] {
+    const ranked = orderGroupsByRecency([...this.ids], this.lastActiveAt);
+    const selected = ranked.slice(0, Math.min(this.wakeMaxGroups, ranked.length));
+    for (const id of ranked.slice(selected.length)) this.pending.add(id);
+    counts.groupsDeferred = ranked.length - selected.length;
+    return selected;
+  }
+
+  /**
+   * Groups not read because a 429/402 stopped the wake go back to the normal
+   * rotation, ahead of groups already past the cap, so the next tick continues
+   * in recency order.
+   */
+  private deferUntried(untried: readonly string[], counts: WakeCatchupCounts): void {
+    const already = [...this.pending];
+    this.pending.clear();
+    for (const id of untried) this.pending.add(id);
+    for (const id of already) this.pending.add(id);
+    counts.groupsDeferred = this.ids.size - counts.groupsChecked;
   }
 
   private idsForThisTick(): string[] {
@@ -391,6 +459,9 @@ export class ChatPoller {
     const key = watermarkKey(conversationId);
     const watermark = this.store.getWatermark(key);
     const pulled = await this.chat.pullNew(conversationId, watermark, this.maxResults);
+    for (const event of pulled.events) {
+      this.noteActive(conversationId, eventTimeMs(event));
+    }
     if (!watermark) {
       this.store.setWatermark(key, pulled.newestId ?? "empty");
       log.info(
@@ -443,6 +514,25 @@ export function nextChatIdleDelayMs(currentMs: number, intervalMs: number, idleM
 }
 
 export { watermarkKey } from "./ids.js";
+
+function orderGroupsByRecency(
+  ids: readonly string[],
+  lastActiveAt: ReadonlyMap<string, number>,
+): string[] {
+  return [...ids].sort((a, b) => {
+    const diff = (lastActiveAt.get(b) ?? 0) - (lastActiveAt.get(a) ?? 0);
+    if (diff !== 0) return diff;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+  });
+}
+
+function eventTimeMs(event: Pick<DmEvent, "createdAt">): number | undefined {
+  if (!event.createdAt) return undefined;
+  const at = Date.parse(event.createdAt);
+  return Number.isFinite(at) ? at : undefined;
+}
 
 function isAnswerableCommand(text: string | undefined): boolean {
   return parseCommand(text) !== undefined || parseUnknownBang(text) !== undefined;

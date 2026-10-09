@@ -347,6 +347,7 @@ async function main(): Promise<void> {
             env.chatWakeCommandMaxAgeMinutes === undefined
               ? undefined
               : env.chatWakeCommandMaxAgeMinutes * 60_000,
+          wakeMaxGroups: env.chatWakeMaxGroups,
         },
       )
     : undefined;

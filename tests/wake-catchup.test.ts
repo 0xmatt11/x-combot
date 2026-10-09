@@ -58,9 +58,9 @@ function emptyPull() {
   return { events: [] as DmEvent[], newestId: "n", watermarkId: "n" };
 }
 
-function rateLimitError(retryAfterMs: number): Error {
-  const error = new Error("HTTP 429") as Error & { status: number; retryAfterMs: number };
-  error.status = 429;
+function rateLimitError(retryAfterMs: number, status = 429): Error {
+  const error = new Error(`HTTP ${status}`) as Error & { status: number; retryAfterMs: number };
+  error.status = status;
   error.retryAfterMs = retryAfterMs;
   return error;
 }
@@ -96,7 +96,7 @@ describe("wake catch-up", () => {
     stores.push(store);
   }
 
-  it("polls each tracked group once and does not poll again immediately", async () => {
+  it("reads one group on wake and does not poll again immediately", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const pull = vi.fn().mockResolvedValue(emptyPull());
     const listInbox = vi.fn().mockResolvedValue({ supported: true, ids: [] });
@@ -117,14 +117,23 @@ describe("wake catch-up", () => {
     track(poller, store);
 
     await poller.kick();
-    expect(pull.mock.calls.map((call) => call[0]).sort()).toEqual([...GROUPS].sort());
+    // No activity yet, so the tie goes to the lowest conversation id.
+    expect(pull.mock.calls.map((call) => call[0])).toEqual(["g11"]);
     expect(listInbox).not.toHaveBeenCalled();
     expect(wakeLines(vi.mocked(console.info))).toEqual([
-      expect.stringContaining(formatWakeCatchupLog({ answered: 0, stale: 0, alreadyHandled: 0 })),
+      expect.stringContaining(
+        formatWakeCatchupLog({
+          answered: 0,
+          stale: 0,
+          alreadyHandled: 0,
+          groupsChecked: 1,
+          groupsDeferred: 2,
+        }),
+      ),
     ]);
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(pull).toHaveBeenCalledTimes(GROUPS.length);
+    expect(pull).toHaveBeenCalledTimes(1);
     expect(wakeLines(vi.mocked(console.info))).toHaveLength(1);
   });
 
@@ -156,18 +165,28 @@ describe("wake catch-up", () => {
 
     now += HANG_WALL_JUMP_MS + 60_000;
     await vi.advanceTimersByTimeAsync(INTERVAL_MS);
-    expect(pull).toHaveBeenCalledTimes(1 + GROUPS.length);
-    expect(new Set(pull.mock.calls.map((call) => call[0]))).toEqual(new Set(GROUPS));
+    expect(pull).toHaveBeenCalledTimes(2);
+    expect(pull.mock.calls.map((call) => call[0])).toEqual(["g11", "g11"]);
     expect(listInbox).toHaveBeenCalledTimes(1);
-    expect(wakeLines(vi.mocked(console.info))).toHaveLength(1);
+    expect(wakeLines(vi.mocked(console.info))).toEqual([
+      expect.stringContaining(
+        formatWakeCatchupLog({
+          answered: 0,
+          stale: 0,
+          alreadyHandled: 0,
+          groupsChecked: 1,
+          groupsDeferred: 2,
+        }),
+      ),
+    ]);
 
     await poller.kick();
-    expect(pull).toHaveBeenCalledTimes(1 + GROUPS.length);
+    expect(pull).toHaveBeenCalledTimes(2);
     expect(wakeLines(vi.mocked(console.info))).toHaveLength(1);
 
     now += HANG_HEARTBEAT_MS;
     await poller.kick();
-    expect(pull).toHaveBeenCalledTimes(1 + GROUPS.length * 2);
+    expect(pull).toHaveBeenCalledTimes(3);
   });
 
   it("skips the history read while a rate-limit backoff is active", async () => {
@@ -192,7 +211,12 @@ describe("wake catch-up", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(pull).toHaveBeenCalledTimes(1);
     const lines = wakeLines(vi.mocked(console.info));
-    expect(lines.some((line) => line.includes("rate-limit backoff active"))).toBe(true);
+    expect(lines.at(-1)).toContain(
+      formatWakeCatchupLog(
+        { answered: 0, stale: 0, alreadyHandled: 0, groupsChecked: 0, groupsDeferred: 1 },
+        { backoff: true },
+      ),
+    );
     expect(lines.some((line) => line.includes("secret"))).toBe(false);
 
     await vi.advanceTimersByTimeAsync(retryAfterMs - 1);
@@ -257,7 +281,13 @@ describe("wake catch-up", () => {
     const lines = wakeLines(vi.mocked(console.info));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain(
-      formatWakeCatchupLog({ answered: 2, stale: 1, alreadyHandled: 0 }),
+      formatWakeCatchupLog({
+        answered: 2,
+        stale: 1,
+        alreadyHandled: 0,
+        groupsChecked: 1,
+        groupsDeferred: 0,
+      }),
     );
     expect(lines[0]).not.toContain("secret-phrase-xyz");
     expect(lines[0]).not.toContain("!help");
@@ -265,7 +295,13 @@ describe("wake catch-up", () => {
     await poller.kick();
     expect(client.sent).toHaveLength(2);
     expect(wakeLines(vi.mocked(console.info)).at(-1)).toContain(
-      formatWakeCatchupLog({ answered: 0, stale: 0, alreadyHandled: 3 }),
+      formatWakeCatchupLog({
+        answered: 0,
+        stale: 0,
+        alreadyHandled: 3,
+        groupsChecked: 1,
+        groupsDeferred: 0,
+      }),
     );
 
     pull.mockResolvedValue({
@@ -320,7 +356,13 @@ describe("wake catch-up", () => {
     expect(client.sent).toHaveLength(0);
     expect(store.hasProcessed("two-min")).toBe(true);
     expect(wakeLines(vi.mocked(console.info))[0]).toContain(
-      formatWakeCatchupLog({ answered: 0, stale: 1, alreadyHandled: 0 }),
+      formatWakeCatchupLog({
+        answered: 0,
+        stale: 1,
+        alreadyHandled: 0,
+        groupsChecked: 1,
+        groupsDeferred: 0,
+      }),
     );
   });
 
@@ -417,18 +459,244 @@ describe("wake catch-up", () => {
     expect(client.sent.filter((message) => message.text.includes("HELP_TEXT"))).toHaveLength(1);
     expect(client.sent.filter((message) => message.text.includes("RULES_TEXT"))).toHaveLength(1);
     expect(wakeLines(vi.mocked(console.info))[0]).toContain(
-      formatWakeCatchupLog({ answered: 1, stale: 0, alreadyHandled: 1 }),
+      formatWakeCatchupLog({
+        answered: 1,
+        stale: 0,
+        alreadyHandled: 1,
+        groupsChecked: 1,
+        groupsDeferred: 0,
+      }),
     );
 
     await poller.kick();
     expect(seenWatermarks[1]).toBe(rules.id);
     expect(client.sent).toHaveLength(2);
     expect(wakeLines(vi.mocked(console.info))[1]).toContain(
-      formatWakeCatchupLog({ answered: 0, stale: 0, alreadyHandled: 2 }),
+      formatWakeCatchupLog({
+        answered: 0,
+        stale: 0,
+        alreadyHandled: 2,
+        groupsChecked: 1,
+        groupsDeferred: 0,
+      }),
     );
     expect(wakeLines(vi.mocked(console.info)).join("\n")).not.toContain("!help");
     expect(wakeLines(vi.mocked(console.info)).join("\n")).not.toContain("!rules");
   });
+
+  it("reads the most recently active group and returns the rest to the normal rotation", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = NOW;
+    const calls: string[] = [];
+    const pull = vi.fn(async (conversationId: string) => {
+      calls.push(conversationId);
+      return emptyPull();
+    });
+    const store = new Store(":memory:");
+    const poller = new ChatPoller(
+      { pullNew: pull } as unknown as ChatService,
+      store,
+      { processEvent: vi.fn() } as unknown as ModerationEngine,
+      INTERVAL_MS,
+      [...GROUPS],
+      50,
+      INTERVAL_MS,
+      {
+        policy: chatListenPolicy({ mode: "all" }),
+        maxPollsPerTick: 1,
+        now: () => now,
+      },
+    );
+    track(poller, store);
+    poller.observeFromActivity("g11");
+    now += 1_000;
+    poller.observeFromActivity("g33");
+
+    await poller.kick();
+    expect(calls).toEqual(["g33"]);
+    expect(wakeLines(vi.mocked(console.info))).toEqual([
+      expect.stringContaining(
+        formatWakeCatchupLog({
+          answered: 0,
+          stale: 0,
+          alreadyHandled: 0,
+          groupsChecked: 1,
+          groupsDeferred: 2,
+        }),
+      ),
+    ]);
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+    expect(calls).toEqual(["g33", "g11"]);
+    expect(wakeLines(vi.mocked(console.info))).toHaveLength(1);
+  });
+
+  it("ranks a newer command ahead of older Activity", async () => {
+    let now = NOW - 120_000;
+    const calls: string[] = [];
+    const pull = vi.fn(async (conversationId: string) => {
+      calls.push(conversationId);
+      if (conversationId !== "g22") return emptyPull();
+      return {
+        events: [
+          command({
+            id: "rules-g22",
+            sequenceId: "1",
+            text: "!rules",
+            conversationId: "g22",
+            createdAt: new Date(NOW).toISOString(),
+          }),
+        ],
+        newestId: "rules-g22",
+        watermarkId: "rules-g22",
+      };
+    });
+    const store = new Store(":memory:");
+    const poller = new ChatPoller(
+      { pullNew: pull } as unknown as ChatService,
+      store,
+      { processEvent: vi.fn().mockResolvedValue({ replies: [] }) } as unknown as ModerationEngine,
+      INTERVAL_MS,
+      [...GROUPS],
+      50,
+      INTERVAL_MS,
+      {
+        policy: chatListenPolicy({ mode: "all" }),
+        maxPollsPerTick: GROUPS.length,
+        now: () => now,
+      },
+    );
+    track(poller, store);
+    poller.observeFromActivity("g11");
+    now = NOW;
+
+    await poller.pollOnce();
+    expect(calls).toEqual([...GROUPS]);
+    calls.length = 0;
+
+    await poller.kick();
+    expect(calls).toEqual(["g22"]);
+    expect(wakeLines(vi.mocked(console.info))).toEqual([
+      expect.stringContaining(
+        formatWakeCatchupLog({
+          answered: 0,
+          stale: 0,
+          alreadyHandled: 0,
+          groupsChecked: 1,
+          groupsDeferred: 2,
+        }),
+      ),
+    ]);
+  });
+
+  it("reads two groups when CHAT_WAKE_MAX_GROUPS is 2, newest first", async () => {
+    let now = NOW;
+    const calls: string[] = [];
+    const pull = vi.fn(async (conversationId: string) => {
+      calls.push(conversationId);
+      return emptyPull();
+    });
+    const store = new Store(":memory:");
+    const poller = new ChatPoller(
+      { pullNew: pull } as unknown as ChatService,
+      store,
+      { processEvent: vi.fn() } as unknown as ModerationEngine,
+      INTERVAL_MS,
+      [...GROUPS],
+      50,
+      INTERVAL_MS,
+      {
+        policy: chatListenPolicy({ mode: "all" }),
+        wakeMaxGroups: 2,
+        now: () => now,
+      },
+    );
+    track(poller, store);
+    poller.observeFromActivity("g11");
+    now += 1_000;
+    poller.observeFromActivity("g22");
+    now += 1_000;
+    poller.observeFromActivity("g33");
+
+    await poller.kick();
+    expect(calls).toEqual(["g33", "g22"]);
+    expect(wakeLines(vi.mocked(console.info))).toEqual([
+      expect.stringContaining(
+        formatWakeCatchupLog({
+          answered: 0,
+          stale: 0,
+          alreadyHandled: 0,
+          groupsChecked: 2,
+          groupsDeferred: 1,
+        }),
+      ),
+    ]);
+  });
+
+  it.each([429, 402])(
+    "stops the wake on the first %s and does not call X again until backoff ends",
+    async (status) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let now = NOW;
+      const calls: string[] = [];
+      const retryAfterMs = 60_000;
+      const pull = vi.fn(async (conversationId: string) => {
+        calls.push(conversationId);
+        if (calls.length === 1) throw rateLimitError(retryAfterMs, status);
+        return emptyPull();
+      });
+      const store = new Store(":memory:");
+      const poller = new ChatPoller(
+        { pullNew: pull } as unknown as ChatService,
+        store,
+        { processEvent: vi.fn() } as unknown as ModerationEngine,
+        INTERVAL_MS,
+        [...GROUPS],
+        50,
+        INTERVAL_MS,
+        {
+          policy: chatListenPolicy({ mode: "all" }),
+          maxPollsPerTick: 1,
+          wakeMaxGroups: 2,
+          now: () => now,
+        },
+      );
+      track(poller, store);
+      poller.observeFromActivity("g11");
+      now += 1_000;
+      poller.observeFromActivity("g22");
+      now += 1_000;
+      poller.observeFromActivity("g33");
+
+      await poller.kick();
+      expect(calls).toEqual(["g33"]);
+      expect(wakeLines(vi.mocked(console.info))[0]).toContain(
+        formatWakeCatchupLog({
+          answered: 0,
+          stale: 0,
+          alreadyHandled: 0,
+          groupsChecked: 1,
+          groupsDeferred: 2,
+        }),
+      );
+
+      await poller.kick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toEqual(["g33"]);
+      expect(wakeLines(vi.mocked(console.info)).at(-1)).toContain(
+        formatWakeCatchupLog(
+          { answered: 0, stale: 0, alreadyHandled: 0, groupsChecked: 0, groupsDeferred: 3 },
+          { backoff: true },
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(retryAfterMs - 1);
+      expect(calls).toEqual(["g33"]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(calls).toEqual(["g33", "g22"]);
+      expect(wakeLines(vi.mocked(console.info)).filter((line) => !line.includes("backoff"))).toHaveLength(1);
+    },
+  );
 
   it("reads CHAT_WAKE_COMMAND_MAX_AGE_MINUTES", () => {
     process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
@@ -447,6 +715,28 @@ describe("wake catch-up", () => {
     } finally {
       if (previous === undefined) delete process.env.CHAT_WAKE_COMMAND_MAX_AGE_MINUTES;
       else process.env.CHAT_WAKE_COMMAND_MAX_AGE_MINUTES = previous;
+    }
+  });
+
+  it("reads CHAT_WAKE_MAX_GROUPS", () => {
+    process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
+    const previous = process.env.CHAT_WAKE_MAX_GROUPS;
+    try {
+      delete process.env.CHAT_WAKE_MAX_GROUPS;
+      expect(loadEnv(true).chatWakeMaxGroups).toBeUndefined();
+      process.env.CHAT_WAKE_MAX_GROUPS = " 3 ";
+      expect(loadEnv(true).chatWakeMaxGroups).toBe(3);
+      process.env.CHAT_WAKE_MAX_GROUPS = "1";
+      expect(loadEnv(true).chatWakeMaxGroups).toBe(1);
+      process.env.CHAT_WAKE_MAX_GROUPS = "0";
+      expect(() => loadEnv(true)).toThrow(/CHAT_WAKE_MAX_GROUPS/);
+      process.env.CHAT_WAKE_MAX_GROUPS = "-1";
+      expect(() => loadEnv(true)).toThrow(/CHAT_WAKE_MAX_GROUPS/);
+      process.env.CHAT_WAKE_MAX_GROUPS = "1.5";
+      expect(() => loadEnv(true)).toThrow(/CHAT_WAKE_MAX_GROUPS/);
+    } finally {
+      if (previous === undefined) delete process.env.CHAT_WAKE_MAX_GROUPS;
+      else process.env.CHAT_WAKE_MAX_GROUPS = previous;
     }
   });
 });

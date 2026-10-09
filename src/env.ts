@@ -72,6 +72,17 @@ function optionalWakeCommandMaxAgeMinutes(name: string): number | undefined {
   return parsed;
 }
 
+/** How many groups a wake reads. Unset stays unset so the poller can default to 1. */
+function optionalWakeMaxGroups(name: string): number | undefined {
+  const value = optional(name);
+  if (value === undefined) return undefined;
+  const message = `${name} must be a whole number >= 1`;
+  if (!/^[1-9]\d*$/.test(value)) throw new Error(message);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(message);
+  return parsed;
+}
+
 /** Whole minutes, 1 through 7 days. Unset stays unset so the caller can default. */
 const MAX_PUBLIC_KEY_SUMMARY_MINUTES = 7 * 24 * 60;
 
@@ -341,6 +352,11 @@ export interface Env {
    * Unset is 30. Older commands are marked handled and not answered.
    */
   chatWakeCommandMaxAgeMinutes?: number;
+  /**
+   * History reads on a wake, most recently active group first.
+   * Unset is 1. Groups past the cap stay on the normal poll rotation.
+   */
+  chatWakeMaxGroups?: number;
   activityEnabled?: boolean;
   activityTransport?: "stream" | "webhook" | "both";
   activitySubscribe?: boolean;
@@ -492,6 +508,7 @@ export function loadEnv(requireOwner = true): Env {
     chatWakeCommandMaxAgeMinutes: optionalWakeCommandMaxAgeMinutes(
       "CHAT_WAKE_COMMAND_MAX_AGE_MINUTES",
     ),
+    chatWakeMaxGroups: optionalWakeMaxGroups("CHAT_WAKE_MAX_GROUPS"),
     activityEnabled: optionalBool("ACTIVITY_ENABLED"),
     activityTransport: optionalActivityTransport("ACTIVITY_TRANSPORT"),
     activitySubscribe: optionalBool("ACTIVITY_SUBSCRIBE"),
