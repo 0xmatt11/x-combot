@@ -858,7 +858,7 @@ Edits from X replace `text` and keep the previous body in `original_text`. Delet
 
 Backfill walks `GET /2/chat/conversations/:id/events` once per chat, from the newest page back to the start, and saves the cursor and a done flag. It runs for every group already known at startup and for a group the first time it is seen. It fetches at most one page per poll tick, and only after that tick's normal reads and any wake catch-up have succeeded. It does not run while a history 429/402 backoff is active. The first 429 or 402 stops the walk, arms that backoff, and the next tick resumes from the saved cursor. A finished chat is never walked again. Command handling does not wait on it. If the local store is empty, `!ask` answers with what is stored (possibly nothing) and does not call X for context.
 
-Questions are also searched locally (keyword, `@sender`, and today / yesterday / last week / last month). Matching lines are added to the prompt, including membership lines such as who was added. There is no separate search command.
+Questions are also searched locally (keyword, `@sender`, and today / yesterday / last week / last month). Matching lines are added to the prompt, including membership lines such as who was added. There is no separate search command. Operators on the bot machine export the transcript with `npm run history:export`. That script is not a chat command. See [Export local chat history](#export-local-chat-history).
 
 ## Environment
 
@@ -937,6 +937,42 @@ SQLite also holds warns, notes, mutes, flood timestamps, processed event ids, wa
 
 The live process is `scripts/run-live.sh`. It writes `/tmp/x-combot.pid`, appends to `logs/bot.log`, and restarts the bot after a crash (5 seconds, then up to 60). Stop it with `kill "$(cat /tmp/x-combot.pid)"`.
 
+### Export local chat history
+
+This is an operator script, not a chat command. It does not appear in `!help`. An assistant runs it on the bot's machine and hands the owner the file.
+
+`npm run history:export` opens `DATABASE_PATH` (default `data/bot.sqlite`) read-only. It can run while the bot is up. It does not checkpoint, migrate, or write the database, including the WAL. The terminal prints one line: the file path, the message count, and the date range. Message text is not printed there unless `--stdout` is passed. The file is mode `0600`. The default directory is `exports/`, which is gitignored.
+
+Times are `America/New_York`, labeled `ET` all year. A person is `@handle` or a display name. A raw numeric user id is not shown when a name is known. One text line per message:
+
+```
+2026-10-09 13:54 ET  @handle: text
+```
+
+A reply is `↳ reply to @handle`. Rows deleted in X are tagged `[deleted]`. Edits are tagged `[edited]` and keep the previous body as `(was: …)`. Those rows are included unless `--no-include-deleted` is set. This default is the export tool's own switch. It does not follow `CHAT_HISTORY_INCLUDE_DELETED`. `--members` inserts join, add, and leave lines in time order inside the chat. `--search` uses FTS5 when this SQLite build has it, and `LIKE` otherwise. `--limit` keeps the newest N messages and writes them oldest first. A group name is shown when that conversation has a `group_name` note (`!note group_name …`) or `group_name` in `conversation_settings`.
+
+```
+npm run history:export -- --list
+npm run history:export -- --chat gYOUR_GROUP_ID --since 7d --format md
+npm run history:export -- --from @alice --search "ship name" --members --out /tmp/alice.txt
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--list` | Inventory only. No transcript file |
+| `--chat <id>` | Repeatable. Default is every chat |
+| `--since`, `--until` | ISO date (`2026-10-09`), ISO timestamp, New York wall time (`2026-10-09 13:54`), or a relative age (`30m`, `12h`, `7d`, `2w`) |
+| `--from <@handle or user id>` | That sender only |
+| `--search <text>` | FTS5 when available, otherwise `LIKE` |
+| `--include-deleted` | Default. `--no-include-deleted` leaves those rows out |
+| `--members` | Join, add, and leave lines in time order |
+| `--format txt\|md\|csv\|json` | Default `txt` |
+| `--out <path>` | Default `exports/<chat-or-all>-<timestamp>.<ext>` |
+| `--limit N` | Newest N messages, written oldest first |
+| `--stdout` | Print the transcript after the summary line |
+
+A date with no clock time is that calendar day in `America/New_York`. `--until 2026-10-09` includes that whole day.
+
 Host boot runs `scripts/boot-start.sh` from the `start-sand-box` hook. Boot lines go to `/tmp/x-combot-boot.log`. From the repo root, install or refresh that hook with `sudo ./scripts/install-box-boot-hook.sh`. If an image refresh removes the hook marker, boot logs a warning with that command. It does not run sudo.
 
 An image refresh can keep the repo, `data/`, and `.env`, and drop `node_modules/`. Before the bot starts, `scripts/ensure-deps.sh` (from both launchers) runs `npm ci --no-audit --no-fund` when `node_modules/.bin/tsx` is missing, or when `node_modules/.package-lock.json` is older than `package-lock.json` or its installed packages differ. If `npm ci` fails, it tries `npm install --no-audit --no-fund` once. If that fails, it logs the npm exit code and exits non-zero. It does not retry in a loop. `/tmp/x-combot-npm-ci.lock` keeps a second launcher from installing at the same time. One line is written before the install and one after, to the boot log and `logs/bot.log`. The launchers do not read or print `.env`. `tests/ensure-deps.test.ts` covers the missing-`tsx` path with a stub `npm`.
@@ -978,10 +1014,12 @@ src/chat/activity.ts    # stream/webhook parse and intake
 src/hang-watchdog.ts    # pause/resume and dead Activity stream recovery
 src/chat/identity.ts    # key file and Juicebox unlock
 src/store.ts            # SQLite, including processed_events and watermarks
+src/cli/history-export.ts # read-only query and transcript formats for the operator export
 config/default.yaml
 scripts/oauth.ts
 scripts/chat-register.ts
 scripts/chat-rotate.ts
+scripts/history-export.ts # operator export (`npm run history:export`), not a chat command
 scripts/run-live.sh       # live supervisor (pidfile, bot.log, restart backoff)
 scripts/boot-start.sh     # boot hook launcher
 scripts/ensure-deps.sh    # npm ci when tsx or the installed lockfile is missing or stale

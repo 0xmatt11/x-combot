@@ -10,3 +10,4 @@ chat-recent-messages.json
 .DS_Store
 coverage/
 .vitest/
+exports/
