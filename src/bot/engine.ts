@@ -1741,7 +1741,15 @@ export class ModerationEngine {
         set: (xp) => this.store.setUserXp(conversationId, userId, xp, username),
       },
     });
-    await this.reply(conversationId, text, actions);
+    try {
+      await this.reply(conversationId, text, actions);
+    } catch {
+      // The hand is already settled. The send path has already retried a
+      // shorter quote and a plain message. This line names the command only.
+      log.warn(
+        `Casino result was not delivered conversation=${conversationId} command=${casinoCommandName(game, args)}`,
+      );
+    }
   }
 
   private async lookupDiceUser(userId: string): Promise<XUser | undefined> {
@@ -5381,6 +5389,12 @@ type PurgeHistoryRead =
   | { status: "ok"; events: DmEvent[] }
   | { status: "rate_limited"; retryAfterMs?: number }
   | { status: "failed"; error: unknown };
+
+/** Bang name for a casino warn. The settled hand text is not included. */
+function casinoCommandName(game: CasinoGame, args: string): string {
+  const rest = args.trim();
+  return rest ? `${game} ${rest}` : game;
+}
 
 function purgeUsage(): string {
   return `Usage: !purge <n>. n is how many of the last messages to delete: any positive integer, hard cap ${PURGE_MAX}. Starts at the most recent message and walks backward, not oldest-first. The !purge line is not included. X only deletes events this account can remove.`;
