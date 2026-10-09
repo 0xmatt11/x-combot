@@ -164,7 +164,7 @@ describe("chat history store", () => {
     }
   });
 
-  it("prunes by message count and by age", () => {
+  it("prunes by message count and by age when a cap is set", () => {
     const log = history(memoryStore(), { maxMessages: 2, maxDays: 10 });
     const now = Date.parse("2026-10-09T00:00:00.000Z");
     log.observe(message({ id: "old", text: "ancient", createdAt: new Date(now - 40 * 86400000).toISOString() }));
@@ -174,6 +174,53 @@ describe("chat history store", () => {
     const removed = log.prune(now);
     expect(removed.messages).toBeGreaterThanOrEqual(2);
     expect(log.listMessages(GROUP).map((row) => row.message_id)).toEqual(["b", "c"]);
+  });
+
+  it("keeps every row when the retention defaults are left unset", () => {
+    const store = memoryStore();
+    const log = history(store);
+    const now = Date.parse("2026-10-09T00:00:00.000Z");
+    expect(log.hasRetentionLimit()).toBe(false);
+    for (let index = 0; index < 5; index += 1) {
+      log.observe(
+        message({
+          id: `kept-${index}`,
+          text: `kept-${index}`,
+          createdAt: new Date(now - (400 + index) * 86400000).toISOString(),
+        }),
+      );
+    }
+    log.observe(
+      message({
+        id: "join-old",
+        eventType: "ParticipantsJoin",
+        membershipKind: "add",
+        participantIds: [grok.id],
+        participants: [grok],
+        createdAt: new Date(now - 500 * 86400000).toISOString(),
+        text: undefined,
+      }),
+    );
+    expect(log.prune(now)).toEqual({ messages: 0, membership: 0 });
+    expect(log.listMessages(GROUP).map((row) => row.message_id).sort()).toEqual([
+      "kept-0",
+      "kept-1",
+      "kept-2",
+      "kept-3",
+      "kept-4",
+    ]);
+    expect(log.listMembership(GROUP)).toHaveLength(1);
+
+    new ModerationEngine(store, new MockXClient(), runtime());
+    expect(log.prune(now)).toEqual({ messages: 0, membership: 0 });
+    expect(log.listMessages(GROUP)).toHaveLength(5);
+    expect(log.listMembership(GROUP)).toHaveLength(1);
+
+    const explicitZero = history(store, { maxMessages: 0, maxDays: 0 });
+    expect(explicitZero.hasRetentionLimit()).toBe(false);
+    expect(explicitZero.prune(now)).toEqual({ messages: 0, membership: 0 });
+    expect(explicitZero.listMessages(GROUP)).toHaveLength(5);
+    expect(explicitZero.listMembership(GROUP)).toHaveLength(1);
   });
 
   it("keeps an edit's new text and the original body", () => {
@@ -732,7 +779,7 @@ describe("chat history backfill on the poller", () => {
 });
 
 describe("CHAT_HISTORY env", () => {
-  it("defaults history on, include-deleted on, and the retention caps", () => {
+  it("defaults history on, include-deleted on, and retention unlimited", () => {
     process.env.BOT_OWNER_ID = process.env.BOT_OWNER_ID ?? "1";
     const names = [
       "CHAT_HISTORY_ENABLED",
@@ -746,8 +793,14 @@ describe("CHAT_HISTORY env", () => {
       const env = loadEnv(true);
       expect(env.chatHistoryEnabled).toBe(true);
       expect(env.chatHistoryIncludeDeleted).toBe(true);
-      expect(env.chatHistoryMaxMessages).toBe(50_000);
-      expect(env.chatHistoryMaxDays).toBe(365);
+      expect(env.chatHistoryMaxMessages).toBe(0);
+      expect(env.chatHistoryMaxDays).toBe(0);
+
+      process.env.CHAT_HISTORY_MAX_MESSAGES = "0";
+      process.env.CHAT_HISTORY_MAX_DAYS = "0";
+      const zeros = loadEnv(true);
+      expect(zeros.chatHistoryMaxMessages).toBe(0);
+      expect(zeros.chatHistoryMaxDays).toBe(0);
 
       process.env.CHAT_HISTORY_ENABLED = "false";
       process.env.CHAT_HISTORY_INCLUDE_DELETED = "false";

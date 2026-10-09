@@ -850,7 +850,7 @@ Tables: `chat_history_messages`, `chat_history_membership`, `chat_history_backfi
 
 Each row stores the message id, sequence id, sender id, `@handle` or display name when we have one, timestamp, text, reply-to id, and a short media marker (`image`, `video`, `audio`, `gif`, `file`). Membership rows store join, add, and leave with who and when. The bot's own sends are included. So is every page the live poll and the wake catch-up already decrypted.
 
-`CHAT_HISTORY_MAX_MESSAGES` (default 50000 per conversation) and `CHAT_HISTORY_MAX_DAYS` (default 365) are applied at startup and once an hour. The LLM tail is a `LIMIT` query, not a full-table load.
+Nothing is pruned unless an operator sets a cap. `CHAT_HISTORY_MAX_MESSAGES` and `CHAT_HISTORY_MAX_DAYS` default to unset, which is `0` and means unlimited. A positive value is an opt-in limit, applied at startup and once an hour. `0` on either variable leaves that dimension uncapped. The LLM tail is a `LIMIT` query, not a full-table load.
 
 `!purge` does not remove or rewrite that text. Rows X actually deleted get `deleted_in_x_at` and `deleted_by='purge'`. They still count for `!ask` and local search. `CHAT_HISTORY_INCLUDE_DELETED` defaults to true. Set it to `false` and those rows are left out of the prompt and out of search. The text stays on disk either way.
 
@@ -924,8 +924,8 @@ Questions are also searched locally (keyword, `@sender`, and today / yesterday /
 | `CONFIG_PATH` | Default `config/default.yaml` |
 | `DATABASE_PATH` | Default `data/bot.sqlite` |
 | `CHAT_HISTORY_ENABLED` | Default true. Plaintext history for encrypted groups. `false` makes `!ask` read X again |
-| `CHAT_HISTORY_MAX_MESSAGES` | Per conversation. Default 50000. Pruned at startup and hourly |
-| `CHAT_HISTORY_MAX_DAYS` | Per conversation. Default 365 |
+| `CHAT_HISTORY_MAX_MESSAGES` | Optional. Unset or `0` keeps every message. A positive number is a per-conversation cap, pruned at startup and hourly |
+| `CHAT_HISTORY_MAX_DAYS` | Optional. Unset or `0` keeps every day. A positive number drops older rows at startup and hourly |
 | `CHAT_HISTORY_INCLUDE_DELETED` | Default true. `false` leaves deleted-in-X rows out of the LLM prompt and local search. The text stays in SQLite |
 | `TOKEN_PATH` | Default `data/tokens.json` |
 

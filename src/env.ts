@@ -355,9 +355,9 @@ export interface Env {
    * The database file is mode 0600 because it holds plaintext.
    */
   chatHistoryEnabled: boolean;
-  /** Rows kept per conversation. Default 50000. */
+  /** Rows kept per conversation. `0` (the default) keeps every row. */
   chatHistoryMaxMessages: number;
-  /** Drop rows older than this many days. Default 365. */
+  /** Drop rows older than this many days. `0` (the default) keeps every day. */
   chatHistoryMaxDays: number;
   /**
    * When false, LLM context and local search skip rows stamped deleted in X.
@@ -525,9 +525,8 @@ export function loadEnv(requireOwner = true): Env {
         recentMessagesPathBeside(optional("CHAT_KEYS_PATH") ?? "data/chat-keys.json"),
     ),
     chatHistoryEnabled: optionalBool("CHAT_HISTORY_ENABLED") ?? true,
-    chatHistoryMaxMessages:
-      optionalNonNegativeInt("CHAT_HISTORY_MAX_MESSAGES") ?? 50_000,
-    chatHistoryMaxDays: optionalNonNegativeInt("CHAT_HISTORY_MAX_DAYS") ?? 365,
+    chatHistoryMaxMessages: optionalNonNegativeInt("CHAT_HISTORY_MAX_MESSAGES") ?? 0,
+    chatHistoryMaxDays: optionalNonNegativeInt("CHAT_HISTORY_MAX_DAYS") ?? 0,
     chatHistoryIncludeDeleted: optionalBool("CHAT_HISTORY_INCLUDE_DELETED") ?? true,
     chatPin: optional("CHAT_PIN"),
     chatPollIntervalMs: chatPollRaw ? Number(chatPollRaw) : undefined,

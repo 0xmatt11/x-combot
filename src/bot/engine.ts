@@ -449,7 +449,7 @@ export interface EngineDeps {
   recentMessagesWriteDelayMs?: number;
   /**
    * Local decrypted history in SQLite. Absent uses the defaults
-   * (on, 50000 messages, 365 days, deleted rows included in LLM context).
+   * (on, no retention cap, deleted rows included in LLM context).
    */
   chatHistory?: ChatHistoryOptions;
 }
@@ -550,7 +550,9 @@ export class ModerationEngine {
       this.rememberBotOutbound(conversationId, sent, detail);
     });
     this.chatHistory = createChatHistory(store.db, deps.chatHistory ?? {});
-    if (this.chatHistory.enabled) this.chatHistory.prune();
+    if (this.chatHistory.enabled && this.chatHistory.hasRetentionLimit()) {
+      this.chatHistory.prune();
+    }
     this.purgeMemory = createPurgeMemory({
       ...(deps.recentMessagesPath ? { filePath: deps.recentMessagesPath } : {}),
       ...(deps.recentMessagesWriteDelayMs !== undefined

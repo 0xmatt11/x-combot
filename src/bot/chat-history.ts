@@ -8,11 +8,17 @@ import type { DmEvent, XUser } from "../types.js";
 /** Ask-mode `recent` window when the prompt is filled from this store. */
 export const LOCAL_ASK_RECENT_MESSAGES = 100;
 
-export const DEFAULT_CHAT_HISTORY_MAX_MESSAGES = 50_000;
-export const DEFAULT_CHAT_HISTORY_MAX_DAYS = 365;
+/** `0` means no cap. History is kept until an operator sets a positive limit. */
+export const DEFAULT_CHAT_HISTORY_MAX_MESSAGES = 0;
+export const DEFAULT_CHAT_HISTORY_MAX_DAYS = 0;
 
-/** How often a running process drops rows past the retention caps. */
+/** How often a running process drops rows past an explicit retention cap. */
 export const CHAT_HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+/** True when a positive message cap or age cap is configured. `0` is unlimited. */
+export function chatHistoryHasRetentionLimit(maxMessages: number, maxDays: number): boolean {
+  return maxMessages > 0 || maxDays > 0;
+}
 
 /** One backfill page. Matches the events-list page cap. */
 export const CHAT_HISTORY_BACKFILL_PAGE_SIZE = 100;
@@ -25,7 +31,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export interface ChatHistoryOptions {
   /** Default true. When false, nothing is written and asks keep using X. */
   enabled?: boolean;
+  /** Positive cap per conversation. `0` or omitted keeps every message. */
   maxMessages?: number;
+  /** Positive age cap in days. `0` or omitted keeps every day. */
   maxDays?: number;
   /**
    * When false, rows with `deleted_in_x_at` are left out of LLM context and search.
@@ -226,8 +234,8 @@ export class ChatHistory {
     this.db = db;
     this.enabled = options.enabled !== false;
     this.includeDeleted = options.includeDeleted !== false;
-    this.maxMessages = normalizeCap(options.maxMessages, DEFAULT_CHAT_HISTORY_MAX_MESSAGES);
-    this.maxDays = normalizeCap(options.maxDays, DEFAULT_CHAT_HISTORY_MAX_DAYS);
+    this.maxMessages = normalizeCap(options.maxMessages ?? DEFAULT_CHAT_HISTORY_MAX_MESSAGES);
+    this.maxDays = normalizeCap(options.maxDays ?? DEFAULT_CHAT_HISTORY_MAX_DAYS);
     const ftsReady = this.enabled
       ? ensureChatHistorySchema(db).fts
       : schemaReady.has(db) && ftsPresent(db);
@@ -488,8 +496,13 @@ export class ChatHistory {
       .run(nowIso, conversationId);
   }
 
+  /** True when a positive message or age cap will drop rows. */
+  hasRetentionLimit(): boolean {
+    return chatHistoryHasRetentionLimit(this.maxMessages, this.maxDays);
+  }
+
   prune(nowMs = Date.now()): { messages: number; membership: number } {
-    if (!this.enabled) return { messages: 0, membership: 0 };
+    if (!this.enabled || !this.hasRetentionLimit()) return { messages: 0, membership: 0 };
     const cutoff = this.maxDays > 0 ? nowMs - this.maxDays * DAY_MS : nowMs;
     const removeMessages = this.db.prepare(
       "DELETE FROM chat_history_messages WHERE conversation_id = ? AND ts_ms IS NOT NULL AND ts_ms < ?",
@@ -530,7 +543,7 @@ export class ChatHistory {
           messages += removeMessages.run(row.conversation_id, cutoff).changes;
           membership += removeMembership.run(row.conversation_id, cutoff).changes;
         }
-        if (this.maxMessages >= 0) {
+        if (this.maxMessages > 0) {
           messages += trimMessages.run(row.conversation_id, this.maxMessages).changes;
           membership += trimMembership.run(row.conversation_id, this.maxMessages).changes;
         }
@@ -1130,9 +1143,9 @@ function readWaitMs(error: unknown): number {
   return status === 402 ? 5 * 60 * 1000 : 15_000;
 }
 
-function normalizeCap(value: number | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (!Number.isFinite(value) || value < 0) return fallback;
+/** `0` and any non-positive value mean unlimited. */
+function normalizeCap(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
 }
 

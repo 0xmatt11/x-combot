@@ -45,7 +45,10 @@ import {
   requireActivityAppBearer,
 } from "./chat/activity-subscribe.js";
 import { startActivityWebhook, type ActivityWebhook } from "./chat/activity-webhook.js";
-import { CHAT_HISTORY_PRUNE_INTERVAL_MS } from "./bot/chat-history.js";
+import {
+  CHAT_HISTORY_PRUNE_INTERVAL_MS,
+  chatHistoryHasRetentionLimit,
+} from "./bot/chat-history.js";
 import { CHAT_WATERMARK_PREFIX, isChatGroupId } from "./chat/ids.js";
 import { resolveChatListen, type ChatListenPolicy } from "./chat/listen.js";
 import {
@@ -286,14 +289,17 @@ async function main(): Promise<void> {
       },
     },
   );
+  const historyLimited =
+    env.chatHistoryEnabled &&
+    chatHistoryHasRetentionLimit(env.chatHistoryMaxMessages, env.chatHistoryMaxDays);
   if (env.chatHistoryEnabled) {
     log.info(
-      `Chat history is on in ${env.databasePath} (plaintext, mode 0600). Retention ${env.chatHistoryMaxMessages} messages or ${env.chatHistoryMaxDays} days per conversation. Deleted rows stay in LLM context: ${env.chatHistoryIncludeDeleted}. Backfill is one events page after each successful Chat poll.`,
+      `Chat history is on in ${env.databasePath} (plaintext, mode 0600). ${historyRetentionSentence(env.chatHistoryMaxMessages, env.chatHistoryMaxDays)} Deleted rows stay in LLM context: ${env.chatHistoryIncludeDeleted}. Backfill is one events page after each successful Chat poll.`,
     );
   } else {
     log.info("Chat history is off (CHAT_HISTORY_ENABLED=false). !ask reads X history directly.");
   }
-  const historyPrune = env.chatHistoryEnabled
+  const historyPrune = historyLimited
     ? setInterval(() => {
         engine.pruneChatHistory();
         store.restrictFilePermissions();
@@ -629,6 +635,14 @@ function buildLlmClient(env: Env, defaults: DefaultsConfig): { client?: LlmClien
     }),
     mode: `${connection.provider} ${connection.model}`,
   };
+}
+
+function historyRetentionSentence(maxMessages: number, maxDays: number): string {
+  if (!chatHistoryHasRetentionLimit(maxMessages, maxDays)) return "Retention is unlimited.";
+  const parts: string[] = [];
+  if (maxMessages > 0) parts.push(`${maxMessages} messages`);
+  if (maxDays > 0) parts.push(`${maxDays} days`);
+  return `Retention cap ${parts.join(" and ")} per conversation.`;
 }
 
 function isLoopback(url: string): boolean {
