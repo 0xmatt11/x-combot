@@ -64,7 +64,12 @@ import { OpenAiCompatibleClient } from "./llm/openai.js";
 import { resolveLlmConnection } from "./llm/provider.js";
 import type { DefaultsConfig } from "./types.js";
 import type { XClient } from "./x/client.js";
-import { LiveXClient, loadTokensFromDisk } from "./x/live-client.js";
+import {
+  clearReauthMarker,
+  LiveXClient,
+  loadTokensFromDisk,
+  REFRESH_SHUTDOWN_WAIT_MS,
+} from "./x/live-client.js";
 import { RoutedXClient } from "./x/routed-client.js";
 
 async function main(): Promise<void> {
@@ -93,6 +98,7 @@ async function main(): Promise<void> {
   });
 
   const me = await client.getMe();
+  clearReauthMarker(env.tokenPath);
   log.info(`Authenticated as @${me.username ?? "unknown"} (${me.id})`);
 
   if (env.boobsEnabled !== undefined || env.boobsVision !== undefined) {
@@ -420,27 +426,14 @@ async function main(): Promise<void> {
     `Hang watchdog: heartbeat every ${hangConfig.heartbeatIntervalMs}ms, stream stale after ${hangConfig.streamStaleMs}ms, restart cap ${hangConfig.restartCooldownMs}ms` +
       (watchStream ? ", watching the Activity stream." : "."),
   );
-  const hangWatch = startHangWatchdog({
-    config: hangConfig,
-    watchStream,
-    streamLastByte: () => streamBytes.at,
-    onReconnect: () => {
-      activityRuntime?.stream?.reconnect();
-      chatPoller?.kick();
-    },
-    onRestart: () => {
-      process.exit(1);
-    },
-    onHeartbeat: (at) => writeHeartbeat(hangConfig.heartbeatFile, at),
-    // Synchronous stderr so the restart line is in bot.log before process.exit.
-    log: (_level, message) => {
-      fs.writeSync(2, `[${new Date().toISOString()}] WARN ${message}\n`);
-    },
-  });
-
-  const shutdown = () => {
+  let hangWatch: { stop(): void } | undefined;
+  let stopRequested = false;
+  const shutdown = (code: number) => {
+    if (stopRequested) return;
+    stopRequested = true;
+    client.beginShutdown();
     log.info("Shutting down");
-    hangWatch.stop();
+    hangWatch?.stop();
     if (historyPrune) clearInterval(historyPrune);
     llmRetryDrain.stop();
     poller.stop();
@@ -449,11 +442,40 @@ async function main(): Promise<void> {
     activityRuntime?.stop();
     void activityRuntime?.webhook?.close();
     void closeImagineBrowser();
-    store.close();
-    process.exit(0);
+    void (async () => {
+      try {
+        await client.waitForRefresh(REFRESH_SHUTDOWN_WAIT_MS);
+      } catch {
+        // The in-flight refresh logs its own failure.
+      }
+      try {
+        store.close();
+      } catch {
+        // Still exit so the supervisor can restart or wait for re-auth.
+      }
+      process.exit(code);
+    })();
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+
+  hangWatch = startHangWatchdog({
+    config: hangConfig,
+    watchStream,
+    streamLastByte: () => streamBytes.at,
+    onReconnect: () => {
+      activityRuntime?.stream?.reconnect();
+      chatPoller?.kick();
+    },
+    onRestart: () => {
+      shutdown(1);
+    },
+    onHeartbeat: (at) => writeHeartbeat(hangConfig.heartbeatFile, at),
+    // Synchronous stderr so the restart line is in bot.log before process.exit.
+    log: (_level, message) => {
+      fs.writeSync(2, `[${new Date().toISOString()}] WARN ${message}\n`);
+    },
+  });
+  process.on("SIGINT", () => shutdown(0));
+  process.on("SIGTERM", () => shutdown(0));
 }
 
 async function openChatService(

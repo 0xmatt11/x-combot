@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import { classicDmLinkSignals } from "../bot/linkroast.js";
 import { log } from "../log.js";
 import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } from "../chat/wire.js";
@@ -27,12 +25,36 @@ import {
   USER_FIELDS,
   type XClient,
 } from "./client.js";
+import {
+  accessTokenNeedsRefresh,
+  clearReauthMarker,
+  diskTokenSupersedes,
+  loadTokensFromDisk,
+  persistTokens,
+  REAUTH_EXIT_CODE,
+  REAUTH_LOG_LINE,
+  requestRefreshedTokens,
+  scrubSecrets,
+  tokenLockPath,
+  withTokenFileLock,
+  writeReauthMarker,
+} from "./token-file.js";
+
+export {
+  ACCESS_TOKEN_REFRESH_SKEW_MS,
+  clearReauthMarker,
+  loadTokensFromDisk,
+  persistTokens,
+  REAUTH_EXIT_CODE,
+  REAUTH_HINT,
+  REAUTH_LOG_LINE,
+  REFRESH_SHUTDOWN_WAIT_MS,
+  reauthMarkerPath,
+} from "./token-file.js";
 
 const API_BASE = "https://api.x.com";
 /** X documents 5 MB for `dm_image`. GIFs are capped here too so a command cannot pull a huge file. */
 const DM_IMAGE_MAX_BYTES = 5_000_000;
-const TOKEN_URL = "https://api.x.com/2/oauth2/token";
-
 /**
  * `chat_message_event.fields` for GET /2/chat/conversations/:id/events.
  * The API accepts only `id`, `conversation_id`, `conversation_token`,
@@ -57,6 +79,8 @@ interface LiveClientOptions {
   clientSecret?: string;
   tokenPath?: string;
   tokens: TokenSet;
+  /** Production uses `process.exit`. Tests pass a function that throws. */
+  exitProcess?: (code: number) => never;
 }
 
 export interface ApiError extends Error {
@@ -80,13 +104,45 @@ export class LiveXClient implements XClient {
   private readonly clientId?: string;
   private readonly clientSecret?: string;
   private readonly tokenPath?: string;
+  private readonly exitProcess: (code: number) => never;
   private refreshPromise: Promise<void> | undefined;
+  private shuttingDown = false;
 
   constructor(options: LiveClientOptions) {
     this.tokens = options.tokens;
     this.clientId = options.clientId;
     this.clientSecret = options.clientSecret;
     this.tokenPath = options.tokenPath;
+    this.exitProcess =
+      options.exitProcess ??
+      ((code: number): never => {
+        process.exit(code);
+      });
+  }
+
+  /** SIGTERM: do not start another refresh. An in-flight one is allowed to finish. */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+  }
+
+  /** Resolves when the in-flight refresh finishes, or after `timeoutMs`. */
+  async waitForRefresh(timeoutMs: number): Promise<void> {
+    const pending = this.refreshPromise;
+    if (!pending) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pending.then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async getMe(): Promise<XUser> {
@@ -604,65 +660,102 @@ export class LiveXClient implements XClient {
   }
 
   private async ensureFreshToken(): Promise<void> {
-    if (!this.tokens.expiresAtMs) return;
-    if (this.tokens.expiresAtMs - Date.now() > 60_000) return;
+    // A still-valid access token is used as-is so a restart does not rotate it.
+    if (!accessTokenNeedsRefresh(this.tokens)) return;
     await this.refreshAccessToken();
   }
 
   private async refreshAccessToken(): Promise<void> {
-    if (!this.tokens.refreshToken) {
-      throw new Error(
-        "Access token expired and no refresh token is stored. Re-run `npm run oauth` with the offline.access scope.",
-      );
-    }
-    if (!this.clientId) {
-      throw new Error("CLIENT_ID is required to refresh OAuth 2.0 tokens.");
-    }
     if (this.refreshPromise) {
       await this.refreshPromise;
       return;
     }
+    if (this.shuttingDown) {
+      throw new Error("Shutdown in progress; not starting a new token refresh.");
+    }
+    if (!this.clientId) {
+      throw new Error("CLIENT_ID is required to refresh OAuth 2.0 tokens.");
+    }
 
-    this.refreshPromise = (async () => {
-      const body = new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: this.tokens.refreshToken!,
-        client_id: this.clientId!,
-      });
-      const headers: Record<string, string> = {
-        "Content-Type": "application/x-www-form-urlencoded",
-      };
-      if (this.clientSecret) {
-        headers.Authorization = `Basic ${Buffer.from(`${this.clientId}:${this.clientSecret}`).toString("base64")}`;
-      }
-      const response = await fetch(TOKEN_URL, { method: "POST", headers, body });
-      const payload = (await response.json()) as {
-        access_token?: string;
-        refresh_token?: string;
-        expires_in?: number;
-        error?: string;
-        error_description?: string;
-      };
-      if (!response.ok || !payload.access_token) {
-        throw new Error(
-          `Token refresh failed: ${payload.error_description ?? payload.error ?? response.status}`,
-        );
-      }
-      this.tokens = {
-        ...this.tokens,
-        accessToken: payload.access_token,
-        refreshToken: payload.refresh_token ?? this.tokens.refreshToken,
-        expiresAtMs: Date.now() + (payload.expires_in ?? 7200) * 1000,
-      };
-      persistTokens(this.tokenPath, this.tokens);
-      log.info("Refreshed OAuth 2.0 user access token");
-    })();
-
+    const run = this.refreshLocked();
+    this.refreshPromise = run;
     try {
-      await this.refreshPromise;
+      await run;
     } finally {
       this.refreshPromise = undefined;
     }
+  }
+
+  private async refreshLocked(): Promise<void> {
+    const memory = this.tokens;
+    const body = async (): Promise<void> => {
+      const disk = this.tokenPath ? loadTokensFromDisk(this.tokenPath) : undefined;
+      if (disk && diskTokenSupersedes(disk, memory)) {
+        this.tokens = {
+          accessToken: disk.accessToken,
+          refreshToken: disk.refreshToken ?? memory.refreshToken,
+          expiresAtMs: disk.expiresAtMs,
+          botUserId: disk.botUserId ?? memory.botUserId,
+        };
+        if (this.tokenPath) clearReauthMarker(this.tokenPath);
+        return;
+      }
+      const refreshToken = disk?.refreshToken || memory.refreshToken;
+      if (!refreshToken) {
+        throw new Error(
+          "Access token expired and no refresh token is stored. Re-run `npm run oauth` with the offline.access scope.",
+        );
+      }
+      const outcome = await requestRefreshedTokens({
+        clientId: this.clientId!,
+        clientSecret: this.clientSecret,
+        refreshToken,
+      });
+      if (outcome.kind === "rejected") {
+        const botUserId = memory.botUserId ?? disk?.botUserId;
+        try {
+          writeReauthMarker(this.tokenPath, {
+            error: outcome.error,
+            botUserId,
+            secrets: [refreshToken, memory.accessToken, disk?.accessToken ?? "", disk?.refreshToken ?? ""],
+          });
+        } catch {
+          log.error(
+            "Could not write data/reauth-needed. The supervisor will keep waiting until tokens.json changes.",
+          );
+        }
+        log.error(REAUTH_LOG_LINE);
+        this.exitProcess(REAUTH_EXIT_CODE);
+      }
+      const next: TokenSet = {
+        ...memory,
+        accessToken: outcome.accessToken,
+        refreshToken: outcome.refreshToken ?? refreshToken,
+        expiresAtMs: Date.now() + outcome.expiresInSec * 1000,
+        botUserId: memory.botUserId ?? disk?.botUserId,
+      };
+      if (this.tokenPath) {
+        try {
+          persistTokens(this.tokenPath, next);
+        } catch (error) {
+          this.tokens = next;
+          const detail = error instanceof Error ? scrubSecrets(error.message, [refreshToken, next.accessToken]) : "unknown";
+          log.error(
+            `Refreshed OAuth tokens could not be saved (${detail}). They are in memory for this process only; a restart will lose them.`,
+          );
+          return;
+        }
+      }
+      this.tokens = next;
+      if (this.tokenPath) clearReauthMarker(this.tokenPath);
+      log.info("Refreshed OAuth 2.0 user access token");
+    };
+
+    if (this.tokenPath) {
+      await withTokenFileLock(tokenLockPath(this.tokenPath), body);
+      return;
+    }
+    await body();
   }
 }
 
@@ -793,23 +886,6 @@ export function normalizeClassicDmEvent(raw: RawDmEvent, users: Map<string, XUse
   };
 }
 
-export function loadTokensFromDisk(tokenPath: string): TokenSet | undefined {
-  if (!fs.existsSync(tokenPath)) return undefined;
-  const raw = JSON.parse(fs.readFileSync(tokenPath, "utf8")) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_at_ms?: number;
-    bot_user_id?: string;
-  };
-  if (!raw.access_token) return undefined;
-  return {
-    accessToken: raw.access_token,
-    refreshToken: raw.refresh_token,
-    expiresAtMs: raw.expires_at_ms,
-    botUserId: raw.bot_user_id,
-  };
-}
-
 /**
  * Media upload wants the canonical conversation id.
  * Group ids stay `g…`. 1:1 ids stored with `-` are sent with `:`.
@@ -852,21 +928,3 @@ function readMediaId(body: unknown): string {
   return String(id);
 }
 
-export function persistTokens(tokenPath: string | undefined, tokens: TokenSet): void {
-  if (!tokenPath) return;
-  fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
-  fs.writeFileSync(
-    tokenPath,
-    `${JSON.stringify(
-      {
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken,
-        expires_at_ms: tokens.expiresAtMs,
-        bot_user_id: tokens.botUserId,
-      },
-      null,
-      2,
-    )}\n`,
-    { mode: 0o600 },
-  );
-}
