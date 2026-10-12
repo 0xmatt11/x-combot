@@ -73,7 +73,7 @@ admin_help: |
 
   Owner only
   !auth — exact !auth unlocks a new encrypted group
-  !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health: uptime, public_keys backoff and last success, Imagine (browser or api)
+  !status — owner only (BOT_OWNER_ID), same gate as !auth. ADMIN_IDS and per-group admins are ignored. Health: uptime, public_keys backoff and last success, Imagine (browser or api, and whether image and video generation are on)
 
   Moderation
   !warn @user [reason] — add a warning

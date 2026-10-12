@@ -1,7 +1,7 @@
 node_modules/
 dist/
 .env
-# Chat identity and member public-key cache (mode 0600). Never commit.
+# Local runtime files (mode 0600). Includes data/imagine-toggle.json. Never commit.
 data/
 chat-keys.json
 chat-remote-keys.json

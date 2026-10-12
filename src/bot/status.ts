@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatPublicKeyFetchedAt } from "../chat/remote-key-cache.js";
+import { formatImagineToggleClock } from "./imagine-toggle.js";
 import {
   imaginePublicPoolFor,
   imaginePublicUrlsFor,
@@ -121,6 +122,15 @@ export interface StatusSnapshot {
   llm: string;
   /** `off`, `browser`, `api`, `api, video`, or `api off`. */
   imagine: string;
+  /**
+   * Operator switch for `!imagine`. Absent when the snapshot does not
+   * include the on/off file. `false` is off.
+   */
+  imagineImage?: boolean;
+  /** Operator switch for `!video`. Same file as `imagineImage`. */
+  imagineVideo?: boolean;
+  /** Future ISO expiry from that file, when generation turns back on. */
+  imagineUntil?: string;
   welcome: boolean;
   /** `off`, `all`, or a comma-separated list of `@handle` and `on` (no printable handle). */
   troll: string;
@@ -158,7 +168,7 @@ export function formatStatusReport(snapshot: StatusSnapshot): string {
     pipelineLine("Activity", snapshot.pipeline?.activity),
     keysLine(snapshot.keys),
     `LLM: ${labelOrOff(snapshot.llm)}`,
-    `Imagine: ${labelOrOff(snapshot.imagine)}`,
+    imagineLine(snapshot),
     togglesLine(snapshot),
   ];
   if (snapshot.media) {
@@ -279,6 +289,15 @@ function versionLine(snapshot: StatusSnapshot): string | undefined {
   if (version) return `Version: ${version}`;
   if (sha) return `Version: ${sha}`;
   return undefined;
+}
+
+function imagineLine(snapshot: StatusSnapshot): string {
+  const base = `Imagine: ${labelOrOff(snapshot.imagine)}`;
+  if (typeof snapshot.imagineImage !== "boolean" && typeof snapshot.imagineVideo !== "boolean") return base;
+  const image = snapshot.imagineImage === false ? "off" : "on";
+  const video = snapshot.imagineVideo === false ? "off" : "on";
+  const until = snapshot.imagineUntil ? ` · back ${formatImagineToggleClock(snapshot.imagineUntil)}` : "";
+  return `${base} · image ${image} · video ${video}${until}`;
 }
 
 function labelOrOff(value: string): string {

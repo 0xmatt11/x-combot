@@ -18,6 +18,7 @@ import { fetchAdultImage } from "./bot/image-fetch.js";
 import { defaultMiladyBankPath, loadMiladyMemeBank } from "./bot/milady.js";
 import { createImageSearch } from "./bot/image-search.js";
 import { createUserFacingImagine } from "./bot/imagine-backend.js";
+import { defaultImagineTogglePath, readImagineToggle } from "./bot/imagine-toggle.js";
 import { closeImagineBrowser } from "./bot/imagine-browser.js";
 import {
   DEFAULT_IMAGINE_MODEL,
@@ -209,6 +210,18 @@ async function main(): Promise<void> {
       `!video enabled (model=${videoModel}, duration=${videoDuration}s, aspect=${videoAspect}, resolution=${videoResolution}).`,
     );
   }
+  const imagineTogglePath = defaultImagineTogglePath(env.databasePath);
+  const imagineToggle = readImagineToggle(imagineTogglePath);
+  if (imagineToggle.source !== "missing") {
+    const expiry = imagineToggle.until
+      ? ` until ${imagineToggle.until}`
+      : imagineToggle.expiredUntil
+        ? " (until passed, both on)"
+        : "";
+    log.info(
+      `Imagine switch file ${imagineTogglePath}: image ${imagineToggle.image ? "on" : "off"}, video ${imagineToggle.video ? "on" : "off"}${expiry}.`,
+    );
+  }
   const voiceLanguage = env.voiceTtsLanguage ?? DEFAULT_VOICE_LANGUAGE;
   const voice = imagineKey
     ? createVoiceClient({
@@ -280,6 +293,7 @@ async function main(): Promise<void> {
       publicKeys: chatService,
       llmMode: llm.mode,
       imagineBackend: backend,
+      imagineTogglePath,
       buildVersion: readBuildVersion(),
       featureRequest: {
         webhookUrl: env.requestWebhookUrl,

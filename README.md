@@ -17,8 +17,8 @@ Other chat bots can kick and delete anyone's messages when those apps expose tho
 - `!fathom` posts one random Fathom Lines NFT image from contract `0xce62f2a3F0aB5B5f0f5c71313CDE70d96E14DE23`. The lookup is OpenSea (public GraphQL by default, or the REST NFT endpoint when `OPENSEA_API_KEY` is set). The art is SVG and is rasterized to PNG before upload. The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
 - `!darwin`, `!lastwords`, `!obituary`, and `!finalboss` each post one canned cartoon line. Fiction only: Looney-Tunes physics, a fake last line, a roast obituary, or a video-game boss vignette. They do not describe real-world methods, do not call the LLM, and do not cost XP.
 - Optional adult photos: `!boobs`, `!ass`, `!booty` (`!booties` is an alias of `!booty`). Off until `BOOBS_ENABLED=true`. They use the saved imagine-public bank (`BOOBS_IMAGINE_APP` and the `BOOBS_IMAGINE_PUBLIC_*` URL lists), including each command's mp4 bank. `!ass` / `!booty` stills rotate through `BOOBS_IMAGINE_PUBLIC_BOOTY_URLS`. If that bank is empty or exhausted, image search runs. They do not open grok.com/imagine and they do not call api.x.ai image generation. `!imagine` and `!video` still use the Chrome session.
-- `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on.
-- `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one).
+- `!imagine <prompt>` generates one image on grok.com/imagine with the shared Chrome session. It does not use the adult-command switch and it does not call the image API while browser mode is on. An operator can turn it off from the bot machine. See [Turning Imagine off](#turning-imagine-off).
+- `!video <prompt>` generates a short clip the same way. It acknowledges immediately, then posts the video (or a temporary link when the page returned one). The same operator switch can turn video off without turning image off.
 - `!voice <persona> <text>` speaks that line as Girl 1 through Girl 10 and posts an audio attachment in encrypted Chat. Bare `!voice` lists those ten. Classic group DMs get a short note that Chat is required.
 - Encrypted groups: decrypt with [chat-xdk](https://github.com/xdevplatform/chat-xdk), reply with an encrypted payload, and (when opted in) take `chat.received` from the X Activity API.
 - With a Chat identity and no allowlist, it **tracks** every encrypted group the account is in, including groups it is added to later. A group first seen after this rule stays quiet until `BOT_OWNER_ID` sends `!auth` in that chat. Groups that already had a Chat watermark are grandfathered and keep being moderated.
@@ -306,8 +306,8 @@ If X Chat rate-limits `!ask`, `@bot`, `!summarize`, or `!analyze`, the bot says 
 
 | Command | |
 | --- | --- |
-| `!imagine <prompt>` | Image on grok.com/imagine. See [Imagine](#imagine) |
-| `!video <prompt>` | Short video on grok.com/imagine. See [Video](#video) |
+| `!imagine <prompt>` | Image on grok.com/imagine. See [Imagine](#imagine). When the operator switch is off, one line and no browser or API call. See [Turning Imagine off](#turning-imagine-off) |
+| `!video <prompt>` | Short video on grok.com/imagine. See [Video](#video). Same operator switch, separate from image |
 | `!voice` | Speak a line: Girl 1 through Girl 10. See [Voice](#voice) |
 | `!boobs` | Chest photo from the saved bank (off until enabled). Does not open grok.com/imagine. See [Adult photos](#adult-photos) |
 | `!ass` / `!booty` | Butt photo, same switch (`!booties`) |
@@ -342,7 +342,7 @@ Admins are `BOT_OWNER_ID`, anyone in `ADMIN_IDS`, and users added with `!admin a
 | Command | Behavior |
 | --- | --- |
 | `!auth` | Owner only (`BOT_OWNER_ID`). Exact `!auth` (any case, optional surrounding spaces) authorizes a new encrypted Chat group and confirms in chat. Anyone else is ignored, including `ADMIN_IDS`. Groups that already had a Chat watermark are already authorized. Classic group DMs do not need it. See [Authorizing a new encrypted group](#authorizing-a-new-encrypted-group) |
-| `!status` | Owner only (`BOT_OWNER_ID`), same gate as `!auth`. `ADMIN_IDS` and per-group admins are ignored and get no snapshot. Health snapshot for this process: uptime, Chat and Activity, public_keys backoff and last success, LLM, Imagine (`browser` or `api`), and this chat's welcome flag, troll list, and linkroast switch. No secrets. See [Status](#status) |
+| `!status` | Owner only (`BOT_OWNER_ID`), same gate as `!auth`. `ADMIN_IDS` and per-group admins are ignored and get no snapshot. Health snapshot for this process: uptime, Chat and Activity, public_keys backoff and last success, LLM, Imagine (`browser` or `api`, plus image and video on or off), and this chat's welcome flag, troll list, and linkroast switch. No secrets. See [Status](#status) |
 | `!warn @user [reason]` | Count a warning. At the limit: soft-mute and notify admins |
 | `!warns @user` | Show the count |
 | `!unwarn @user` | Remove one warning |
@@ -654,6 +654,42 @@ Browser mode uses the same Chrome session as `!imagine`. The worker opens https:
 
 When the clip is ready, encrypted Chat uploads the mp4 the same way as a photo (`encryptStream`, `POST /2/chat/media/upload`) with `media_type` 3 so it plays inline. The clip and the "started" line both tag the requester and reply to the command. Browser mode already has those bytes, so it does not download them again. API mode downloads the temporary mp4 first. If that upload fails and a temporary file URL exists, the bot posts `@handle` plus the URL, still as a reply in encrypted Chat, and says the link will expire. A classic group DM cannot attach an mp4 (those uploads are image and gif only), so it posts that URL when one exists. With bytes and no file URL, it says to try again in encrypted Chat. If Imagine blocks the video, the bot says so and suggests five softer prompts, the same helper `!imagine` uses. Other failures and timeouts get a short line. The bot does not cap prompt length. If generation rejects one for length, the chat says so. Prompts that mention minors are refused and are not sent.
 
+## Turning Imagine off
+
+`!imagine` and `!video` stay on until someone turns them off on the machine that runs the bot. This is not a chat command, and it does not use the adult-photo switch. `!boobs`, `!ass`, and `!booty` keep working. `!help` still lists both commands. When one is off, that line gains `(off)`, or `(off until 2026-10-19 10:00 ET)` when an expiry is still in the future. `!games` is the game catalog and does not include these two; the switch does not change that list.
+
+The state file is `data/imagine-toggle.json` (mode `0600`), next to the database. `data/` is gitignored. A custom `DATABASE_PATH` puts the file in that directory instead of `data/`. The bot stats the file when someone uses `!imagine`, `!video`, `!help`, or `!status`, and rereads it when the mtime changes, so a toggle applies without a restart. A missing or invalid file means both stay on.
+
+```json
+{"image":false,"video":false,"until":"2026-10-19T10:00:00-04:00","updatedAt":"2026-10-12T14:06:00.000Z"}
+```
+
+`until` is optional. When that instant has passed, both commands are on again and the process logs that once. `on` clears `until`. A later `off` without `--for` or `--until` clears it too, so the off switch stays off until the next `on`.
+
+Run these on the bot machine:
+
+```bash
+npm run imagine -- status
+npm run imagine -- on
+npm run imagine -- off
+npm run imagine -- on image
+npm run imagine -- on video
+npm run imagine -- on all
+npm run imagine -- off image
+npm run imagine -- off video
+npm run imagine -- off all
+npm run imagine -- off --for 7d
+npm run imagine -- off image --for 7d
+npm run imagine -- off --until 2026-10-19T10:00:00-04:00
+```
+
+`status` prints image, video, and the expiry in America/New_York. The target defaults to `all`. `off --for 7d` sets `until` to now plus 7 days (`30m`, `12h`, and `2w` work too). `--until` accepts an ISO time with a zone, or a New York wall time (`2026-10-19` or `2026-10-19 10:00`). The write is a temp file in the same directory, mode `0600`, then a rename.
+
+While a channel is off, that command replies with one line and does not open Chrome or call an API:
+
+- `Image generation is turned off for now.`
+- `Video generation is turned off for now.`
+
 ## Voice
 
 `!voice` with no persona shows a short menu and does not speak. `/voice` works the same way. Pick one, then a line: `!voice girl1 hello there` or `!voice 10 hello there`. A number from 1 to 10 selects the same voice as `girl1` through `girl10`. A line with no persona, or an unknown first token, shows the menu again. The bot does not choose a voice for unstructured text.
@@ -731,7 +767,7 @@ The roast uses the same LLM completion path as `!troll` (Grok when that provider
 
 `!status` is owner-only, the same gate as `!auth`: only `BOT_OWNER_ID` gets a reply. `ADMIN_IDS` and per-group admins are ignored, and so is everyone else. The bot stays quiet and does not post the snapshot. `/status` is the same command. The name is case-insensitive, and extra words are ignored. When the owner sends it, the reply is in the same chat and tags them.
 
-The snapshot is whatever this process already knows. It does not call X, the LLM, or Imagine to build the reply. It names the bot handle when one is known, how long this process has been up, and whether the Chat poller and Activity push are ok, still starting, off, or degraded. The keys line is the one to read when bangs go quiet: `BACKOFF` means `GET /2/users/…/public_keys` returned 429 or 402 and signing-key loads are waiting that window out. Cached user and signing-key counts stay on that line so you can see what decrypt already holds. A clear cache says `Keys: ok`. That line also shows the last successful public_keys fetch and how many fetches have succeeded or failed since this process started. The time survives a restart because it is restored from the cache; the counts do not. LLM is the configured provider and model, or `off`. Imagine is `browser` when `IMAGINE_BACKEND` is browser (the default: grok.com/imagine in the signed-in Chrome session) or `api` when it is `api`, with `video` when that API client is on. `api off` means the API backend is selected but no xAI key is configured. This chat's welcome flag, troll list, and linkroast flag are included. Public media-bank counts are included only when those URL lists are already loaded. The package version and a short git sha are added when the files can be read. Tokens, API keys, and environment dumps are not included.
+The snapshot is whatever this process already knows. It does not call X, the LLM, or Imagine to build the reply. It names the bot handle when one is known, how long this process has been up, and whether the Chat poller and Activity push are ok, still starting, off, or degraded. The keys line is the one to read when bangs go quiet: `BACKOFF` means `GET /2/users/…/public_keys` returned 429 or 402 and signing-key loads are waiting that window out. Cached user and signing-key counts stay on that line so you can see what decrypt already holds. A clear cache says `Keys: ok`. That line also shows the last successful public_keys fetch and how many fetches have succeeded or failed since this process started. The time survives a restart because it is restored from the cache; the counts do not. LLM is the configured provider and model, or `off`. Imagine is `browser` when `IMAGINE_BACKEND` is browser (the default: grok.com/imagine in the signed-in Chrome session) or `api` when it is `api`, with `video` when that API client is on. `api off` means the API backend is selected but no xAI key is configured. The same line says whether image and video generation are on or off, and a New York time when an operator expiry is still in the future (`back 2026-10-19 10:00 ET`). That part is reread from `data/imagine-toggle.json` when `!status` runs. This chat's welcome flag, troll list, and linkroast flag are included. Public media-bank counts are included only when those URL lists are already loaded. The package version and a short git sha are added when the files can be read. Tokens, API keys, and environment dumps are not included.
 
 ## Feature requests
 
@@ -1013,6 +1049,7 @@ src/bot/imagine.ts      # API Imagine client (IMAGINE_BACKEND=api), adult prompt
 src/bot/imagine-backend.ts # browser|api switch; browser generators do not call the generations API
 src/bot/imagine-browser.ts # Playwright worker for https://grok.com/imagine (@0xMatt66 Chrome session)
 src/bot/imagine-public.ts # optional imagine-public.x.ai JPEG fetch (static URLs, no browser)
+src/bot/imagine-toggle.ts # !imagine / !video on/off file (data/imagine-toggle.json)
 config/booty-bank.example.txt # example !ass / !booty CDN list; not loaded automatically
 src/bot/video.ts        # API video client (IMAGINE_BACKEND=api) and !video checks
 scripts/imagine-browser.ts # one-shot check of the same Chrome worker (`npm run imagine:browser`)
@@ -1034,11 +1071,13 @@ src/hang-watchdog.ts    # pause/resume and dead Activity stream recovery
 src/chat/identity.ts    # key file and Juicebox unlock
 src/store.ts            # SQLite, including processed_events and watermarks
 src/cli/history-export.ts # read-only query and transcript formats for the operator export
+src/cli/imagine.ts      # operator on/off CLI (`npm run imagine`), not a chat command
 config/default.yaml
 scripts/oauth.ts
 scripts/chat-register.ts
 scripts/chat-rotate.ts
 scripts/history-export.ts # operator export (`npm run history:export`), not a chat command
+scripts/imagine.ts        # operator on/off for !imagine and !video (`npm run imagine`)
 scripts/run-live.sh       # live supervisor (pidfile, bot.log, restart backoff)
 scripts/boot-start.sh     # boot hook launcher
 scripts/ensure-deps.sh    # npm ci when tsx or the installed lockfile is missing or stale
