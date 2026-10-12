@@ -138,6 +138,13 @@ import {
   type ImagineImage,
 } from "./imagine.js";
 import {
+  annotateImagineHelp,
+  defaultImagineTogglePath,
+  IMAGINE_OFF_MESSAGE,
+  readImagineToggle,
+  VIDEO_OFF_MESSAGE,
+} from "./imagine-toggle.js";
+import {
   formatVideoReadyMessage,
   isShareableVideoUrl,
   isVideoModerationError,
@@ -395,6 +402,13 @@ export interface EngineDeps {
    * `api` is api.x.ai. Absent in tests that only pass a generator.
    */
   imagineBackend?: ImagineBackend;
+  /**
+   * Operator on/off file for `!imagine` and `!video`.
+   * Default is `data/imagine-toggle.json` beside the database.
+   * Reread at command time. Missing or invalid means both stay on.
+   * Adult photo commands do not read it.
+   */
+  imagineTogglePath?: string;
   /** Package version and short git sha. Defaults to a one-time local read. */
   buildVersion?: { version?: string; sha?: string };
   /**
@@ -2603,6 +2617,11 @@ export class ModerationEngine {
     return event.replyToSenderId ?? this.resolveReplyUserId(event);
   }
 
+  /** Operator switch. Missing or invalid file means both commands stay on. */
+  private imagineToggle(nowMs: number) {
+    return readImagineToggle(this.deps.imagineTogglePath ?? defaultImagineTogglePath(), nowMs);
+  }
+
   private statusReport(
     conversationId: string,
     settings: ResolvedConversationConfig,
@@ -2611,6 +2630,7 @@ export class ModerationEngine {
     const troll = this.store.listTrollTargets(conversationId);
     const build = this.deps.buildVersion ?? readBuildVersion();
     const imagine = imagineModeLabel(this.deps);
+    const toggle = this.imagineToggle(nowMs);
     return formatStatusReport({
       username: this.config.botUsername,
       userId: this.config.botUserId,
@@ -2620,6 +2640,9 @@ export class ModerationEngine {
       keys: this.deps.publicKeys?.publicKeyHealth(nowMs),
       llm: this.deps.llmMode ?? (this.llmClient ? "on" : "off"),
       imagine,
+      imagineImage: toggle.image,
+      imagineVideo: toggle.video,
+      ...(toggle.until ? { imagineUntil: toggle.until } : {}),
       welcome: settings.welcomeEnabled,
       troll: trollStatusLabel(troll, this.store.isTrollAllEnabled(conversationId)),
       linkroast: this.store.isLinkroastEnabled(conversationId),
@@ -2952,7 +2975,11 @@ export class ModerationEngine {
 
     switch (command.name) {
       case "help":
-        await this.reply(conversationId, settings.help.trim(), actions);
+        await this.reply(
+          conversationId,
+          annotateImagineHelp(settings.help.trim(), this.imagineToggle(nowMs)),
+          actions,
+        );
         return;
       case "auth": {
         if (senderId !== this.config.ownerId) return;
@@ -2999,10 +3026,10 @@ export class ModerationEngine {
         await this.handleFathom(event, command.extra, actions);
         return;
       case "imagine":
-        await this.handleImagine(event, command.prompt, actions);
+        await this.handleImagine(event, command.prompt, actions, nowMs);
         return;
       case "video":
-        await this.handleVideo(event, command.prompt, actions);
+        await this.handleVideo(event, command.prompt, actions, nowMs);
         return;
       case "voice":
         await this.handleVoice(event, command.prompt, actions);
@@ -4073,8 +4100,13 @@ export class ModerationEngine {
     event: DmEvent,
     prompt: string,
     actions: EngineActions,
+    nowMs: number,
   ): Promise<void> {
     const conversationId = event.conversationId;
+    if (!this.imagineToggle(nowMs).image) {
+      await this.reply(conversationId, IMAGINE_OFF_MESSAGE, actions);
+      return;
+    }
     const normalized = normalizeImaginePrompt(prompt);
     if (!normalized.ok) {
       await this.reply(conversationId, imaginePromptRejection(normalized.reason), actions);
@@ -4116,8 +4148,17 @@ export class ModerationEngine {
    * Ack immediately, then generate in the background. The poller must keep
    * moving while Imagine renders a clip. `waitForBackgroundWork` joins that work.
    */
-  private async handleVideo(event: DmEvent, prompt: string, actions: EngineActions): Promise<void> {
+  private async handleVideo(
+    event: DmEvent,
+    prompt: string,
+    actions: EngineActions,
+    nowMs: number,
+  ): Promise<void> {
     const conversationId = event.conversationId;
+    if (!this.imagineToggle(nowMs).video) {
+      await this.reply(conversationId, VIDEO_OFF_MESSAGE, actions);
+      return;
+    }
     const normalized = normalizeVideoPrompt(prompt);
     if (!normalized.ok) {
       await this.reply(conversationId, videoPromptRejection(normalized.reason), actions);
