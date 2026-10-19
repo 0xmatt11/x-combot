@@ -109,6 +109,18 @@ describe("command cleanup", () => {
           };
         },
       },
+      meow: {
+        async randomImage() {
+          return {
+            url: "https://cataas.com/cat/5enhMoq1fey3akP5",
+            bytes: Uint8Array.from([7, 7, 7]),
+            mimeType: "image/jpeg",
+          };
+        },
+        bundledImage() {
+          return undefined;
+        },
+      },
       fetchImage: async (url) =>
         url.includes("seadn.io")
           ? { bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/png" }
@@ -272,6 +284,7 @@ describe("command cleanup", () => {
       "!milady",
       "!undertow",
       "!fathom",
+      "!meow",
       "!imagine a red boat",
     ];
     for (const [index, text] of commands.entries()) {

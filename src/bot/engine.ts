@@ -123,6 +123,14 @@ import {
   type FathomLookup,
 } from "./fathom.js";
 import {
+  createMeowLookup,
+  isSafeMeowImageUrl,
+  MEOW_UNAVAILABLE,
+  MeowLookupError,
+  type MeowImage,
+  type MeowLookup,
+} from "./meow.js";
+import {
   formatImagineModerationReply,
   imaginePromptRejection,
   ImagineError,
@@ -366,6 +374,12 @@ export interface EngineDeps {
    * This command does not call Imagine or api.x.ai.
    */
   fathom?: FathomLookup;
+  /**
+   * Kitten photo lookup for `!meow`. Absent means the engine builds the
+   * default client on first use (cataas, then The Cat API, then bundled stills).
+   * This command does not call Imagine or api.x.ai.
+   */
+  meow?: MeowLookup;
   /** Optional `OPENSEA_API_KEY` for the default `!undertow` and `!fathom` clients. */
   openseaApiKey?: string;
   fetchImage?: (url: string) => Promise<AdultVisionImage | undefined>;
@@ -539,6 +553,8 @@ export class ModerationEngine {
   private ownedUndertow?: UndertowLookup;
   /** Built on the first `!fathom` when `deps.fathom` was not injected. */
   private ownedFathom?: FathomLookup;
+  /** Built on the first `!meow` when `deps.meow` was not injected. */
+  private ownedMeow?: MeowLookup;
   /** Open `!request` Q&A, keyed by conversation and requester. Memory only. */
   private readonly featureRequests = new Map<string, FeatureRequestSession>();
   private readonly featureRequestTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -3025,6 +3041,9 @@ export class ModerationEngine {
       case "fathom":
         await this.handleFathom(event, command.extra, actions);
         return;
+      case "meow":
+        await this.handleMeow(event, command.extra, actions);
+        return;
       case "imagine":
         await this.handleImagine(event, command.prompt, actions, nowMs);
         return;
@@ -3983,6 +4002,95 @@ export class ModerationEngine {
       random: () => this.nextRandom(),
     });
     return this.ownedFathom;
+  }
+
+  /**
+   * `!meow` posts one real kitten photo. Extra words are ignored except a
+   * banned age term, which is refused. The lookup is cataas (kitten tag),
+   * then The Cat API, then a bundled still. This does not call Imagine or
+   * api.x.ai, and a failure does not post a link.
+   */
+  private async handleMeow(
+    event: DmEvent,
+    extra: string | undefined,
+    actions: EngineActions,
+  ): Promise<void> {
+    const conversationId = event.conversationId;
+    if (extra && containsBannedAgeTerm(extra)) {
+      log.warn(`Refused !meow with unsafe extra text conversation=${conversationId}`);
+      await this.reply(conversationId, "Refused. !meow does not search custom text.", actions);
+      return;
+    }
+
+    const lookup = this.meowClient();
+    let image: MeowImage;
+    try {
+      image = await lookup.randomImage();
+    } catch (error) {
+      const userMessage = error instanceof MeowLookupError ? error.userMessage : MEOW_UNAVAILABLE;
+      const detail = redactSecrets(error instanceof Error ? error.message : "lookup failed");
+      log.warn(`!meow lookup failed conversation=${conversationId}: ${detail}`);
+      await this.reply(conversationId, userMessage, actions);
+      return;
+    }
+
+    const caption = await this.commandCaption(event);
+    if (await this.postMeowImage(conversationId, image, caption)) return;
+    // A safe photo that failed to upload is an X attach problem. A missing
+    // download, or a URL this command will not post, still tries the local bank.
+    const safeBytes = Boolean(image.bytes && image.bytes.byteLength > 0 && isSafeMeowImageUrl(image.url));
+    if (!safeBytes) {
+      const fallback = lookup.bundledImage();
+      if (fallback && (await this.postMeowImage(conversationId, fallback, caption))) return;
+    }
+    await this.reply(conversationId, MEOW_UNAVAILABLE, actions);
+  }
+
+  /** Upload one kitten photo. Returns false when the URL, download, or upload fails. */
+  private async postMeowImage(
+    conversationId: string,
+    image: MeowImage,
+    caption: MediaCaption | undefined,
+  ): Promise<boolean> {
+    if (!isSafeMeowImageUrl(image.url)) {
+      log.warn(`!meow skipped an unsafe image url conversation=${conversationId}`);
+      return false;
+    }
+    const host = imageHost(image.url);
+    let fetched: AdultVisionImage | undefined;
+    if (image.bytes && image.bytes.byteLength > 0 && image.mimeType) {
+      fetched = { bytes: image.bytes, mimeType: image.mimeType };
+    } else if (this.deps.fetchImage) {
+      try {
+        fetched = await this.deps.fetchImage(image.url);
+      } catch {
+        fetched = undefined;
+      }
+    }
+    if (!fetched || fetched.bytes.byteLength === 0) {
+      log.warn(`!meow image download failed conversation=${conversationId} host=${host}`);
+      return false;
+    }
+    try {
+      await this.client.sendImage(conversationId, {
+        url: image.url,
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+        ...(caption ? { caption } : {}),
+      });
+      log.info(`!meow posted native image conversation=${conversationId} host=${host}`);
+      return true;
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : String(error));
+      log.warn(`!meow native attach failed conversation=${conversationId} host=${host} (${detail})`);
+      return false;
+    }
+  }
+
+  private meowClient(): MeowLookup {
+    if (this.deps.meow) return this.deps.meow;
+    this.ownedMeow ??= createMeowLookup({ random: () => this.nextRandom() });
+    return this.ownedMeow;
   }
 
   private async handleAdultImage(
