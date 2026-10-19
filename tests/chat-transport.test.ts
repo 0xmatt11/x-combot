@@ -1772,3 +1772,123 @@ describe("Chat group discovery", () => {
     expect(store.getWatermark("chat_events:g999")).toBe("evt-2");
   });
 });
+
+describe("ChatService.sendImages", () => {
+  function readyService(): {
+    service: ChatService;
+    http: FakeHttp;
+    encrypted: { text: string; options?: EncryptMessageOptions }[];
+    store: Store;
+    uploadCount: () => number;
+  } {
+    const cipher = new FakeCipher();
+    const key = new Uint8Array(32).fill(7);
+    cipher.events.set("blob-99", { type: "message", id: "e1", content: { text: "hi" } });
+    cipher.conversationKeys = { keys: { "99": key }, latestVersion: "99" };
+    const http = new FakeHttp();
+    http.pages.push({ data: [{ id: "blob-99", encoded_event: "blob-99", sender_id: "alice-1" }] });
+    const encrypted: { text: string; options?: EncryptMessageOptions }[] = [];
+    cipher.encryptMessage = (_conversationId, text, options) => {
+      encrypted.push({ text, options });
+      return {
+        messageId: `mid-${encrypted.length}`,
+        encryptedContent: "enc:",
+        encodedEventSignature: "sig",
+      };
+    };
+    let uploads = 0;
+    http.uploadChatMedia = async () => {
+      uploads += 1;
+      return `hash-${uploads}`;
+    };
+    const store = new Store(":memory:");
+    const service = new ChatService(http, cipher, store);
+    return { service, http, encrypted, store, uploadCount: () => uploads };
+  }
+
+  const images = [1, 2, 3].map((n) => ({
+    url: `https://cdn.example/${n}.png`,
+    bytes: Uint8Array.from([n, 2, 3, 4]),
+    mimeType: "image/png",
+  }));
+
+  it("lists every image on one encryptMessage with distinct filenames", async () => {
+    const rig = readyService();
+    await rig.service.listHistory({ conversationId: "g1" });
+    const result = await rig.service.sendImages("g1", images);
+    rig.store.close();
+    expect(result.messages).toHaveLength(1);
+    expect(result.attached).toBe(3);
+    expect(result.rateLimited).toBeUndefined();
+    expect(rig.encrypted).toHaveLength(1);
+    expect(rig.encrypted[0]?.text).toBe("");
+    const attachments = rig.encrypted[0]?.options?.attachments;
+    expect(attachments?.map((item) => item.filename)).toEqual(["image-1.png", "image-2.png", "image-3.png"]);
+    expect(attachments?.map((item) => item.mediaHashKey)).toEqual(["hash-1", "hash-2", "hash-3"]);
+    expect(JSON.stringify(attachments)).not.toContain("media_type");
+    expect(JSON.stringify(attachments)).not.toContain("cdn.example");
+  });
+
+  it("splits a message X says is too large", async () => {
+    const rig = readyService();
+    await rig.service.listHistory({ conversationId: "g1" });
+    let sends = 0;
+    rig.http.sendChatMessage = async (_id, body) => {
+      sends += 1;
+      rig.http.sends.push(body);
+      if (sends === 1) {
+        const error = new Error(
+          'X API POST /2/chat/conversations/g1/messages -> 400: {"errors":[{"message":"Message is too large"}]}',
+        ) as Error & { status?: number };
+        error.status = 400;
+        throw error;
+      }
+      return { messageId: `mid-${sends}` };
+    };
+    const result = await rig.service.sendImages("g1", images);
+    rig.store.close();
+    expect(result.messages).toHaveLength(2);
+    expect(result.attached).toBe(3);
+    expect(rig.encrypted.map((row) => row.options?.attachments?.length)).toEqual([3, 2, 1]);
+  });
+
+  it("skips a failed upload and stops the rest on 429", async () => {
+    const skipped = readyService();
+    await skipped.service.listHistory({ conversationId: "g1" });
+    let uploads = 0;
+    skipped.http.uploadChatMedia = async () => {
+      uploads += 1;
+      if (uploads === 2) throw new Error("upload broke");
+      return `hash-${uploads}`;
+    };
+    const partial = await skipped.service.sendImages("g1", images);
+    skipped.store.close();
+    expect(uploads).toBe(3);
+    expect(partial.attached).toBe(2);
+    expect(partial.messages).toHaveLength(1);
+    expect(partial.rateLimited).toBeUndefined();
+
+    const limited = readyService();
+    await limited.service.listHistory({ conversationId: "g1" });
+    let limitedUploads = 0;
+    limited.http.uploadChatMedia = async () => {
+      limitedUploads += 1;
+      if (limitedUploads === 2) {
+        const error = new Error("Rate limited; retry after 2000ms") as Error & {
+          status?: number;
+          retryAfterMs?: number;
+        };
+        error.status = 429;
+        error.retryAfterMs = 2000;
+        throw error;
+      }
+      return `hash-${limitedUploads}`;
+    };
+    const stopped = await limited.service.sendImages("g1", images);
+    limited.store.close();
+    expect(limitedUploads).toBe(2);
+    expect(stopped.attached).toBe(1);
+    expect(stopped.messages).toHaveLength(1);
+    expect(stopped.rateLimited).toEqual({ retryAfterMs: 2000 });
+  });
+});

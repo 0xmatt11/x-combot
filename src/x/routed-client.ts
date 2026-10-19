@@ -13,6 +13,7 @@ import type {
   SendMessageResult,
   XUser,
 } from "../types.js";
+import type { SendImagesOptions, SendImagesResult } from "./image-attachments.js";
 import type { XClient } from "./client.js";
 
 /**
@@ -80,6 +81,22 @@ export class RoutedXClient implements XClient {
       );
     }
     return this.dm.sendImage(conversationId, image);
+  }
+
+  async sendImages(
+    conversationId: string,
+    images: readonly OutboundImage[],
+    options?: SendImagesOptions,
+  ): Promise<SendImagesResult> {
+    if (this.chat && isChatGroupId(conversationId)) {
+      return this.chat.sendImages(conversationId, images, options);
+    }
+    if (isChatGroupId(conversationId)) {
+      throw new Error(
+        "Encrypted X Chat image send needs Chat configured (encryptStream + POST /2/chat/media/upload + inline media attachment).",
+      );
+    }
+    return this.dm.sendImages(conversationId, images, options);
   }
 
   async sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult> {

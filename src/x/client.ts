@@ -11,6 +11,7 @@ import type {
   SendMessageResult,
   XUser,
 } from "../types.js";
+import type { SendImagesOptions, SendImagesResult } from "./image-attachments.js";
 
 export interface XClient {
   getMe(): Promise<XUser>;
@@ -41,6 +42,19 @@ export interface XClient {
    * inline media attachment. Callers post `image.url` as text when this throws.
    */
   sendImage(conversationId: string, image: OutboundImage): Promise<SendMessageResult>;
+  /**
+   * Attach several images in as few messages as the conversation allows.
+   * Encrypted Chat lists every image on one `encryptMessage` (up to
+   * `CHAT_IMAGES_PER_MESSAGE`). Classic group DMs send one `media_id` per
+   * message (`DM_IMAGES_PER_MESSAGE`). A 429 or 402 stops the rest.
+   * One image that fails to upload is skipped. `sendImage` stays the
+   * single-image path and still throws.
+   */
+  sendImages(
+    conversationId: string,
+    images: readonly OutboundImage[],
+    options?: SendImagesOptions,
+  ): Promise<SendImagesResult>;
   /**
    * Attach an mp4. Encrypted Chat (`g…`) reuses `encryptStream` and
    * `POST /2/chat/media/upload`, then sets `media_type` 3. Classic group DMs

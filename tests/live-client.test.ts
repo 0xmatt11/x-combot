@@ -361,6 +361,149 @@ describe("DM image attach", () => {
     );
     expect(calls.some((call) => call.url.includes("should-not-be-logged"))).toBe(false);
   });
+
+  it("sends one media_id per message and stops the rest on 429", async () => {
+    let mediaSeq = 0;
+    let messages = 0;
+    const messageBodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const path = String(url);
+        if (path.endsWith("/2/media/upload/initialize")) {
+          mediaSeq += 1;
+          return new Response(JSON.stringify({ data: { id: String(mediaSeq) } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (path.includes("/append") || path.includes("/finalize")) {
+          return new Response("", { status: 200 });
+        }
+        messages += 1;
+        messageBodies.push(JSON.parse(String(init?.body)));
+        if (messages === 2) {
+          return new Response("rate", { status: 429, headers: { "retry-after": "2" } });
+        }
+        return new Response(
+          JSON.stringify({ data: { dm_conversation_id: "1578", dm_event_id: `evt-${messages}` } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    const live = new LiveXClient({
+      tokens: { accessToken: "test-access-token", expiresAtMs: Date.now() + 60 * 60 * 1000 },
+    });
+    const result = await live.sendImages("1578398451921985538", [
+      { url: "https://cdn.example/a.jpg", bytes: Uint8Array.from([1]), mimeType: "image/jpeg" },
+      { url: "https://cdn.example/b.jpg", bytes: Uint8Array.from([2]), mimeType: "image/jpeg" },
+      { url: "https://cdn.example/c.jpg", bytes: Uint8Array.from([3]), mimeType: "image/jpeg" },
+    ]);
+    expect(mediaSeq).toBe(3);
+    expect(messages).toBe(2);
+    expect(messageBodies).toEqual([
+      { attachments: [{ media_id: "1" }] },
+      { attachments: [{ media_id: "2" }] },
+    ]);
+    expect(result.messages).toHaveLength(1);
+    expect(result.attached).toBe(1);
+    expect(result.rateLimited?.retryAfterMs).toBe(2000);
+    expect(JSON.stringify(messageBodies)).not.toContain("cdn.example");
+  });
+
+  it("stops later DM uploads when one upload returns 429, and still sends what uploaded", async () => {
+    let inits = 0;
+    let messages = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        const path = String(url);
+        if (path.endsWith("/2/media/upload/initialize")) {
+          inits += 1;
+          if (inits === 2) {
+            return new Response("rate", { status: 429, headers: { "retry-after": "3" } });
+          }
+          return new Response(JSON.stringify({ data: { id: String(inits) } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (path.includes("/append") || path.includes("/finalize")) {
+          return new Response("", { status: 200 });
+        }
+        messages += 1;
+        return new Response(
+          JSON.stringify({ data: { dm_conversation_id: "1578", dm_event_id: "evt-1" } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    const live = new LiveXClient({
+      tokens: { accessToken: "test-access-token", expiresAtMs: Date.now() + 60 * 60 * 1000 },
+    });
+    const result = await live.sendImages("1578398451921985538", [
+      { url: "https://cdn.example/a.jpg", bytes: Uint8Array.from([1]), mimeType: "image/jpeg" },
+      { url: "https://cdn.example/b.jpg", bytes: Uint8Array.from([2]), mimeType: "image/jpeg" },
+      { url: "https://cdn.example/c.jpg", bytes: Uint8Array.from([3]), mimeType: "image/jpeg" },
+    ]);
+    expect(inits).toBe(2);
+    expect(messages).toBe(1);
+    expect(result.attached).toBe(1);
+    expect(result.messages).toHaveLength(1);
+    expect(result.rateLimited?.retryAfterMs).toBe(3000);
+  });
+
+  it("skips one failed DM upload and still sends the others", async () => {
+    let inits = 0;
+    const messageBodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const path = String(url);
+        if (path.endsWith("/2/media/upload/initialize")) {
+          inits += 1;
+          if (inits === 2) return new Response("nope", { status: 500 });
+          return new Response(JSON.stringify({ data: { id: String(inits) } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (path.includes("/append") || path.includes("/finalize")) {
+          return new Response("", { status: 200 });
+        }
+        messageBodies.push(JSON.parse(String(init?.body)));
+        return new Response(
+          JSON.stringify({ data: { dm_conversation_id: "1578", dm_event_id: `evt-${messageBodies.length}` } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    const live = new LiveXClient({
+      tokens: { accessToken: "test-access-token", expiresAtMs: Date.now() + 60 * 60 * 1000 },
+    });
+    const result = await live.sendImages(
+      "1578398451921985538",
+      [
+        { url: "https://cdn.example/a.jpg", bytes: Uint8Array.from([1]), mimeType: "image/jpeg" },
+        { url: "https://cdn.example/b.jpg", bytes: Uint8Array.from([2]), mimeType: "image/jpeg" },
+        { url: "https://cdn.example/c.jpg", bytes: Uint8Array.from([3]), mimeType: "image/jpeg" },
+      ],
+      {
+        substitute: async (image) =>
+          image.url.endsWith("/b.jpg")
+            ? { url: "https://cdn.example/b-fallback.jpg", bytes: Uint8Array.from([9]), mimeType: "image/jpeg" }
+            : undefined,
+      },
+    );
+    expect(result.rateLimited).toBeUndefined();
+    expect(result.attached).toBe(3);
+    expect(result.messages).toHaveLength(3);
+    expect(messageBodies).toEqual([
+      { attachments: [{ media_id: "1" }] },
+      { attachments: [{ media_id: "3" }] },
+      { attachments: [{ media_id: "4" }] },
+    ]);
+  });
 });
 
 describe("Chat media upload", () => {

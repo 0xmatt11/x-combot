@@ -1,3 +1,11 @@
+import {
+  CHAT_IMAGES_PER_MESSAGE,
+  deliverImageBatches,
+  imageBatchShouldSplit,
+  uploadImageSlot,
+  type SendImagesOptions,
+  type SendImagesResult,
+} from "../x/image-attachments.js";
 import { log } from "../log.js";
 import type { Store } from "../store.js";
 import {
@@ -462,6 +470,83 @@ export class ChatService {
       },
       image.caption,
     );
+  }
+
+  /**
+   * Several inline photos on as few Chat messages as X will take.
+   * Each file is encrypted and uploaded on its own. One `encryptMessage`
+   * lists up to `CHAT_IMAGES_PER_MESSAGE` attachments. Filenames are
+   * numbered when there is more than one image, because clients cache
+   * decrypted media by filename. A 429 or 402 stops the rest. A 400
+   * `Message is too large` splits the message in half.
+   */
+  async sendImages(
+    conversationId: string,
+    images: readonly OutboundImage[],
+    options?: SendImagesOptions,
+  ): Promise<SendImagesResult> {
+    const latest = this.latestConversationKey(conversationId);
+    if (!latest) {
+      throw new Error(
+        `No conversation key cached for ${conversationId}. The bot must decrypt a KeyChange before sending Chat media.`,
+      );
+    }
+    const prepared: ChatMediaAttachment[] = [];
+    let uploadLimited: SendImagesResult["rateLimited"];
+    let index = 0;
+    const numberNames = images.length > 1;
+    for (const image of images) {
+      const slot = await uploadImageSlot(
+        image,
+        async (current) => {
+          const bytes = current.bytes;
+          if (!bytes || bytes.byteLength === 0) return undefined;
+          index += 1;
+          const inspected = await inspectChatImage(bytes, current.mimeType);
+          const ciphertext = this.cipher.encryptStream(bytes, latest.key);
+          if (ciphertext.byteLength === 0) {
+            throw new Error("Chat media encryption produced empty ciphertext.");
+          }
+          const mediaHashKey = await this.http.uploadChatMedia(conversationId, ciphertext);
+          return {
+            mediaHashKey,
+            width: inspected.width,
+            height: inspected.height,
+            filesizeBytes: bytes.byteLength,
+            filename: numberNames ? numberedChatFilename(inspected.filename, index) : inspected.filename,
+          };
+        },
+        options?.substitute,
+      );
+      if (slot.rateLimited) {
+        uploadLimited = slot.rateLimited;
+        break;
+      }
+      if (slot.value) prepared.push(slot.value);
+    }
+    const caption = images.find((image) => image.caption)?.caption;
+    const delivered = await deliverImageBatches({
+      items: prepared,
+      perMessage: CHAT_IMAGES_PER_MESSAGE,
+      splitOn: imageBatchShouldSplit,
+      send: (batch) =>
+        this.postOutbound(
+          conversationId,
+          caption?.text ?? "",
+          caption,
+          {
+            conversationKey: latest.key,
+            conversationKeyVersion: latest.version,
+            attachments: [...batch],
+          },
+          (error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            return new Error(`Cannot encrypt a Chat image in ${conversationId}: ${message}`);
+          },
+        ),
+    });
+    if (uploadLimited && !delivered.rateLimited) delivered.rateLimited = uploadLimited;
+    return delivered;
   }
 
   /**
@@ -1610,6 +1695,13 @@ function extensionForMime(mime: string): string {
   if (normalized.includes("webp")) return "webp";
   if (normalized.includes("gif")) return "gif";
   return "jpg";
+}
+
+/** `image.png` → `image-1.png`. Receivers key their decrypted-file cache on the name. */
+function numberedChatFilename(filename: string, index: number): string {
+  const dot = filename.lastIndexOf(".");
+  if (dot <= 0) return `${filename}-${index}`;
+  return `${filename.slice(0, dot)}-${index}${filename.slice(dot)}`;
 }
 
 function selectLoadedKey(

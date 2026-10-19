@@ -396,9 +396,19 @@ describe("!milady engine", () => {
     await rig.engine.processEvent(message({ id: "fallback", senderId: alice.id, text: "!milady 2" }));
     expect(rig.lookupCalls).toBe(2);
     expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.imageBatches).toHaveLength(1);
+    expect(rig.client.imageBatches[0]?.urls).toEqual([IMAGE, IMAGE]);
     expect(rig.client.images).toHaveLength(2);
     expect(rig.client.sent).toHaveLength(0);
     expect(rig.client.images.every((image) => image.url === IMAGE && image.caption === "@alice")).toBe(true);
+  });
+
+  it("keeps a count of one on the single-image send", async () => {
+    const rig = setup();
+    await rig.engine.processEvent(message({ id: "one", senderId: alice.id, text: "!milady 1" }));
+    expect(rig.client.images).toHaveLength(1);
+    expect(rig.client.imageBatches).toHaveLength(0);
+    expect(rig.client.sent).toHaveLength(0);
   });
 
   it("posts that many distinct stills and clamps above the max", async () => {
@@ -406,7 +416,9 @@ describe("!milady engine", () => {
     await rig.engine.processEvent(message({ id: "three", senderId: alice.id, text: "!milady 3" }));
     expect(rig.imagineCalls).toBe(0);
     expect(rig.client.sent).toHaveLength(0);
+    expect(rig.client.imageBatches).toHaveLength(1);
     expect(rig.client.images).toHaveLength(3);
+    expect(rig.client.imageBatches[0]?.urls).toEqual(rig.client.images.map((image) => image.url));
     expect(new Set(rig.client.images.map((image) => image.url)).size).toBe(3);
     expect(rig.client.images.every((image) => image.caption === "@alice" && image.mention === "alice")).toBe(true);
 
@@ -414,6 +426,7 @@ describe("!milady engine", () => {
     await capped.engine.processEvent(message({ id: "too-many", senderId: alice.id, text: "!milady 101" }));
     expect(capped.imagineCalls).toBe(0);
     expect(capped.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_CAPPED}`]);
+    expect(capped.client.imageBatches).toHaveLength(1);
     expect(capped.client.images).toHaveLength(MILADY_MAX);
     const urls = capped.client.images.map((image) => image.url);
     expect(urls.every((url) => url === IMAGE || url === OTHER)).toBe(true);
@@ -440,6 +453,8 @@ describe("!milady engine", () => {
       },
     });
     await engine.processEvent(message({ id: "partial", senderId: alice.id, text: "!milady 3" }));
+    expect(client.imageBatches).toHaveLength(1);
+    expect(client.imageBatches[0]?.urls).toEqual([IMAGE, LAST]);
     expect(client.images.map((image) => image.url)).toEqual([IMAGE, LAST]);
     expect(client.sent).toHaveLength(0);
     expect(JSON.stringify(client.images)).not.toContain(OTHER);
@@ -464,12 +479,87 @@ describe("!milady engine", () => {
     expect(failed.sent[0]?.text).not.toMatch(/memedepot|https?:/i);
   });
 
+  it("does not post links when a counted send fails, and stops on a 429", async () => {
+    const failed = setup({ failSendImage: true });
+    await failed.engine.processEvent(message({ id: "burst-fail", senderId: alice.id, text: "!milady 3" }));
+    expect(failed.client.images).toHaveLength(0);
+    expect(failed.client.imageBatches).toHaveLength(0);
+    expect(failed.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_UNAVAILABLE}`]);
+    expect(failed.client.sent[0]?.text).not.toMatch(/memedepot|https?:/i);
+
+    const limited = setup();
+    limited.client.rateLimitSendImages = true;
+    await limited.engine.processEvent(message({ id: "burst-429", senderId: alice.id, text: "!milady 4" }));
+    expect(limited.client.images).toHaveLength(0);
+    expect(limited.client.imageBatches).toHaveLength(0);
+    expect(limited.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_UNAVAILABLE}`]);
+  });
+
+  it("sends a count as one encrypted Chat message", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(chatGroupId);
+    const batches: { url?: string; caption?: import("../src/types.js").MediaCaption }[][] = [];
+    const chat = {
+      sendImage: async () => {
+        throw new Error("a count must not call sendImage");
+      },
+      sendImages: async (
+        _conversationId: string,
+        images: { url?: string; caption?: import("../src/types.js").MediaCaption }[],
+      ) => {
+        batches.push(images);
+        return {
+          messages: [{ dmEventId: "img-batch-1", dmConversationId: chatGroupId }],
+          attached: images.length,
+        };
+      },
+      sendText: async (conversationId: string, text: string) => {
+        return { dmEventId: "text-1", dmConversationId: conversationId, text };
+      },
+    } as unknown as import("../src/chat/service.js").ChatService;
+    const engine = new ModerationEngine(store, new RoutedXClient(new MockXClient(), chat), runtime(), undefined, {
+      milady: {
+        async randomImage() {
+          return { url: IMAGE };
+        },
+        async randomImages(count: number) {
+          return [IMAGE, OTHER, LAST].slice(0, count).map((url) => ({ url }));
+        },
+      },
+      fetchImage: async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/png" }),
+    });
+    await engine.processEvent(
+      message({
+        id: "chat-milady-3",
+        senderId: alice.id,
+        text: "!milady 3",
+        conversationId: chatGroupId,
+        sequenceId: "77",
+        encodedEvent: "blob-milady",
+      }),
+    );
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.map((image) => image.url)).toEqual([IMAGE, OTHER, LAST]);
+    expect(batches[0]?.[0]?.caption).toEqual({
+      text: "@alice",
+      mention: { username: "alice", start: 0, end: 6 },
+      replyTo: {
+        sequenceId: "77",
+        senderId: alice.id,
+        previewText: "!milady 3",
+        rawEvent: "blob-milady",
+      },
+    });
+  });
+
   it("mentions !milady in the default !help text and the README", () => {
     const help = loadDefaults("config/default.yaml").help;
     expect(help).toMatch(/!milady \[n\]/);
     expect(help).toMatch(/memedepot bank/);
     expect(help).toMatch(new RegExp(`max ${MILADY_MAX}`));
     expect(help).toMatch(/Bare !milady posts one/);
+    expect(help).toMatch(/one message/);
     expect(help).toMatch(/Image only/);
     const media = help.split("Games:")[0] ?? "";
     expect(media).toMatch(/!milady/);
@@ -479,7 +569,10 @@ describe("!milady engine", () => {
     expect(section).toMatch(/`!milady 5`/);
     expect(section).toMatch(/Capped at 100/);
     expect(section).toMatch(/Usage: !milady \[n\]/);
+    expect(section).toMatch(/in one message/);
     expect(section).toMatch(/distinct stills/);
+    expect(section).toMatch(/Only one attachment per message is supported/);
+    expect(section).toMatch(/Message is too large/);
     expect(section).toMatch(/config\/milady-bank\.txt/);
     expect(section).toMatch(/memedepot\.com\/d\/milady/);
     expect(section).toMatch(/399/);

@@ -14,6 +14,7 @@ import type {
   DmEvent,
   LlmContextMode,
   MediaCaption,
+  OutboundImage,
   ResolvedConversationConfig,
   SendMessageResult,
   XUser,
@@ -116,6 +117,7 @@ import {
   type MeowImage,
   type MeowLookup,
 } from "./meow.js";
+import type { SendImagesOptions } from "../x/image-attachments.js";
 import {
   createUndertowLookup,
   isSafeUndertowImageUrl,
@@ -3781,8 +3783,9 @@ export class ModerationEngine {
   }
 
   /**
-   * `!milady` posts one still from the memedepot meme bank. `!milady N` posts
-   * that many. N above 100 is clamped and the chat gets a one-line note.
+   * `!milady` posts one still from the memedepot meme bank. `!milady N` gathers
+   * that many and posts them on one message when the conversation allows it.
+   * N above 100 is clamped and the chat gets a one-line note.
    * A non-integer, zero, or negative count gets a usage hint. A banned age
    * term is refused. This does not call OpenSea, Imagine, or api.x.ai, and a
    * failure does not post a link.
@@ -3821,13 +3824,30 @@ export class ModerationEngine {
     }
 
     const caption = await this.commandCaption(event);
-    let posted = 0;
+    if (count === 1) {
+      const image = images[0];
+      if (!image || !(await this.postMiladyStill(conversationId, image, caption))) {
+        await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
+      }
+      return;
+    }
+
+    const prepared: OutboundImage[] = [];
     for (const image of images) {
-      if (await this.postMiladyStill(conversationId, image, caption)) posted += 1;
+      if (!isSafeMiladyImageUrl(image.url)) {
+        log.warn(`!milady skipped an unsafe image url conversation=${conversationId}`);
+        continue;
+      }
+      const fetched = await this.downloadedStill("!milady", conversationId, image.url);
+      if (!fetched) continue;
+      prepared.push({
+        url: image.url,
+        bytes: fetched.bytes,
+        mimeType: fetched.mimeType,
+        ...(caption ? { caption } : {}),
+      });
     }
-    if (posted === 0) {
-      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
-    }
+    await this.postImageAlbum(conversationId, prepared, MILADY_UNAVAILABLE, actions, "!milady");
   }
 
   private async loadMiladyImages(lookup: MiladyLookup, count: number): Promise<MiladyImage[]> {
@@ -3887,8 +3907,9 @@ export class ModerationEngine {
   }
 
   /**
-   * `!meow` posts one cute kitten photo. `!meow N` posts that many. N above
-   * 100 is clamped and the chat gets a one-line note. A non-integer, zero, or
+   * `!meow` posts one cute kitten photo. `!meow N` gathers that many and posts
+   * them on one message when the conversation allows it. N above 100 is
+   * clamped and the chat gets a one-line note. A non-integer, zero, or
    * negative count gets a usage hint. Cataas is tried first. A miss, a gif,
    * or a meme tag falls through to the Wikimedia bank, and a failed download
    * or upload tries that photo's fallback once. A banned age term is refused.
@@ -3928,13 +3949,137 @@ export class ModerationEngine {
     }
 
     const caption = await this.commandCaption(event);
-    let posted = 0;
+    if (count === 1) {
+      const image = images[0];
+      if (!image || !(await this.postMeowPhoto(conversationId, image, caption))) {
+        await this.reply(conversationId, MEOW_UNAVAILABLE, actions);
+      }
+      return;
+    }
+
+    const fallbackByUrl = new Map<string, string>();
+    const prepared: OutboundImage[] = [];
     for (const image of images) {
-      if (await this.postMeowPhoto(conversationId, image, caption)) posted += 1;
+      const slot = await this.prepareMeowSlot(conversationId, image, caption);
+      if (!slot) continue;
+      prepared.push(slot.image);
+      if (slot.fallbackUrl) fallbackByUrl.set(slot.image.url, slot.fallbackUrl);
     }
-    if (posted === 0) {
-      await this.reply(conversationId, MEOW_UNAVAILABLE, actions);
+    await this.postImageAlbum(conversationId, prepared, MEOW_UNAVAILABLE, actions, "!meow", {
+      substitute: async (failed) => {
+        const next = fallbackByUrl.get(failed.url);
+        if (!next || !isSafeMeowImageUrl(next)) return undefined;
+        const fetched = await this.downloadedStill("!meow", conversationId, next);
+        if (!fetched) return undefined;
+        return {
+          url: next,
+          bytes: fetched.bytes,
+          mimeType: fetched.mimeType,
+          ...(caption ? { caption } : {}),
+        };
+      },
+    });
+  }
+
+  /**
+   * Download the primary still. The fallback URL is kept for an upload miss
+   * and is downloaded now only when the primary will not download.
+   */
+  private async prepareMeowSlot(
+    conversationId: string,
+    image: MeowImage,
+    caption?: MediaCaption,
+  ): Promise<{ image: OutboundImage; fallbackUrl?: string } | undefined> {
+    const primary = isSafeMeowImageUrl(image.url)
+      ? await this.downloadedStill("!meow", conversationId, image.url)
+      : undefined;
+    if (!isSafeMeowImageUrl(image.url)) {
+      log.warn(`!meow skipped an unsafe image url conversation=${conversationId}`);
     }
+    const fallbackUrl =
+      image.fallbackUrl && image.fallbackUrl !== image.url && isSafeMeowImageUrl(image.fallbackUrl)
+        ? image.fallbackUrl
+        : undefined;
+    if (primary) {
+      return {
+        image: {
+          url: image.url,
+          bytes: primary.bytes,
+          mimeType: primary.mimeType,
+          ...(caption ? { caption } : {}),
+        },
+        ...(fallbackUrl ? { fallbackUrl } : {}),
+      };
+    }
+    if (!fallbackUrl) return undefined;
+    const fallback = await this.downloadedStill("!meow", conversationId, fallbackUrl);
+    if (!fallback) return undefined;
+    return {
+      image: {
+        url: fallbackUrl,
+        bytes: fallback.bytes,
+        mimeType: fallback.mimeType,
+        ...(caption ? { caption } : {}),
+      },
+    };
+  }
+
+  /**
+   * One multi-image send. Nothing attached becomes the short unavailable line.
+   * A 429 after some messages already went out does not add that line.
+   */
+  private async postImageAlbum(
+    conversationId: string,
+    images: OutboundImage[],
+    unavailable: string,
+    actions: EngineActions,
+    label: "!milady" | "!meow",
+    options?: SendImagesOptions,
+  ): Promise<void> {
+    if (images.length === 0) {
+      await this.reply(conversationId, unavailable, actions);
+      return;
+    }
+    try {
+      const sent = await this.client.sendImages(conversationId, images, options);
+      if (sent.rateLimited) {
+        log.warn(
+          `${label} stopped after a rate limit conversation=${conversationId} attached=${sent.attached} messages=${sent.messages.length} retryAfterMs=${sent.rateLimited.retryAfterMs}`,
+        );
+      }
+      if (sent.messages.length === 0) {
+        await this.reply(conversationId, unavailable, actions);
+        return;
+      }
+      const messageCount = sent.messages.length;
+      log.info(
+        `${label} posted ${sent.attached} ${sent.attached === 1 ? "image" : "images"} in ${messageCount} ${messageCount === 1 ? "message" : "messages"} conversation=${conversationId}`,
+      );
+    } catch (error) {
+      const detail = redactSecrets(error instanceof Error ? error.message : String(error));
+      log.warn(`${label} image send failed conversation=${conversationId} (${detail})`);
+      await this.reply(conversationId, unavailable, actions);
+    }
+  }
+
+  private async downloadedStill(
+    label: string,
+    conversationId: string,
+    url: string,
+  ): Promise<{ bytes: Uint8Array; mimeType?: string } | undefined> {
+    let fetched: AdultVisionImage | undefined;
+    if (this.deps.fetchImage) {
+      try {
+        fetched = await this.deps.fetchImage(url);
+      } catch {
+        fetched = undefined;
+      }
+    }
+    if (!fetched || fetched.bytes.byteLength === 0) {
+      log.warn(`${label} image download failed conversation=${conversationId} host=${imageHost(url)}`);
+      return undefined;
+    }
+    return { bytes: fetched.bytes, mimeType: fetched.mimeType };
   }
 
   private async loadMeowImages(lookup: MeowLookup, count: number): Promise<MeowImage[]> {
@@ -6075,6 +6220,18 @@ function trackBotOutbound(
       track(conversationId, { text: image.caption?.text ?? "", media: "image" }, () =>
         client.sendImage(conversationId, image),
       ),
+    sendImages: async (conversationId, images, options) => {
+      const result = await client.sendImages(conversationId, images, options);
+      const text = images.find((image) => image.caption?.text)?.caption?.text ?? "";
+      for (const sent of result.messages) {
+        try {
+          remember(conversationId, sent, { text, media: "image" });
+        } catch {
+          log.warn("Could not remember an outbound message for purge");
+        }
+      }
+      return result;
+    },
     sendVideo: (conversationId, video) =>
       track(conversationId, { text: video.caption?.text ?? "", media: "video" }, () =>
         client.sendVideo(conversationId, video),

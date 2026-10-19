@@ -14,6 +14,7 @@ import type {
   XUser,
 } from "../types.js";
 import type { XClient } from "./client.js";
+import { uploadImageSlot, type SendImagesOptions, type SendImagesResult } from "./image-attachments.js";
 
 export class MockXClient implements XClient {
   readonly sent: {
@@ -27,6 +28,19 @@ export class MockXClient implements XClient {
     url: string;
     mimeType?: string;
     bytes: number;
+    caption?: string;
+    mention?: string;
+    replyToSequenceId?: string;
+    replyToSenderId?: string;
+    replyToEvent?: string;
+  }[] = [];
+  /**
+   * One entry per `sendImages` call that attached at least one image.
+   * A count command is one entry. Bare `sendImage` does not write here.
+   */
+  readonly imageBatches: {
+    conversationId: string;
+    urls: string[];
     caption?: string;
     mention?: string;
     replyToSequenceId?: string;
@@ -66,8 +80,12 @@ export class MockXClient implements XClient {
   bot: XUser;
   /** Official delete only succeeds for events owned by the bot user. */
   allowDeleteOthers = false;
-  /** When set, `sendImage` throws so callers fall back to a text link. */
+  /** When set, `sendImage` and `sendImages` throw so callers fall back to a text link. */
   failSendImage = false;
+  /** `sendImages` throws a 429 before attaching anything. */
+  rateLimitSendImages = false;
+  /** `sendImages` skips these URLs. `substitute` may replace the slot. */
+  readonly failUploadUrls = new Set<string>();
   /** When set, `sendVideo` throws so callers fall back to the temporary URL. */
   failSendVideo = false;
   /** When set, `sendAudio` throws so callers post a short failure line. */
@@ -157,6 +175,75 @@ export class MockXClient implements XClient {
       ...captionRecord(image.caption),
     });
     return { dmEventId: `img-${this.images.length}`, dmConversationId: conversationId };
+  }
+
+  async sendImages(
+    conversationId: string,
+    images: readonly OutboundImage[],
+    options?: SendImagesOptions,
+  ): Promise<SendImagesResult> {
+    if (this.failSendImage) {
+      throw new Error("native media attach failed");
+    }
+    if (this.rateLimitSendImages) {
+      const error = new Error("Rate limited; retry after 1000ms") as Error & {
+        status?: number;
+        retryAfterMs?: number;
+      };
+      error.status = 429;
+      error.retryAfterMs = 1000;
+      throw error;
+    }
+    const accepted: OutboundImage[] = [];
+    let rateLimited: SendImagesResult["rateLimited"];
+    for (const image of images) {
+      const slot = await uploadImageSlot(
+        image,
+        async (current) => {
+          if (this.failUploadUrls.has(current.url)) {
+            throw new Error("native media attach failed");
+          }
+          if (!current.bytes || current.bytes.byteLength === 0) {
+            throw new Error("missing image bytes");
+          }
+          return current;
+        },
+        options?.substitute,
+      );
+      if (slot.rateLimited) {
+        rateLimited = slot.rateLimited;
+        break;
+      }
+      if (slot.value) accepted.push(slot.value);
+    }
+    if (accepted.length === 0) {
+      return { messages: [], attached: 0, ...(rateLimited ? { rateLimited } : {}) };
+    }
+    const caption = accepted.find((image) => image.caption)?.caption;
+    this.imageBatches.push({
+      conversationId,
+      urls: accepted.map((image) => image.url),
+      ...captionRecord(caption),
+    });
+    for (const image of accepted) {
+      this.images.push({
+        conversationId,
+        url: image.url,
+        mimeType: image.mimeType,
+        bytes: image.bytes?.byteLength ?? 0,
+        ...captionRecord(image.caption),
+      });
+    }
+    return {
+      messages: [
+        {
+          dmEventId: `img-batch-${this.imageBatches.length}`,
+          dmConversationId: conversationId,
+        },
+      ],
+      attached: accepted.length,
+      ...(rateLimited ? { rateLimited } : {}),
+    };
   }
 
   async sendVideo(conversationId: string, video: OutboundVideo): Promise<SendMessageResult> {
