@@ -4,7 +4,10 @@ import { ModerationEngine } from "../src/bot/engine.js";
 import { fetchAdultImage } from "../src/bot/image-fetch.js";
 import {
   MEOW_API_URL,
+  MEOW_CAPPED,
+  MEOW_MAX,
   MEOW_UNAVAILABLE,
+  MEOW_USAGE,
   MeowBankError,
   MeowLookupError,
   canonicalMeowImageUrl,
@@ -31,6 +34,8 @@ const WIKI =
   "https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Cute_Kitten.jpg/960px-Cute_Kitten.jpg";
 const WIKI_B =
   "https://upload.wikimedia.org/wikipedia/commons/thumb/f/fa/Kitten_sleeping.jpg/960px-Kitten_sleeping.jpg";
+const WIKI_C =
+  "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b1/Cute_Grey_Kitten.jpg/960px-Cute_Grey_Kitten.jpg";
 
 const defaults: DefaultsConfig = {
   welcome: { enabled: false, text: "Welcome @{username}!" },
@@ -187,6 +192,56 @@ describe("!meow lookup", () => {
     });
     await expect(lookup.randomImage()).resolves.toEqual({ url: WIKI, fallbackUrl: WIKI_B });
     await expect(lookup.randomImage()).resolves.toEqual({ url: WIKI_B, fallbackUrl: WIKI });
+  });
+
+  it("prefers distinct photos and does not repeat one back-to-back", async () => {
+    const lookup = createMeowLookup({
+      urls: [WIKI, WIKI_B, WIKI_C],
+      api: false,
+      random: () => 0,
+    });
+    const three = await lookup.randomImages!(3);
+    expect(three.map((image) => image.url)).toEqual([WIKI_B, WIKI_C, WIKI]);
+    expect(new Set(three.map((image) => image.url)).size).toBe(3);
+
+    const many = await lookup.randomImages!(5);
+    const urls = many.map((image) => image.url);
+    expect(urls.every((url) => url === WIKI || url === WIKI_B || url === WIKI_C)).toBe(true);
+    for (let i = 1; i < urls.length; i += 1) expect(urls[i]).not.toBe(urls[i - 1]);
+    await expect(lookup.randomImages!(0)).rejects.toMatchObject({
+      name: "MeowLookupError",
+      userMessage: MEOW_UNAVAILABLE,
+    });
+  });
+
+  it("fills repeated Cataas ids from the bank and stops when Cataas is down", async () => {
+    let duplicateCalls = 0;
+    const duplicates = createMeowLookup({
+      urls: [WIKI, WIKI_B],
+      random: () => 0,
+      fetchImpl: async () => {
+        duplicateCalls += 1;
+        return jsonResponse(cuteKitten("qjfIHFFKfh4ND4mq"));
+      },
+    });
+    const mixed = await duplicates.randomImages!(3);
+    expect(mixed.map((image) => image.url)).toEqual([CATAAS, WIKI_B, WIKI]);
+    expect(duplicateCalls).toBe(5);
+
+    let downCalls = 0;
+    const down = createMeowLookup({
+      urls: [WIKI, WIKI_B],
+      random: () => 0,
+      fetchImpl: async () => {
+        downCalls += 1;
+        throw new Error("cataas down");
+      },
+    });
+    const filled = await down.randomImages!(4);
+    expect(downCalls).toBe(1);
+    const urls = filled.map((image) => image.url);
+    expect(urls.every((url) => url === WIKI || url === WIKI_B)).toBe(true);
+    for (let i = 1; i < urls.length; i += 1) expect(urls[i]).not.toBe(urls[i - 1]);
   });
 
   it("rejects an Imagine URL from Cataas and an empty bank", async () => {
@@ -365,20 +420,31 @@ describe("!meow engine", () => {
     expect(rig.client.sent).toHaveLength(0);
   });
 
-  it("ignores extra words and does not describe the photo", async () => {
+  it("rejects a non-integer, zero, or negative count with a usage hint", async () => {
     const rig = setup();
-    await rig.engine.processEvent(
-      message({ id: "m2", senderId: alice.id, text: "!meow orange tabby please" }),
-    );
-    expect(rig.lookupCalls).toBe(1);
-    expect(rig.client.images).toHaveLength(1);
-    expect(rig.client.sent).toHaveLength(0);
-    expect(JSON.stringify(rig.client.images)).not.toMatch(/orange|tabby|please/);
+    for (const text of ["!meow orange tabby please", "!meow 0", "!meow -3", "!meow 1.5", "!meow 5 please"]) {
+      await rig.engine.processEvent(message({ id: text, senderId: alice.id, text }));
+    }
+    expect(rig.lookupCalls).toBe(0);
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.fetchedUrls).toEqual([]);
+    expect(rig.client.images).toHaveLength(0);
+    expect(rig.client.sent.map((row) => row.text)).toEqual([
+      `@alice ${MEOW_USAGE}`,
+      `@alice ${MEOW_USAGE}`,
+      `@alice ${MEOW_USAGE}`,
+      `@alice ${MEOW_USAGE}`,
+      `@alice ${MEOW_USAGE}`,
+    ]);
+    const posted = rig.client.sent.map((row) => row.text).join("\n");
+    expect(posted).not.toMatch(/orange|tabby|please|cataas|wikimedia/i);
+    expect(MEOW_USAGE).toContain(String(MEOW_MAX));
   });
 
   it("refuses a banned age term and does not fetch a photo", async () => {
     const rig = setup();
     await rig.engine.processEvent(message({ id: "m3", senderId: alice.id, text: "!meow teen" }));
+    await rig.engine.processEvent(message({ id: "m3b", senderId: alice.id, text: "!meow 5 teen" }));
     expect(rig.lookupCalls).toBe(0);
     expect(rig.imagineCalls).toBe(0);
     expect(rig.fetchedUrls).toEqual([]);
@@ -388,6 +454,7 @@ describe("!meow engine", () => {
     expect(text).toMatch(/does not search custom text/);
     expect(text).not.toMatch(/teen/);
     expect(text.startsWith("@alice ")).toBe(true);
+    expect(rig.client.sent).toHaveLength(2);
   });
 
   it("replies once when lookup fails and posts no link", async () => {
@@ -477,16 +544,114 @@ describe("!meow engine", () => {
     });
   });
 
+  it("posts a count from a lookup that only implements randomImage", async () => {
+    const rig = setup();
+    await rig.engine.processEvent(message({ id: "fallback", senderId: alice.id, text: "!meow 2" }));
+    expect(rig.lookupCalls).toBe(2);
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.images).toHaveLength(2);
+    expect(rig.client.sent).toHaveLength(0);
+    expect(rig.client.images.every((image) => image.url === CATAAS && image.caption === "@alice")).toBe(true);
+  });
+
+  it("posts that many distinct photos and clamps above the max", async () => {
+    const rig = setup({
+      useDefaultLookup: true,
+      meowUrls: [WIKI, WIKI_B, WIKI_C],
+      meowFetch: async () => {
+        throw new Error("cataas down");
+      },
+    });
+    await rig.engine.processEvent(message({ id: "three", senderId: alice.id, text: "!meow 3" }));
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.sent).toHaveLength(0);
+    expect(rig.client.images).toHaveLength(3);
+    expect(new Set(rig.client.images.map((image) => image.url)).size).toBe(3);
+    expect(rig.client.images.every((image) => image.caption === "@alice" && image.mention === "alice")).toBe(true);
+
+    let fetches = 0;
+    const capped = setup({
+      useDefaultLookup: true,
+      meowUrls: [WIKI, WIKI_B],
+      meowFetch: async () => {
+        fetches += 1;
+        throw new Error("cataas down");
+      },
+    });
+    await capped.engine.processEvent(message({ id: "too-many", senderId: alice.id, text: "!meow 101" }));
+    expect(fetches).toBe(1);
+    expect(capped.imagineCalls).toBe(0);
+    expect(capped.client.sent.map((row) => row.text)).toEqual([`@alice ${MEOW_CAPPED}`]);
+    expect(capped.client.images).toHaveLength(MEOW_MAX);
+    const urls = capped.client.images.map((image) => image.url);
+    expect(urls.every((url) => url === WIKI || url === WIKI_B)).toBe(true);
+    for (let i = 1; i < urls.length; i += 1) expect(urls[i]).not.toBe(urls[i - 1]);
+    expect(JSON.stringify(capped.client.images)).not.toMatch(/grok\.com|api\.x\.ai|imagine/i);
+  });
+
+  it("skips a failed photo in a burst and posts no link", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    const engine = new ModerationEngine(store, client, runtime(), undefined, {
+      meow: {
+        async randomImage() {
+          return { url: CATAAS };
+        },
+        async randomImages(count: number) {
+          return [
+            { url: CATAAS, fallbackUrl: WIKI },
+            { url: CATAAS_OTHER },
+            { url: WIKI_B },
+          ].slice(0, count);
+        },
+      },
+      fetchImage: async (url) => {
+        if (url === CATAAS) return undefined;
+        return { bytes: Uint8Array.from([1, 2, 3]), mimeType: "image/jpeg" };
+      },
+    });
+    await engine.processEvent(message({ id: "partial", senderId: alice.id, text: "!meow 3" }));
+    expect(client.images.map((image) => image.url)).toEqual([WIKI, CATAAS_OTHER, WIKI_B]);
+    expect(client.sent).toHaveLength(0);
+    expect(JSON.stringify(client.images)).not.toContain(CATAAS);
+
+    const failedStore = new Store(":memory:");
+    stores.push(failedStore);
+    const failed = new MockXClient();
+    const failedEngine = new ModerationEngine(failedStore, failed, runtime(), undefined, {
+      meow: {
+        async randomImage() {
+          return { url: CATAAS };
+        },
+        async randomImages() {
+          return [{ url: CATAAS, fallbackUrl: WIKI }, { url: CATAAS_OTHER }];
+        },
+      },
+      fetchImage: async () => undefined,
+    });
+    await failedEngine.processEvent(message({ id: "none", senderId: alice.id, text: "!meow 2" }));
+    expect(failed.images).toHaveLength(0);
+    expect(failed.sent.map((row) => row.text)).toEqual([`@alice ${MEOW_UNAVAILABLE}`]);
+    expect(failed.sent[0]?.text).not.toMatch(/cataas|wikimedia|https?:/i);
+  });
+
   it("mentions !meow in the default !help text and the README", () => {
     const help = loadDefaults("config/default.yaml").help;
-    expect(help).toMatch(/!meow/);
-    expect(help).toMatch(/random cute kitten photo/);
+    expect(help).toMatch(/!meow \[n\]/);
+    expect(help).toMatch(/cute kitten photo/);
+    expect(help).toMatch(new RegExp(`max ${MEOW_MAX}`));
+    expect(help).toMatch(/Bare !meow posts one/);
     expect(help).toMatch(/Image only/);
     const media = help.split("Games:")[0] ?? "";
     expect(media).toMatch(/!meow/);
     const readme = fs.readFileSync("README.md", "utf8");
     const section = readme.split("## Meow")[1]?.split("## Milady memes")[0] ?? "";
     expect(section).toMatch(/`!meow`/);
+    expect(section).toMatch(/`!meow 5`/);
+    expect(section).toMatch(/Capped at 100/);
+    expect(section).toMatch(/Usage: !meow \[n\]/);
+    expect(section).toMatch(/distinct/);
     expect(section).toMatch(/config\/kitten-bank\.txt/);
     expect(section).toMatch(/cataas\.com\/cat\/kitten/);
     expect(section).toMatch(/kitten/);
@@ -495,5 +660,8 @@ describe("!meow engine", () => {
     expect(section).toMatch(/does not open https:\/\/grok\.com\/imagine/);
     expect(section).toMatch(/does not `POST` `https:\/\/api\.x\.ai\/v1\/images\/generations`/);
     expect(section).toMatch(/XAI_API_KEY/);
+    const overview = readme.split("## What X will not do")[0] ?? "";
+    expect(overview).toMatch(/`!meow 5`/);
+    expect(overview).toMatch(/max 100/);
   });
 });
