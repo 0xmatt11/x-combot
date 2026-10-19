@@ -1,0 +1,23 @@
+# Cute kitten stills for !meow.
+# Used when https://cataas.com/cat/kitten is down or does not return a cute still.
+# Wikimedia Commons photos. 960px thumbs where the original is large. Checked 2026-10-19.
+# Direct https images only. One URL per line. Lines starting with # are ignored.
+https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/A_focused_kitten_%28Pixabay%29.jpg/960px-A_focused_kitten_%28Pixabay%29.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/A_seemingly_innocent_kitten_%28Pixabay%29.jpg/960px-A_seemingly_innocent_kitten_%28Pixabay%29.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Cute_Kitten.jpg/960px-Cute_Kitten.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/9/9c/Cute_Kitten_sleeping_on_bed.jpg/960px-Cute_Kitten_sleeping_on_bed.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Cute_Kittens.jpg/960px-Cute_Kittens.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/f/fc/Cute_White_Kitten_%284985408192%29.jpg/960px-Cute_White_Kitten_%284985408192%29.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Cute_grey_kitten.jpg/960px-Cute_grey_kitten.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Cute_kitten%21.jpg/960px-Cute_kitten%21.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/1/13/Cute_kitten.jpg/960px-Cute_kitten.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/4/4a/Cute_kitten_%284985420436%29.jpg/960px-Cute_kitten_%284985420436%29.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Cute_kitten_2.jpg/960px-Cute_kitten_2.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/2/27/Cute_kitten_on_the_Table.jpg/960px-Cute_kitten_on_the_Table.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/Cute_napping_kitten_%28Unsplash%29.jpg/960px-Cute_napping_kitten_%28Unsplash%29.jpg
+https://upload.wikimedia.org/wikipedia/commons/7/7b/Cute_twin_kitten_snowy_with_black_parts_2013-05-07_23-52.jpg
+https://upload.wikimedia.org/wikipedia/commons/9/93/Flickr_-_Per_Ola_Wiberg_~_mostly_away_-_Cute_kitten.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/e/e3/Kitten_Looking_Cute.jpg/960px-Kitten_Looking_Cute.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Kitten_cuteness_overload.jpg/960px-Kitten_cuteness_overload.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/f/fa/Kitten_sleeping.jpg/960px-Kitten_sleeping.jpg
+https://upload.wikimedia.org/wikipedia/commons/thumb/9/96/Siamese_Kitten%2C_Cute_Kitty_%287439621320%29.jpg/960px-Siamese_Kitten%2C_Cute_Kitty_%287439621320%29.jpg

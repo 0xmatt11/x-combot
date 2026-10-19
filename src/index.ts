@@ -16,6 +16,7 @@ import { readBuildVersion, RuntimeHealth } from "./bot/status.js";
 import { createAdultVisionJudge } from "./bot/adult-vision.js";
 import { fetchAdultImage } from "./bot/image-fetch.js";
 import { defaultMiladyBankPath, loadMiladyMemeBank } from "./bot/milady.js";
+import { defaultMeowBankPath, loadMeowBank } from "./bot/meow.js";
 import { createImageSearch } from "./bot/image-search.js";
 import { createUserFacingImagine } from "./bot/imagine-backend.js";
 import { defaultImagineTogglePath, readImagineToggle } from "./bot/imagine-toggle.js";
@@ -245,6 +246,8 @@ async function main(): Promise<void> {
     extraUrls: env.miladyExtraUrls,
   });
   log.info(`!milady meme bank loaded (${miladyUrls.length} stills from memedepot).`);
+  const meowUrls = loadMeowBank({ bankPath: defaultMeowBankPath() });
+  log.info(`!meow kitten bank loaded (${meowUrls.length} stills). Cataas is tried first.`);
 
   const botUserId = env.botUserId ?? me.id;
   const identityPresent = Boolean(env.chatPin) || fs.existsSync(env.chatKeysPath);
@@ -278,6 +281,7 @@ async function main(): Promise<void> {
       }),
       openseaApiKey: env.openseaApiKey,
       miladyUrls,
+      meowUrls,
       fetchImage: fetchAdultImage,
       imagine,
       imaginePublic,

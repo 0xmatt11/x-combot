@@ -205,6 +205,15 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!cheese please")).toBeUndefined();
   });
 
+  it("parses !meow and keeps extra text off the lookup", () => {
+    expect(parseCommand("!meow")).toEqual({ name: "meow" });
+    expect(parseCommand("!MEOW")).toEqual({ name: "meow" });
+    expect(parseCommand("  /meow  ")).toEqual({ name: "meow" });
+    expect(parseCommand("!meow please")).toEqual({ name: "meow", extra: "please" });
+    expect(parseUnknownBang("!meow")).toBeUndefined();
+    expect(parseUnknownBang("!meow please")).toBeUndefined();
+  });
+
   it("parses !milady and keeps extra text off the lookup", () => {
     expect(parseCommand("!milady")).toEqual({ name: "milady" });
     expect(parseCommand("!MILADY")).toEqual({ name: "milady" });
