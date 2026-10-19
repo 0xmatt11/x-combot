@@ -4,12 +4,20 @@ import { memberIdsFromConversation, normalizePublicKeys, type RemotePublicKey } 
 import type { RawChatConversationsPage, RawChatEventsPage } from "../chat/http.js";
 import { deleteOneByOne } from "../chat/delete-batch.js";
 import { isChatGroupId } from "../chat/ids.js";
+import {
+  DM_IMAGES_PER_MESSAGE,
+  deliverImageBatches,
+  uploadImageSlot,
+  type SendImagesOptions,
+  type SendImagesResult,
+} from "./image-attachments.js";
 import type {
   DeleteBatchResult,
   DeleteHint,
   DeleteResult,
   DeleteTarget,
   DmEvent,
+  MediaCaption,
   Mention,
   OutboundAudio,
   OutboundImage,
@@ -279,13 +287,65 @@ export class LiveXClient implements XClient {
     }
     const spec = dmMediaSpec(image.mimeType);
     const mediaId = await this.uploadDmImage(image.bytes, spec);
+    return this.postDmAttachments(conversationId, [mediaId], image.caption);
+  }
+
+  /**
+   * One classic DM message holds one `media_id` (`DM_IMAGES_PER_MESSAGE`).
+   * Uploads that fail are skipped. A 429 or 402 stops the remaining images
+   * after any media already uploaded has been sent.
+   */
+  async sendImages(
+    conversationId: string,
+    images: readonly OutboundImage[],
+    options?: SendImagesOptions,
+  ): Promise<SendImagesResult> {
+    const uploaded: string[] = [];
+    let uploadLimited: SendImagesResult["rateLimited"];
+    for (const image of images) {
+      const slot = await uploadImageSlot(
+        image,
+        (current) => this.uploadOneDmImage(current),
+        options?.substitute,
+      );
+      if (slot.rateLimited) {
+        uploadLimited = slot.rateLimited;
+        break;
+      }
+      if (slot.value) uploaded.push(slot.value);
+    }
+    const caption = images.find((image) => image.caption)?.caption;
+    const delivered = await deliverImageBatches({
+      items: uploaded,
+      perMessage: DM_IMAGES_PER_MESSAGE,
+      send: (batch) => this.postDmAttachments(conversationId, batch, caption),
+    });
+    if (uploadLimited && !delivered.rateLimited) delivered.rateLimited = uploadLimited;
+    return delivered;
+  }
+
+  private async uploadOneDmImage(image: OutboundImage): Promise<string | undefined> {
+    if (!image.bytes || image.bytes.byteLength === 0) return undefined;
+    if (image.bytes.byteLength > DM_IMAGE_MAX_BYTES) {
+      log.warn("Skipping a DM image that exceeds the size limit");
+      return undefined;
+    }
+    const spec = dmMediaSpec(image.mimeType);
+    return this.uploadDmImage(image.bytes, spec);
+  }
+
+  private async postDmAttachments(
+    conversationId: string,
+    mediaIds: readonly string[],
+    caption?: MediaCaption,
+  ): Promise<SendMessageResult> {
     const payload = await this.request<{
       data: { dm_conversation_id: string; dm_event_id: string };
     }>(`/2/dm_conversations/${encodeURIComponent(conversationId)}/messages`, {
       method: "POST",
       json: {
-        ...(image.caption?.text ? { text: image.caption.text } : {}),
-        attachments: [{ media_id: mediaId }],
+        ...(caption?.text ? { text: caption.text } : {}),
+        attachments: mediaIds.map((mediaId) => ({ media_id: mediaId })),
       },
     });
     return {

@@ -549,9 +549,19 @@ describe("!meow engine", () => {
     await rig.engine.processEvent(message({ id: "fallback", senderId: alice.id, text: "!meow 2" }));
     expect(rig.lookupCalls).toBe(2);
     expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.imageBatches).toHaveLength(1);
+    expect(rig.client.imageBatches[0]?.urls).toEqual([CATAAS, CATAAS]);
     expect(rig.client.images).toHaveLength(2);
     expect(rig.client.sent).toHaveLength(0);
     expect(rig.client.images.every((image) => image.url === CATAAS && image.caption === "@alice")).toBe(true);
+  });
+
+  it("keeps a count of one on the single-image send", async () => {
+    const rig = setup();
+    await rig.engine.processEvent(message({ id: "one", senderId: alice.id, text: "!meow 1" }));
+    expect(rig.fetchedUrls).toEqual([CATAAS]);
+    expect(rig.client.images).toHaveLength(1);
+    expect(rig.client.imageBatches).toHaveLength(0);
   });
 
   it("posts that many distinct photos and clamps above the max", async () => {
@@ -565,7 +575,9 @@ describe("!meow engine", () => {
     await rig.engine.processEvent(message({ id: "three", senderId: alice.id, text: "!meow 3" }));
     expect(rig.imagineCalls).toBe(0);
     expect(rig.client.sent).toHaveLength(0);
+    expect(rig.client.imageBatches).toHaveLength(1);
     expect(rig.client.images).toHaveLength(3);
+    expect(rig.client.imageBatches[0]?.urls).toEqual(rig.client.images.map((image) => image.url));
     expect(new Set(rig.client.images.map((image) => image.url)).size).toBe(3);
     expect(rig.client.images.every((image) => image.caption === "@alice" && image.mention === "alice")).toBe(true);
 
@@ -582,6 +594,7 @@ describe("!meow engine", () => {
     expect(fetches).toBe(1);
     expect(capped.imagineCalls).toBe(0);
     expect(capped.client.sent.map((row) => row.text)).toEqual([`@alice ${MEOW_CAPPED}`]);
+    expect(capped.client.imageBatches).toHaveLength(1);
     expect(capped.client.images).toHaveLength(MEOW_MAX);
     const urls = capped.client.images.map((image) => image.url);
     expect(urls.every((url) => url === WIKI || url === WIKI_B)).toBe(true);
@@ -612,6 +625,8 @@ describe("!meow engine", () => {
       },
     });
     await engine.processEvent(message({ id: "partial", senderId: alice.id, text: "!meow 3" }));
+    expect(client.imageBatches).toHaveLength(1);
+    expect(client.imageBatches[0]?.urls).toEqual([WIKI, CATAAS_OTHER, WIKI_B]);
     expect(client.images.map((image) => image.url)).toEqual([WIKI, CATAAS_OTHER, WIKI_B]);
     expect(client.sent).toHaveLength(0);
     expect(JSON.stringify(client.images)).not.toContain(CATAAS);
@@ -636,12 +651,107 @@ describe("!meow engine", () => {
     expect(failed.sent[0]?.text).not.toMatch(/cataas|wikimedia|https?:/i);
   });
 
+  it("retries a failed upload with the fallback in the same message", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    client.failUploadUrls.add(CATAAS);
+    const fetched: string[] = [];
+    const engine = new ModerationEngine(store, client, runtime(), undefined, {
+      meow: {
+        async randomImage() {
+          return { url: CATAAS };
+        },
+        async randomImages(count: number) {
+          return [
+            { url: CATAAS, fallbackUrl: WIKI },
+            { url: CATAAS_OTHER },
+          ].slice(0, count);
+        },
+      },
+      fetchImage: async (url) => {
+        fetched.push(url);
+        return { bytes: Uint8Array.from([1, 2, 3]), mimeType: "image/jpeg" };
+      },
+    });
+    await engine.processEvent(message({ id: "upload-fallback", senderId: alice.id, text: "!meow 2" }));
+    expect(client.imageBatches).toHaveLength(1);
+    expect(client.imageBatches[0]?.urls).toEqual([WIKI, CATAAS_OTHER]);
+    expect(fetched).toEqual([CATAAS, CATAAS_OTHER, WIKI]);
+    expect(client.sent).toHaveLength(0);
+  });
+
+  it("stops a counted send on 429 and does not post a link", async () => {
+    const rig = setup();
+    rig.client.rateLimitSendImages = true;
+    await rig.engine.processEvent(message({ id: "burst-429", senderId: alice.id, text: "!meow 3" }));
+    expect(rig.client.images).toHaveLength(0);
+    expect(rig.client.imageBatches).toHaveLength(0);
+    expect(rig.client.sent.map((row) => row.text)).toEqual([`@alice ${MEOW_UNAVAILABLE}`]);
+    expect(rig.client.sent[0]?.text).not.toMatch(/cataas|wikimedia|https?:/i);
+  });
+
+  it("sends a count as one encrypted Chat message", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.authorizeChat(chatGroupId);
+    const batches: { url?: string; caption?: import("../src/types.js").MediaCaption }[][] = [];
+    const chat = {
+      sendImage: async () => {
+        throw new Error("a count must not call sendImage");
+      },
+      sendImages: async (
+        _conversationId: string,
+        images: { url?: string; caption?: import("../src/types.js").MediaCaption }[],
+      ) => {
+        batches.push(images);
+        return {
+          messages: [{ dmEventId: "img-batch-1", dmConversationId: chatGroupId }],
+          attached: images.length,
+        };
+      },
+      sendText: async (conversationId: string, text: string) => {
+        return { dmEventId: "text-1", dmConversationId: conversationId, text };
+      },
+    } as unknown as import("../src/chat/service.js").ChatService;
+    const engine = new ModerationEngine(store, new RoutedXClient(new MockXClient(), chat), runtime(), undefined, {
+      meow: {
+        async randomImage() {
+          return { url: CATAAS };
+        },
+        async randomImages(count: number) {
+          return [CATAAS, CATAAS_OTHER, WIKI].slice(0, count).map((url) => ({ url }));
+        },
+      },
+      fetchImage: async () => ({ bytes: Uint8Array.from([9, 9, 9]), mimeType: "image/jpeg" }),
+    });
+    await engine.processEvent(
+      message({
+        id: "chat-meow-3",
+        senderId: alice.id,
+        text: "!meow 3",
+        conversationId: chatGroupId,
+        sequenceId: "77",
+        encodedEvent: "blob-meow",
+      }),
+    );
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.map((image) => image.url)).toEqual([CATAAS, CATAAS_OTHER, WIKI]);
+    expect(batches[0]?.[0]?.caption?.replyTo).toMatchObject({
+      sequenceId: "77",
+      senderId: alice.id,
+      previewText: "!meow 3",
+      rawEvent: "blob-meow",
+    });
+  });
+
   it("mentions !meow in the default !help text and the README", () => {
     const help = loadDefaults("config/default.yaml").help;
     expect(help).toMatch(/!meow \[n\]/);
     expect(help).toMatch(/cute kitten photo/);
     expect(help).toMatch(new RegExp(`max ${MEOW_MAX}`));
     expect(help).toMatch(/Bare !meow posts one/);
+    expect(help).toMatch(/one message/);
     expect(help).toMatch(/Image only/);
     const media = help.split("Games:")[0] ?? "";
     expect(media).toMatch(/!meow/);
@@ -651,7 +761,10 @@ describe("!meow engine", () => {
     expect(section).toMatch(/`!meow 5`/);
     expect(section).toMatch(/Capped at 100/);
     expect(section).toMatch(/Usage: !meow \[n\]/);
+    expect(section).toMatch(/in one message/);
     expect(section).toMatch(/distinct/);
+    expect(section).toMatch(/Only one attachment per message is supported/);
+    expect(section).toMatch(/Message is too large/);
     expect(section).toMatch(/config\/kitten-bank\.txt/);
     expect(section).toMatch(/cataas\.com\/cat\/kitten/);
     expect(section).toMatch(/kitten/);
