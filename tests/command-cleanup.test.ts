@@ -93,6 +93,13 @@ describe("command cleanup", () => {
           };
         },
       },
+      meow: {
+        async randomImage() {
+          return {
+            url: "https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Cute_Kitten.jpg/960px-Cute_Kitten.jpg",
+          };
+        },
+      },
       undertow: {
         async randomImage() {
           return {
@@ -110,7 +117,7 @@ describe("command cleanup", () => {
         },
       },
       fetchImage: async (url) =>
-        url.includes("seadn.io")
+        url.includes("seadn.io") || url.includes("upload.wikimedia.org")
           ? { bytes: Uint8Array.from([4, 5, 6]), mimeType: "image/png" }
           : undefined,
     });
@@ -269,6 +276,7 @@ describe("command cleanup", () => {
       "!ask what is up",
       "!boobs",
       "!cheese",
+      "!meow",
       "!milady",
       "!undertow",
       "!fathom",
