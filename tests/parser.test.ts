@@ -244,6 +244,19 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!fathom please")).toBeUndefined();
   });
 
+  it("parses !meow and keeps extra text off the lookup", () => {
+    expect(parseCommand("!meow")).toEqual({ name: "meow" });
+    expect(parseCommand("!MEOW")).toEqual({ name: "meow" });
+    expect(parseCommand("  /meow  ")).toEqual({ name: "meow" });
+    expect(parseCommand("!meow please")).toEqual({ name: "meow", extra: "please" });
+    expect(parseCommand("!meow a tiny kitten")).toEqual({
+      name: "meow",
+      extra: "a tiny kitten",
+    });
+    expect(parseUnknownBang("!meow")).toBeUndefined();
+    expect(parseUnknownBang("!meow please")).toBeUndefined();
+  });
+
   it("parses xp, level, rank, and the leaderboard aliases", () => {
     expect(parseCommand("!xp")).toEqual({ name: "xp" });
     expect(parseCommand("/level")).toEqual({ name: "xp" });
