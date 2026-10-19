@@ -1,3 +1,4 @@
+import { MEOW_MAX } from "./meow.js";
 import { MILADY_MAX } from "./milady.js";
 
 export type UserRef = {
@@ -30,7 +31,7 @@ export type ParsedCommand =
   | { name: "ass"; extra?: string }
   | { name: "booty"; extra?: string }
   | { name: "cheese"; extra?: string }
-  | { name: "meow"; extra?: string }
+  | { name: "meow"; count?: number; capped?: boolean; extra?: string }
   | { name: "milady"; count?: number; capped?: boolean; extra?: string }
   | { name: "undertow"; extra?: string }
   | { name: "fathom"; extra?: string }
@@ -216,6 +217,11 @@ function parsePurgeCount(rest: string): { count: number; capped: boolean } | und
   return parseBoundedCount(rest, PURGE_MAX);
 }
 
+/** `!meow N`. Anything that is not a positive integer stays on `extra` for the usage hint. */
+function parseMeowCount(rest: string): { count: number; capped: boolean } | undefined {
+  return parseBoundedCount(rest, MEOW_MAX);
+}
+
 /** `!milady N`. Anything that is not a positive integer stays on `extra` for the usage hint. */
 function parseMiladyCount(rest: string): { count: number; capped: boolean } | undefined {
   return parseBoundedCount(rest, MILADY_MAX);
@@ -375,8 +381,14 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "booty", extra: rest } : { name: "booty" };
     case "cheese":
       return rest ? { name: "cheese", extra: rest } : { name: "cheese" };
-    case "meow":
-      return rest ? { name: "meow", extra: rest } : { name: "meow" };
+    case "meow": {
+      if (!rest) return { name: "meow" };
+      const parsed = parseMeowCount(rest);
+      if (!parsed) return { name: "meow", extra: rest };
+      return parsed.capped
+        ? { name: "meow", count: parsed.count, capped: true }
+        : { name: "meow", count: parsed.count };
+    }
     case "milady": {
       if (!rest) return { name: "milady" };
       const parsed = parseMiladyCount(rest);

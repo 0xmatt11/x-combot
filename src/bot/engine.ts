@@ -109,7 +109,9 @@ import {
 import {
   createMeowLookup,
   isSafeMeowImageUrl,
+  MEOW_CAPPED,
   MEOW_UNAVAILABLE,
+  MEOW_USAGE,
   MeowLookupError,
   type MeowImage,
   type MeowLookup,
@@ -366,7 +368,7 @@ export interface EngineDeps {
    */
   miladyUrls?: readonly string[];
   /**
-   * Cataas kitten lookup for `!meow`, with the Wikimedia bank as fallback.
+   * Cataas kitten lookup for `!meow` and `!meow N`, with the Wikimedia bank as fallback.
    * Absent means the engine builds the default client on first use from
    * `meowUrls`, or from `config/kitten-bank.txt` when that list was not passed.
    * This command does not call Imagine or api.x.ai.
@@ -3050,7 +3052,7 @@ export class ModerationEngine {
         await this.handleMilady(event, command, actions);
         return;
       case "meow":
-        await this.handleMeow(event, command.extra, actions);
+        await this.handleMeow(event, command, actions);
         return;
       case "undertow":
         await this.handleUndertow(event, command.extra, actions);
@@ -3885,28 +3887,34 @@ export class ModerationEngine {
   }
 
   /**
-   * `!meow` posts one cute kitten photo. Cataas is tried first. A miss, a gif,
+   * `!meow` posts one cute kitten photo. `!meow N` posts that many. N above
+   * 100 is clamped and the chat gets a one-line note. A non-integer, zero, or
+   * negative count gets a usage hint. Cataas is tried first. A miss, a gif,
    * or a meme tag falls through to the Wikimedia bank, and a failed download
-   * or upload tries that fallback once. Extra words are ignored except a
-   * banned age term, which is refused. This does not call Imagine or api.x.ai,
-   * and a failure does not post a link.
+   * or upload tries that photo's fallback once. A banned age term is refused.
+   * This does not call Imagine or api.x.ai, and a failure does not post a link.
    */
   private async handleMeow(
     event: DmEvent,
-    extra: string | undefined,
+    command: Extract<ParsedCommand, { name: "meow" }>,
     actions: EngineActions,
   ): Promise<void> {
     const conversationId = event.conversationId;
-    if (extra && containsBannedAgeTerm(extra)) {
+    if (command.extra && containsBannedAgeTerm(command.extra)) {
       log.warn(`Refused !meow with unsafe extra text conversation=${conversationId}`);
       await this.reply(conversationId, "Refused. !meow does not search custom text.", actions);
       return;
     }
+    if (command.extra) {
+      await this.reply(conversationId, MEOW_USAGE, actions);
+      return;
+    }
 
+    const count = command.count ?? 1;
     const lookup = this.meowClient();
-    let image: MeowImage;
+    let images: MeowImage[];
     try {
-      image = await lookup.randomImage();
+      images = await this.loadMeowImages(lookup, count);
     } catch (error) {
       const userMessage = error instanceof MeowLookupError ? error.userMessage : MEOW_UNAVAILABLE;
       const detail = redactSecrets(error instanceof Error ? error.message : "lookup failed");
@@ -3915,7 +3923,33 @@ export class ModerationEngine {
       return;
     }
 
+    if (command.capped) {
+      await this.reply(conversationId, MEOW_CAPPED, actions);
+    }
+
     const caption = await this.commandCaption(event);
+    let posted = 0;
+    for (const image of images) {
+      if (await this.postMeowPhoto(conversationId, image, caption)) posted += 1;
+    }
+    if (posted === 0) {
+      await this.reply(conversationId, MEOW_UNAVAILABLE, actions);
+    }
+  }
+
+  private async loadMeowImages(lookup: MeowLookup, count: number): Promise<MeowImage[]> {
+    if (lookup.randomImages) return lookup.randomImages(count);
+    const images: MeowImage[] = [];
+    for (let i = 0; i < count; i += 1) images.push(await lookup.randomImage());
+    return images;
+  }
+
+  /** One photo, then its fallback. Returns false when every candidate fails. Does not post a link. */
+  private async postMeowPhoto(
+    conversationId: string,
+    image: MeowImage,
+    caption?: MediaCaption,
+  ): Promise<boolean> {
     const candidates: string[] = [];
     for (const url of [image.url, image.fallbackUrl]) {
       if (!url || candidates.includes(url)) continue;
@@ -3926,9 +3960,9 @@ export class ModerationEngine {
         log.warn(`!meow skipped an unsafe image url conversation=${conversationId}`);
         continue;
       }
-      if (await this.postMeowImage(conversationId, url, caption)) return;
+      if (await this.postMeowImage(conversationId, url, caption)) return true;
     }
-    await this.reply(conversationId, MEOW_UNAVAILABLE, actions);
+    return false;
   }
 
   private async postMeowImage(

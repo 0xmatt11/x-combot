@@ -205,12 +205,25 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!cheese please")).toBeUndefined();
   });
 
-  it("parses !meow and keeps extra text off the lookup", () => {
+  it("parses !meow with an optional picture count", () => {
     expect(parseCommand("!meow")).toEqual({ name: "meow" });
     expect(parseCommand("!MEOW")).toEqual({ name: "meow" });
     expect(parseCommand("  /meow  ")).toEqual({ name: "meow" });
+    expect(parseCommand("!meow 1")).toEqual({ name: "meow", count: 1 });
+    expect(parseCommand("/meow 5")).toEqual({ name: "meow", count: 5 });
+    expect(parseCommand("!meow 100")).toEqual({ name: "meow", count: 100 });
+    expect(parseCommand("!meow 101")).toEqual({ name: "meow", count: 100, capped: true });
+    expect(parseCommand("!meow 500")).toEqual({ name: "meow", count: 100, capped: true });
+    expect(parseCommand(`!meow ${"9".repeat(30)}`)).toEqual({ name: "meow", count: 100, capped: true });
+    expect(parseCommand("!meow 0")).toEqual({ name: "meow", extra: "0" });
+    expect(parseCommand("!meow 01")).toEqual({ name: "meow", extra: "01" });
+    expect(parseCommand("!meow -3")).toEqual({ name: "meow", extra: "-3" });
+    expect(parseCommand("!meow 1.5")).toEqual({ name: "meow", extra: "1.5" });
     expect(parseCommand("!meow please")).toEqual({ name: "meow", extra: "please" });
+    expect(parseCommand("!meow orange tabby")).toEqual({ name: "meow", extra: "orange tabby" });
+    expect(parseCommand("!meow 5 please")).toEqual({ name: "meow", extra: "5 please" });
     expect(parseUnknownBang("!meow")).toBeUndefined();
+    expect(parseUnknownBang("!meow 5")).toBeUndefined();
     expect(parseUnknownBang("!meow please")).toBeUndefined();
   });
 

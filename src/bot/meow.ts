@@ -1,10 +1,12 @@
 /**
- * One random cute kitten photo for `!meow`.
+ * Cute kitten photos for `!meow` and `!meow N`.
  *
  * Cataas (`https://cataas.com/cat/kitten?json=true`) is tried first. No key.
  * A hit has to be a still tagged both `kitten` and `cute`. Gifs and meme tags
  * are skipped. If that request fails, the committed Wikimedia bank is used
- * (`config/kitten-bank.txt`). This module does not call grok.com/imagine or api.x.ai.
+ * (`config/kitten-bank.txt`). A count prefers distinct photos, and does not
+ * place the same photo back-to-back when more than one is available.
+ * This module does not call grok.com/imagine or api.x.ai.
  */
 
 import { readFileSync } from "node:fs";
@@ -49,6 +51,15 @@ export const MEOW_API_URL = "https://cataas.com/cat/kitten?json=true";
 
 export const MEOW_UNAVAILABLE = "Couldn't load a kitten right now.";
 
+/** Hard cap for `!meow N`. Larger values clamp to this and the chat is told. */
+export const MEOW_MAX = 100;
+
+/** Short hint when the count is missing a positive integer, or is zero or negative. */
+export const MEOW_USAGE = `Usage: !meow [n]. n is how many pictures, from 1 to ${MEOW_MAX}.`;
+
+/** Sent before the pictures when the requested count was above `MEOW_MAX`. */
+export const MEOW_CAPPED = `Capped at ${MEOW_MAX}.`;
+
 export interface MeowImage {
   url: string;
   /** Tried once when `url` will not download or upload. */
@@ -58,6 +69,13 @@ export interface MeowImage {
 export interface MeowLookup {
   /** One https kitten still. No caller text is accepted. */
   randomImage(): Promise<MeowImage>;
+  /**
+   * `count` https kitten stills. No caller text is accepted.
+   * Distinct while Cataas and the bank have enough. Repeats only after that
+   * pool is exhausted, and not back-to-back when more than one photo is loaded.
+   * Injected lookups may omit this; the engine then calls `randomImage`.
+   */
+  randomImages?(count: number): Promise<MeowImage[]>;
 }
 
 export class MeowLookupError extends Error {
@@ -209,16 +227,33 @@ export function createMeowLookup(options?: {
           bankText: options?.bankText,
         });
 
+  async function oneImage(): Promise<MeowImage> {
+    const fromApi = api ? await firstCataasKitten(fetchImpl, apiUrl) : undefined;
+    const fallback = pickBank(urls, random, fromApi);
+    const url = fromApi ?? fallback;
+    if (!url || !isSafeMeowImageUrl(url)) {
+      throw new MeowLookupError("no kitten photo", MEOW_UNAVAILABLE);
+    }
+    const next = fromApi ? fallback : pickBank(urls, random, url);
+    return next && next !== url ? { url, fallbackUrl: next } : { url };
+  }
+
   return {
     async randomImage() {
-      const fromApi = api ? await firstCataasKitten(fetchImpl, apiUrl) : undefined;
-      const fallback = pickBank(urls, random, fromApi);
-      const url = fromApi ?? fallback;
-      if (!url || !isSafeMeowImageUrl(url)) {
+      return oneImage();
+    },
+    async randomImages(count) {
+      const n = Math.floor(count);
+      if (!Number.isFinite(n) || n < 1) {
+        throw new MeowLookupError("meow count is invalid", MEOW_UNAVAILABLE);
+      }
+      if (n === 1) return [await oneImage()];
+      const fromApi = api ? await cataasPhotos(fetchImpl, apiUrl, n) : [];
+      const primaries = fillMeowPrimaries(fromApi, urls, n, random);
+      if (primaries.length !== n || primaries.some((url) => !isSafeMeowImageUrl(url))) {
         throw new MeowLookupError("no kitten photo", MEOW_UNAVAILABLE);
       }
-      const next = fromApi ? fallback : pickBank(urls, random, url);
-      return next && next !== url ? { url, fallbackUrl: next } : { url };
+      return primaries.map((url) => withMeowFallback(url, urls, random));
     },
   };
 }
@@ -254,15 +289,150 @@ function pickBank(urls: readonly string[], random: () => number, exclude?: strin
   return url && isSafeMeowImageUrl(url) ? url : undefined;
 }
 
+function withMeowFallback(url: string, urls: readonly string[], random: () => number): MeowImage {
+  const next = pickBank(urls, random, url);
+  return next && next !== url ? { url, fallbackUrl: next } : { url };
+}
+
+/**
+ * `count` photo URLs. The first pass is a shuffle with no repeats.
+ * Further passes reshuffle. When more than one URL is loaded, a photo is
+ * not placed next to itself. `previous` is the photo already chosen just
+ * before this fill, so the seam stays distinct too.
+ */
+function pickMeowStills(
+  urls: readonly string[],
+  count: number,
+  random: () => number,
+  previous?: string,
+): string[] {
+  if (count < 1 || urls.length === 0) return [];
+  if (urls.length === 1) {
+    const only = urls[0]!;
+    return Array.from({ length: count }, () => only);
+  }
+  if (count === 1) {
+    const pool = previous ? urls.filter((url) => url !== previous) : urls;
+    const source = pool.length > 0 ? pool : urls;
+    const url = source[meowPickIndex(source.length, random)];
+    return url ? [url] : [];
+  }
+
+  const picked: string[] = [];
+  let deck = shuffleMeow(urls, random);
+  let cursor = 0;
+  let skipped = 0;
+  const last = () => (picked.length > 0 ? picked[picked.length - 1] : previous);
+  while (picked.length < count) {
+    if (cursor >= deck.length) {
+      if (skipped >= deck.length) {
+        picked.push(deck[0] ?? urls[0]!);
+        continue;
+      }
+      deck = shuffleMeow(urls, random);
+      cursor = 0;
+      skipped = 0;
+      const prev = last();
+      if (deck.length > 1 && deck[0] === prev) {
+        deck.push(deck.shift()!);
+      }
+    }
+    const next = deck[cursor]!;
+    cursor += 1;
+    if (next === last()) {
+      skipped += 1;
+      continue;
+    }
+    skipped = 0;
+    picked.push(next);
+  }
+  return picked;
+}
+
+function shuffleMeow<T>(items: readonly T[], random: () => number): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.min(i, Math.floor(random() * (i + 1)));
+    const swap = copy[i]!;
+    copy[i] = copy[j]!;
+    copy[j] = swap;
+  }
+  return copy;
+}
+
+function meowPickIndex(length: number, random: () => number): number {
+  return Math.min(length - 1, Math.max(0, Math.floor(random() * length)));
+}
+
+/** Bank photos for the slots Cataas did not fill. Distinct until the pool runs out. */
+function fillMeowPrimaries(
+  already: readonly string[],
+  bank: readonly string[],
+  count: number,
+  random: () => number,
+): string[] {
+  if (already.length >= count) return already.slice(0, count);
+  const need = count - already.length;
+  const used = new Set(already);
+  const unused = bank.filter((url) => !used.has(url));
+  const previous = already[already.length - 1];
+  if (unused.length >= need) {
+    return [...already, ...pickMeowStills(unused, need, random, previous)];
+  }
+  const head = unused.length > 0 ? pickMeowStills(unused, unused.length, random, previous) : [];
+  const combined: string[] = [];
+  const seen = new Set<string>();
+  for (const url of [...already, ...head, ...bank]) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    combined.push(url);
+  }
+  if (combined.length === 0) return [...already, ...head];
+  const last = head[head.length - 1] ?? previous;
+  const rest = pickMeowStills(combined, need - head.length, random, last);
+  return [...already, ...head, ...rest];
+}
+
+type CataasDraw = { status: "hit"; url: string } | { status: "skip" } | { status: "down" };
+
 async function firstCataasKitten(fetchImpl: typeof fetch, apiUrl: string): Promise<string | undefined> {
   for (let attempt = 0; attempt < API_ATTEMPTS; attempt += 1) {
-    const url = await readCataasKitten(fetchImpl, apiUrl);
-    if (url) return url;
+    const draw = await drawCataas(fetchImpl, apiUrl);
+    if (draw.status === "hit") return draw.url;
   }
   return undefined;
 }
 
-async function readCataasKitten(fetchImpl: typeof fetch, apiUrl: string): Promise<string | undefined> {
+/**
+ * Distinct Cataas stills for a burst. A hard failure (network, HTTP error,
+ * or a non-JSON body) stops further draws so a down API does not time out
+ * once per picture. A gif or a bad tag is skipped and retried.
+ */
+async function cataasPhotos(fetchImpl: typeof fetch, apiUrl: string, count: number): Promise<string[]> {
+  const picked: string[] = [];
+  const seen = new Set<string>();
+  let down = false;
+  for (let slot = 0; slot < count && !down; slot += 1) {
+    let hit: string | undefined;
+    for (let attempt = 0; attempt < API_ATTEMPTS && !down; attempt += 1) {
+      const draw = await drawCataas(fetchImpl, apiUrl);
+      if (draw.status === "down") {
+        down = true;
+        break;
+      }
+      if (draw.status === "skip") continue;
+      if (seen.has(draw.url)) continue;
+      hit = draw.url;
+      break;
+    }
+    if (!hit) continue;
+    seen.add(hit);
+    picked.push(hit);
+  }
+  return picked;
+}
+
+async function drawCataas(fetchImpl: typeof fetch, apiUrl: string): Promise<CataasDraw> {
   let response: Response;
   try {
     response = await fetchImpl(apiUrl, {
@@ -274,26 +444,27 @@ async function readCataasKitten(fetchImpl: typeof fetch, apiUrl: string): Promis
       },
     });
   } catch {
-    return undefined;
+    return { status: "down" };
   }
-  if (!response.ok) return undefined;
+  if (!response.ok) return { status: "down" };
   const mime = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-  if (mime && mime !== "application/json") return undefined;
+  if (mime && mime !== "application/json") return { status: "down" };
   let text: string;
   try {
     text = await response.text();
   } catch {
-    return undefined;
+    return { status: "down" };
   }
-  if (!text || text.length > 20_000) return undefined;
+  if (!text || text.length > 20_000) return { status: "skip" };
   let body: unknown;
   try {
     body = JSON.parse(text) as unknown;
   } catch {
-    return undefined;
+    return { status: "skip" };
   }
   const row = Array.isArray(body) ? body[0] : body;
-  return kittenUrlFromCataas(row);
+  const url = kittenUrlFromCataas(row);
+  return url ? { status: "hit", url } : { status: "skip" };
 }
 
 function kittenUrlFromCataas(body: unknown): string | undefined {
