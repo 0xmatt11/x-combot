@@ -5,7 +5,10 @@ import { fetchAdultImage } from "../src/bot/image-fetch.js";
 import { loadEnv } from "../src/env.js";
 import {
   MILADY_BANK_EMPTY,
+  MILADY_CAPPED,
+  MILADY_MAX,
   MILADY_UNAVAILABLE,
+  MILADY_USAGE,
   MiladyBankError,
   MiladyLookupError,
   canonicalMiladyImageUrl,
@@ -116,6 +119,31 @@ describe("!milady meme bank", () => {
     await expect(lookup.randomImage()).resolves.toEqual({ url: IMAGE });
     await expect(lookup.randomImage()).resolves.toEqual({ url: LAST });
     expect(draws).toBe(2);
+  });
+
+  it("picks distinct stills and avoids back-to-back repeats", async () => {
+    const lookup = createMiladyLookup({
+      urls: [IMAGE, OTHER, LAST],
+      random: () => 0,
+    });
+    const burst = await lookup.randomImages!(3);
+    const urls = burst.map((image) => image.url);
+    expect(urls).toHaveLength(3);
+    expect(new Set(urls).size).toBe(3);
+
+    const wrapped = await createMiladyLookup({
+      urls: [IMAGE, OTHER],
+      random: () => 0,
+    }).randomImages!(5);
+    const repeated = wrapped.map((image) => image.url);
+    expect(repeated).toHaveLength(5);
+    expect(new Set(repeated).size).toBe(2);
+    for (let i = 1; i < repeated.length; i += 1) {
+      expect(repeated[i]).not.toBe(repeated[i - 1]);
+    }
+
+    const only = await createMiladyLookup({ urls: [IMAGE], random: () => 0 }).randomImages!(3);
+    expect(only.map((image) => image.url)).toEqual([IMAGE, IMAGE, IMAGE]);
   });
 
   it("merges extra stills and says the bank is empty when nothing is loaded", async () => {
@@ -242,20 +270,30 @@ describe("!milady engine", () => {
     expect(rig.client.sent).toHaveLength(0);
   });
 
-  it("ignores extra words and does not describe the meme", async () => {
+  it("rejects a non-integer, zero, or negative count with a usage hint", async () => {
     const rig = setup();
-    await rig.engine.processEvent(
-      message({ id: "m2", senderId: alice.id, text: "!milady background red please" }),
-    );
-    expect(rig.lookupCalls).toBe(1);
-    expect(rig.client.images).toHaveLength(1);
-    expect(rig.client.sent).toHaveLength(0);
-    expect(JSON.stringify(rig.client.images)).not.toMatch(/background|please|red/);
+    for (const text of ["!milady background red please", "!milady 0", "!milady -3", "!milady 1.5", "!milady 5 please"]) {
+      await rig.engine.processEvent(message({ id: text, senderId: alice.id, text }));
+    }
+    expect(rig.lookupCalls).toBe(0);
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.images).toHaveLength(0);
+    expect(rig.client.sent.map((row) => row.text)).toEqual([
+      `@alice ${MILADY_USAGE}`,
+      `@alice ${MILADY_USAGE}`,
+      `@alice ${MILADY_USAGE}`,
+      `@alice ${MILADY_USAGE}`,
+      `@alice ${MILADY_USAGE}`,
+    ]);
+    const posted = rig.client.sent.map((row) => row.text).join("\n");
+    expect(posted).not.toMatch(/background|please|red|memedepot/i);
+    expect(MILADY_USAGE).toContain(String(MILADY_MAX));
   });
 
   it("refuses a banned age term and does not read the bank", async () => {
     const rig = setup();
     await rig.engine.processEvent(message({ id: "m3", senderId: alice.id, text: "!milady teen" }));
+    await rig.engine.processEvent(message({ id: "m3b", senderId: alice.id, text: "!milady 5 teen" }));
     expect(rig.lookupCalls).toBe(0);
     expect(rig.imagineCalls).toBe(0);
     expect(rig.client.images).toHaveLength(0);
@@ -264,6 +302,7 @@ describe("!milady engine", () => {
     expect(text).toMatch(/does not search custom text/);
     expect(text).not.toMatch(/teen/);
     expect(text.startsWith("@alice ")).toBe(true);
+    expect(rig.client.sent).toHaveLength(2);
   });
 
   it("replies that the bank is empty and posts no link", async () => {
@@ -352,22 +391,104 @@ describe("!milady engine", () => {
     });
   });
 
+  it("posts a count from a lookup that only implements randomImage", async () => {
+    const rig = setup();
+    await rig.engine.processEvent(message({ id: "fallback", senderId: alice.id, text: "!milady 2" }));
+    expect(rig.lookupCalls).toBe(2);
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.images).toHaveLength(2);
+    expect(rig.client.sent).toHaveLength(0);
+    expect(rig.client.images.every((image) => image.url === IMAGE && image.caption === "@alice")).toBe(true);
+  });
+
+  it("posts that many distinct stills and clamps above the max", async () => {
+    const rig = setup({ useDefaultLookup: true, miladyUrls: [IMAGE, OTHER, LAST] });
+    await rig.engine.processEvent(message({ id: "three", senderId: alice.id, text: "!milady 3" }));
+    expect(rig.imagineCalls).toBe(0);
+    expect(rig.client.sent).toHaveLength(0);
+    expect(rig.client.images).toHaveLength(3);
+    expect(new Set(rig.client.images.map((image) => image.url)).size).toBe(3);
+    expect(rig.client.images.every((image) => image.caption === "@alice" && image.mention === "alice")).toBe(true);
+
+    const capped = setup({ useDefaultLookup: true, miladyUrls: [IMAGE, OTHER] });
+    await capped.engine.processEvent(message({ id: "too-many", senderId: alice.id, text: "!milady 101" }));
+    expect(capped.imagineCalls).toBe(0);
+    expect(capped.client.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_CAPPED}`]);
+    expect(capped.client.images).toHaveLength(MILADY_MAX);
+    const urls = capped.client.images.map((image) => image.url);
+    expect(urls.every((url) => url === IMAGE || url === OTHER)).toBe(true);
+    for (let i = 1; i < urls.length; i += 1) expect(urls[i]).not.toBe(urls[i - 1]);
+    expect(JSON.stringify(capped.client.images)).not.toMatch(/opensea\.io|api\.x\.ai|grok\.com/i);
+  });
+
+  it("skips a failed still in a burst and posts no link", async () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient();
+    const engine = new ModerationEngine(store, client, runtime(), undefined, {
+      milady: {
+        async randomImage() {
+          return { url: IMAGE };
+        },
+        async randomImages(count: number) {
+          return [IMAGE, OTHER, LAST].slice(0, count).map((url) => ({ url }));
+        },
+      },
+      fetchImage: async (url) => {
+        if (url === OTHER) return undefined;
+        return { bytes: Uint8Array.from([1, 2, 3]), mimeType: "image/png" };
+      },
+    });
+    await engine.processEvent(message({ id: "partial", senderId: alice.id, text: "!milady 3" }));
+    expect(client.images.map((image) => image.url)).toEqual([IMAGE, LAST]);
+    expect(client.sent).toHaveLength(0);
+    expect(JSON.stringify(client.images)).not.toContain(OTHER);
+
+    const failedStore = new Store(":memory:");
+    stores.push(failedStore);
+    const failed = new MockXClient();
+    const failedEngine = new ModerationEngine(failedStore, failed, runtime(), undefined, {
+      milady: {
+        async randomImage() {
+          return { url: IMAGE };
+        },
+        async randomImages() {
+          return [{ url: IMAGE }, { url: OTHER }];
+        },
+      },
+      fetchImage: async () => undefined,
+    });
+    await failedEngine.processEvent(message({ id: "none", senderId: alice.id, text: "!milady 2" }));
+    expect(failed.images).toHaveLength(0);
+    expect(failed.sent.map((row) => row.text)).toEqual([`@alice ${MILADY_UNAVAILABLE}`]);
+    expect(failed.sent[0]?.text).not.toMatch(/memedepot|https?:/i);
+  });
+
   it("mentions !milady in the default !help text and the README", () => {
     const help = loadDefaults("config/default.yaml").help;
-    expect(help).toMatch(/!milady/);
-    expect(help).toMatch(/random Milady meme from the memedepot bank/);
+    expect(help).toMatch(/!milady \[n\]/);
+    expect(help).toMatch(/memedepot bank/);
+    expect(help).toMatch(new RegExp(`max ${MILADY_MAX}`));
+    expect(help).toMatch(/Bare !milady posts one/);
     expect(help).toMatch(/Image only/);
     const media = help.split("Games:")[0] ?? "";
     expect(media).toMatch(/!milady/);
     const readme = fs.readFileSync("README.md", "utf8");
     const section = readme.split("## Milady memes")[1]?.split("## Undertow")[0] ?? "";
     expect(section).toMatch(/`!milady`/);
+    expect(section).toMatch(/`!milady 5`/);
+    expect(section).toMatch(/Capped at 100/);
+    expect(section).toMatch(/Usage: !milady \[n\]/);
+    expect(section).toMatch(/distinct stills/);
     expect(section).toMatch(/config\/milady-bank\.txt/);
     expect(section).toMatch(/memedepot\.com\/d\/milady/);
     expect(section).toMatch(/399/);
     expect(section).toMatch(/MILADY_EXTRA_URLS/);
     expect(section).toMatch(/does not post the image URL/i);
     expect(section).not.toMatch(/gql\.opensea\.io|itemsByQuery|OPENSEA_API_KEY/i);
+    const overview = readme.split("## What X will not do")[0] ?? "";
+    expect(overview).toMatch(/`!milady 5`/);
+    expect(overview).toMatch(/max 100/);
   });
 });
 

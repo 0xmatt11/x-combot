@@ -214,16 +214,28 @@ describe("parseCommand", () => {
     expect(parseUnknownBang("!meow please")).toBeUndefined();
   });
 
-  it("parses !milady and keeps extra text off the lookup", () => {
+  it("parses !milady with an optional picture count", () => {
     expect(parseCommand("!milady")).toEqual({ name: "milady" });
     expect(parseCommand("!MILADY")).toEqual({ name: "milady" });
     expect(parseCommand("  /milady  ")).toEqual({ name: "milady" });
+    expect(parseCommand("!milady 1")).toEqual({ name: "milady", count: 1 });
+    expect(parseCommand("/milady 5")).toEqual({ name: "milady", count: 5 });
+    expect(parseCommand("!milady 100")).toEqual({ name: "milady", count: 100 });
+    expect(parseCommand("!milady 101")).toEqual({ name: "milady", count: 100, capped: true });
+    expect(parseCommand("!milady 500")).toEqual({ name: "milady", count: 100, capped: true });
+    expect(parseCommand(`!milady ${"9".repeat(30)}`)).toEqual({ name: "milady", count: 100, capped: true });
+    expect(parseCommand("!milady 0")).toEqual({ name: "milady", extra: "0" });
+    expect(parseCommand("!milady 01")).toEqual({ name: "milady", extra: "01" });
+    expect(parseCommand("!milady -3")).toEqual({ name: "milady", extra: "-3" });
+    expect(parseCommand("!milady 1.5")).toEqual({ name: "milady", extra: "1.5" });
     expect(parseCommand("!milady please")).toEqual({ name: "milady", extra: "please" });
     expect(parseCommand("!milady background red")).toEqual({
       name: "milady",
       extra: "background red",
     });
+    expect(parseCommand("!milady 5 please")).toEqual({ name: "milady", extra: "5 please" });
     expect(parseUnknownBang("!milady")).toBeUndefined();
+    expect(parseUnknownBang("!milady 5")).toBeUndefined();
     expect(parseUnknownBang("!milady please")).toBeUndefined();
   });
 

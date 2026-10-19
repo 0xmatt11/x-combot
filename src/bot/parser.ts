@@ -1,3 +1,5 @@
+import { MILADY_MAX } from "./milady.js";
+
 export type UserRef = {
   raw: string;
   username?: string;
@@ -29,7 +31,7 @@ export type ParsedCommand =
   | { name: "booty"; extra?: string }
   | { name: "cheese"; extra?: string }
   | { name: "meow"; extra?: string }
-  | { name: "milady"; extra?: string }
+  | { name: "milady"; count?: number; capped?: boolean; extra?: string }
   | { name: "undertow"; extra?: string }
   | { name: "fathom"; extra?: string }
   | { name: "imagine"; prompt: string }
@@ -200,14 +202,23 @@ const SNOWFLAKE_RE = /^[0-9]{1,19}$/;
 export const PURGE_MAX = 100;
 
 /** A positive integer with no leading zero. Longer digit strings still cap. */
-const PURGE_COUNT_RE = /^[1-9][0-9]*$/;
+const POSITIVE_COUNT_RE = /^[1-9][0-9]*$/;
 
-function parsePurgeCount(rest: string): { count: number; capped: boolean } | undefined {
-  if (!PURGE_COUNT_RE.test(rest)) return undefined;
+function parseBoundedCount(rest: string, max: number): { count: number; capped: boolean } | undefined {
+  if (!POSITIVE_COUNT_RE.test(rest)) return undefined;
   const value = Number.parseInt(rest.length > 15 ? rest.slice(0, 15) : rest, 10);
   if (!Number.isFinite(value) || value < 1) return undefined;
-  if (value > PURGE_MAX) return { count: PURGE_MAX, capped: true };
+  if (value > max) return { count: max, capped: true };
   return { count: value, capped: false };
+}
+
+function parsePurgeCount(rest: string): { count: number; capped: boolean } | undefined {
+  return parseBoundedCount(rest, PURGE_MAX);
+}
+
+/** `!milady N`. Anything that is not a positive integer stays on `extra` for the usage hint. */
+function parseMiladyCount(rest: string): { count: number; capped: boolean } | undefined {
+  return parseBoundedCount(rest, MILADY_MAX);
 }
 
 interface BangMatch {
@@ -366,8 +377,14 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       return rest ? { name: "cheese", extra: rest } : { name: "cheese" };
     case "meow":
       return rest ? { name: "meow", extra: rest } : { name: "meow" };
-    case "milady":
-      return rest ? { name: "milady", extra: rest } : { name: "milady" };
+    case "milady": {
+      if (!rest) return { name: "milady" };
+      const parsed = parseMiladyCount(rest);
+      if (!parsed) return { name: "milady", extra: rest };
+      return parsed.capped
+        ? { name: "milady", count: parsed.count, capped: true }
+        : { name: "milady", count: parsed.count };
+    }
     case "undertow":
       return rest ? { name: "undertow", extra: rest } : { name: "undertow" };
     case "fathom":
