@@ -60,7 +60,7 @@ import {
   IMAGINE_UNAVAILABLE_MESSAGE,
 } from "../src/bot/imagine.js";
 import { LINKROAST_ON_ACK, LINKROAST_SYSTEM_PROMPT, linkroastFallback } from "../src/bot/linkroast.js";
-import { MILADY_BANK_EMPTY, MILADY_UNAVAILABLE } from "../src/bot/milady.js";
+import { MILADY_BANK_EMPTY, MILADY_CAPPED, MILADY_UNAVAILABLE, MILADY_USAGE } from "../src/bot/milady.js";
 import { ROAST_SYSTEM_PROMPT, TROLL_SYSTEM_PROMPT, momJoke } from "../src/bot/troll.js";
 import { TIMELINE_BAD_HANDLE, TIMELINE_NOT_FOUND, TIMELINE_UNAVAILABLE } from "../src/bot/timeline.js";
 import {
@@ -277,7 +277,9 @@ describe("chat copy", () => {
       VOICE_TOO_LONG_MESSAGE,
       VOICE_UNAVAILABLE_MESSAGE,
       MILADY_BANK_EMPTY,
+      MILADY_CAPPED,
       MILADY_UNAVAILABLE,
+      MILADY_USAGE,
       ADULT_IMAGE_RETRY_MESSAGE,
       ADULT_VISION_UNAVAILABLE_MESSAGE,
       TIMELINE_BAD_HANDLE,

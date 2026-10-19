@@ -54,7 +54,7 @@ help: |
   !ass / !booty — butt photo, same switch (!booties)
   !cheese — a few kitten photos and cheese photos. Extra words are ignored. Does not open grok.com/imagine
   !meow — a random cute kitten photo. Image only
-  !milady — random Milady meme from the memedepot bank. Image only
+  !milady [n] — n Milady memes from the memedepot bank (max 100). Bare !milady posts one. Image only
   !undertow — one random created piece from -undertow-. Image only
   !fathom — one random Fathom Lines. Image only
 

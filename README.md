@@ -13,7 +13,7 @@ Other chat bots can kick and delete anyone's messages when those apps expose tho
 - Admin commands: warn, kick (soft-mute only), mute, delete, purge, notes, per-group settings, admin allowlist. They are listed by `!admin`, not by `!help`. `!auth` and `!status` are owner-only (`BOT_OWNER_ID`). Admins cannot run them. `!auth` unlocks a new encrypted Chat group; until that account sends it, the group stays silent. `!status` is the health snapshot.
 - `!cheese` posts a few kitten photos and a few cheese photos (separate images, not one combined picture). Search is DuckDuckGo, then Bing, then Reddit. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
 - `!meow` posts one random cute kitten photo. Cataas is tried first (a still tagged kitten and cute). If that fails, it uses the Wikimedia bank (`config/kitten-bank.txt`). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
-- `!milady` posts one random Milady meme from the memedepot bank (`config/milady-bank.txt`). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
+- `!milady` posts one random Milady meme from the memedepot bank (`config/milady-bank.txt`). `!milady 5` posts that many (max 100; a higher count is clamped and the bot says so). A bad count gets a short usage hint. The post is the image only. It does not open grok.com/imagine and it does not call api.x.ai.
 - `!undertow` posts one random image from the OpenSea Created tab for `-undertow-`. The lookup is OpenSea (public GraphQL by default, or the REST collections list when `OPENSEA_API_KEY` is set). The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
 - `!fathom` posts one random Fathom Lines NFT image from contract `0xce62f2a3F0aB5B5f0f5c71313CDE70d96E14DE23`. The lookup is OpenSea (public GraphQL by default, or the REST NFT endpoint when `OPENSEA_API_KEY` is set). The art is SVG and is rasterized to PNG before upload. The post is the image only. Extra words are ignored. It does not open grok.com/imagine and it does not call api.x.ai.
 - `!darwin`, `!lastwords`, `!obituary`, and `!finalboss` each post one canned cartoon line. Fiction only: Looney-Tunes physics, a fake last line, a roast obituary, or a video-game boss vignette. They do not describe real-world methods, do not call the LLM, and do not cost XP.
@@ -314,7 +314,7 @@ If X Chat rate-limits `!ask`, `@bot`, `!summarize`, or `!analyze`, the bot says 
 | `!ass` / `!booty` | Butt photo, same switch (`!booties`) |
 | `!cheese` | A few kitten photos and cheese photos. Extra words are ignored. See [Kitten and cheese photos](#kitten-and-cheese-photos) |
 | `!meow` | One random cute kitten photo. See [Meow](#meow) |
-| `!milady` | One random Milady meme from the memedepot bank. See [Milady memes](#milady-memes) |
+| `!milady [n]` | n Milady memes from the memedepot bank (max 100). Bare `!milady` posts one. See [Milady memes](#milady-memes) |
 | `!undertow` | One random image from the OpenSea Created tab for `-undertow-`. See [Undertow](#undertow) |
 | `!fathom` | One random Fathom Lines image. See [Fathom Lines](#fathom-lines) |
 
@@ -504,11 +504,13 @@ If Cataas is down, or neither draw is a cute kitten still, the bot picks from `c
 
 ## Milady memes
 
-`!milady` posts one random still from the Milady meme bank as an image attachment. The bank is `config/milady-bank.txt`, scraped from https://memedepot.com/d/milady on 2026-10-07. It has 399 IMAGE and COPYPASTA stills. Videos were omitted because their `/public` URLs 404. Extra words are ignored and are not a search. Text that includes a banned age term is refused and does not pick from the bank. The reply tags the person who sent the command (`@handle` when that account has one) and, in encrypted Chat, is a reply to that command message. That label is the only text. There is no page link.
+`!milady` posts one random still from the Milady meme bank as an image attachment. `!milady 5` posts that many stills, each as its own image. The count is one positive integer with no leading zero. The maximum is 100. A larger number is clamped to 100, and the bot replies `Capped at 100.` before the pictures. Zero, a negative number, a fraction, or any other text gets `Usage: !milady [n]. n is how many pictures, from 1 to 100.` and posts nothing. Text that includes a banned age term is refused and does not pick from the bank.
+
+The bank is `config/milady-bank.txt`, scraped from https://memedepot.com/d/milady on 2026-10-07. It has 399 IMAGE and COPYPASTA stills. Videos were omitted because their `/public` URLs 404. A burst uses distinct stills while the bank has enough left. If the count is larger than the bank, later pictures may repeat, but not back-to-back when more than one still is loaded. The reply tags the person who sent the command (`@handle` when that account has one) and, in encrypted Chat, is a reply to that command message. That label is the only text on each picture. There is no page link.
 
 The process reads that file at startup. Optional `MILADY_EXTRA_URLS` adds more `https://memedepot.com/cdn-cgi/imagedelivery/.../public` URLs (commas, spaces, or newlines). x.ai and grok.com are not image hosts for this command. This is not a random OpenSea NFT.
 
-The bytes are uploaded as the only attachment. If the bank is empty, or the download or upload fails, the bot says so in a short reply to the requester. It does not post the image URL.
+Each still is uploaded as its own attachment. If the bank is empty, the bot says so and posts no pictures. A still that will not download or upload is skipped. If every still in the burst fails, the bot says so in a short reply to the requester. It does not post the image URL.
 
 `!milady` does not open https://grok.com/imagine, does not `POST` `https://api.x.ai/v1/images/generations`, and does not use `XAI_API_KEY`. It does not call OpenSea. It stays available when `!boobs` is off.
 

@@ -99,7 +99,9 @@ import { createCheeseImageSearch, type CheeseImageSearch } from "./cheese-search
 import {
   createMiladyLookup,
   isSafeMiladyImageUrl,
+  MILADY_CAPPED,
   MILADY_UNAVAILABLE,
+  MILADY_USAGE,
   MiladyLookupError,
   type MiladyImage,
   type MiladyLookup,
@@ -352,9 +354,10 @@ export interface EngineDeps {
    */
   cheeseSearch?: CheeseImageSearch;
   /**
-   * Memedepot still bank for `!milady`. Absent means the engine builds the
-   * default client on first use from `miladyUrls`, or from `config/milady-bank.txt`
-   * when that list was not passed. This command does not call OpenSea, Imagine, or api.x.ai.
+   * Memedepot still bank for `!milady` and `!milady N`. Absent means the engine
+   * builds the default client on first use from `miladyUrls`, or from
+   * `config/milady-bank.txt` when that list was not passed. This command does
+   * not call OpenSea, Imagine, or api.x.ai.
    */
   milady?: MiladyLookup;
   /**
@@ -3044,7 +3047,7 @@ export class ModerationEngine {
         await this.handleCheese(event, command.extra, actions);
         return;
       case "milady":
-        await this.handleMilady(event, command.extra, actions);
+        await this.handleMilady(event, command, actions);
         return;
       case "meow":
         await this.handleMeow(event, command.extra, actions);
@@ -3776,26 +3779,33 @@ export class ModerationEngine {
   }
 
   /**
-   * `!milady` posts one still from the memedepot meme bank. Extra words are
-   * ignored except a banned age term, which is refused. This does not call
-   * OpenSea, Imagine, or api.x.ai, and a failure does not post a link.
+   * `!milady` posts one still from the memedepot meme bank. `!milady N` posts
+   * that many. N above 100 is clamped and the chat gets a one-line note.
+   * A non-integer, zero, or negative count gets a usage hint. A banned age
+   * term is refused. This does not call OpenSea, Imagine, or api.x.ai, and a
+   * failure does not post a link.
    */
   private async handleMilady(
     event: DmEvent,
-    extra: string | undefined,
+    command: Extract<ParsedCommand, { name: "milady" }>,
     actions: EngineActions,
   ): Promise<void> {
     const conversationId = event.conversationId;
-    if (extra && containsBannedAgeTerm(extra)) {
+    if (command.extra && containsBannedAgeTerm(command.extra)) {
       log.warn(`Refused !milady with unsafe extra text conversation=${conversationId}`);
       await this.reply(conversationId, "Refused. !milady does not search custom text.", actions);
       return;
     }
+    if (command.extra) {
+      await this.reply(conversationId, MILADY_USAGE, actions);
+      return;
+    }
 
+    const count = command.count ?? 1;
     const lookup = this.miladyClient();
-    let image: MiladyImage;
+    let images: MiladyImage[];
     try {
-      image = await lookup.randomImage();
+      images = await this.loadMiladyImages(lookup, count);
     } catch (error) {
       const userMessage = error instanceof MiladyLookupError ? error.userMessage : MILADY_UNAVAILABLE;
       const detail = redactSecrets(error instanceof Error ? error.message : "lookup failed");
@@ -3804,14 +3814,39 @@ export class ModerationEngine {
       return;
     }
 
+    if (command.capped) {
+      await this.reply(conversationId, MILADY_CAPPED, actions);
+    }
+
+    const caption = await this.commandCaption(event);
+    let posted = 0;
+    for (const image of images) {
+      if (await this.postMiladyStill(conversationId, image, caption)) posted += 1;
+    }
+    if (posted === 0) {
+      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
+    }
+  }
+
+  private async loadMiladyImages(lookup: MiladyLookup, count: number): Promise<MiladyImage[]> {
+    if (lookup.randomImages) return lookup.randomImages(count);
+    const images: MiladyImage[] = [];
+    for (let i = 0; i < count; i += 1) images.push(await lookup.randomImage());
+    return images;
+  }
+
+  /** One still. Returns false when the URL, download, or upload fails. Does not post a link. */
+  private async postMiladyStill(
+    conversationId: string,
+    image: MiladyImage,
+    caption?: MediaCaption,
+  ): Promise<boolean> {
     if (!isSafeMiladyImageUrl(image.url)) {
       log.warn(`!milady skipped an unsafe image url conversation=${conversationId}`);
-      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
-      return;
+      return false;
     }
 
     const host = imageHost(image.url);
-    const caption = await this.commandCaption(event);
     let fetched: AdultVisionImage | undefined;
     if (this.deps.fetchImage) {
       try {
@@ -3822,8 +3857,7 @@ export class ModerationEngine {
     }
     if (!fetched || fetched.bytes.byteLength === 0) {
       log.warn(`!milady image download failed conversation=${conversationId} host=${host}`);
-      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
-      return;
+      return false;
     }
     try {
       await this.client.sendImage(conversationId, {
@@ -3833,10 +3867,11 @@ export class ModerationEngine {
         ...(caption ? { caption } : {}),
       });
       log.info(`!milady posted native image conversation=${conversationId} host=${host}`);
+      return true;
     } catch (error) {
       const detail = redactSecrets(error instanceof Error ? error.message : String(error));
       log.warn(`!milady native attach failed conversation=${conversationId} host=${host} (${detail})`);
-      await this.reply(conversationId, MILADY_UNAVAILABLE, actions);
+      return false;
     }
   }
 
