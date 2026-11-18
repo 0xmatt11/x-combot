@@ -311,6 +311,7 @@ describe("Chat ids and wire shapes", () => {
     );
     expect(message?.sequenceId).toBe("4242");
     expect(message?.rawSequenceId).toBe("4242");
+    expect(message?.aliasIds).toContain("payload-seq");
   });
 
   it("maps decrypted text and member adds onto the DM event shape", () => {

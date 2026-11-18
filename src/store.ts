@@ -308,11 +308,19 @@ export class Store {
     this.db.exec("DROP TABLE IF EXISTS noor_alerts");
   }
 
-  /** `raw_sequence_id` on databases created before the envelope id was stored. */
+  /**
+   * `raw_sequence_id` on databases created before the envelope id was stored.
+   * The index is created after the column exists. Putting it in the startup
+   * schema would fail on an older table that does not have the column yet.
+   */
   private ensureChatIndexColumns(): void {
     const cols = this.db.prepare("PRAGMA table_info(chat_message_index)").all() as { name: string }[];
-    if (cols.length === 0 || cols.some((col) => col.name === "raw_sequence_id")) return;
-    this.db.exec("ALTER TABLE chat_message_index ADD COLUMN raw_sequence_id TEXT");
+    if (cols.length > 0 && !cols.some((col) => col.name === "raw_sequence_id")) {
+      this.db.exec("ALTER TABLE chat_message_index ADD COLUMN raw_sequence_id TEXT");
+    }
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_chat_raw_sequence ON chat_message_index (raw_sequence_id)",
+    );
   }
 
   /**
