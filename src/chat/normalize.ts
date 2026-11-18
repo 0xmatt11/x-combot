@@ -36,10 +36,14 @@ export function chatEventToDm(
     (typeof decrypted.createdAtMsec === "number"
       ? new Date(decrypted.createdAtMsec).toISOString()
       : undefined);
-  const sequenceId = nonempty(decrypted.sequenceId) ?? nonempty(raw.sequence_id);
+  // The events-list envelope sequence is the id delete-for-all accepts.
+  // The decrypted payload sequence can be a different string for the same message.
+  const envelopeSequenceId = nonempty(raw.sequence_id);
+  const sequenceId = envelopeSequenceId ?? nonempty(decrypted.sequenceId);
+  const rawFields = envelopeSequenceId ? { rawSequenceId: envelopeSequenceId } : {};
   const senderId = raw.sender_id || nonempty(decrypted.senderId);
 
-  const aliases = replayAliases(raw, decrypted, id);
+  const aliases = replayAliases(raw, decrypted, id, nonempty(decrypted.sequenceId));
 
   if (decrypted.type === "message") {
     const reaction = readReaction(decrypted);
@@ -56,6 +60,7 @@ export function chatEventToDm(
         text: reaction.emoji,
         mentions: [],
         sequenceId,
+        ...rawFields,
         reactionTargetSequenceId: reaction.targetId,
         ...aliases,
       };
@@ -73,6 +78,7 @@ export function chatEventToDm(
         text: edit.text,
         mentions: mentionsIn(edit.text),
         sequenceId,
+        ...rawFields,
         ...(edit.targetSequenceId ? { targetSequenceId: edit.targetSequenceId } : {}),
         ...(edit.targetEventId ? { targetEventId: edit.targetEventId } : {}),
         ...aliases,
@@ -90,6 +96,7 @@ export function chatEventToDm(
         participants: [],
         mentions: [],
         sequenceId,
+        ...rawFields,
         ...(deleted.targetSequenceId ? { targetSequenceId: deleted.targetSequenceId } : {}),
         ...(deleted.targetEventId ? { targetEventId: deleted.targetEventId } : {}),
         ...(deleted.targetSequenceIds.length > 0 ? { targetSequenceIds: deleted.targetSequenceIds } : {}),
@@ -117,6 +124,7 @@ export function chatEventToDm(
       text: body,
       mentions: mentionsIn(body),
       sequenceId,
+      ...rawFields,
       ...(media ? { media } : {}),
       ...(linkSignals ? { linkSignals } : {}),
       ...(raw.encoded_event ? { encodedEvent: raw.encoded_event } : {}),
@@ -140,6 +148,7 @@ export function chatEventToDm(
         participants: memberIds.map((userId) => ({ id: userId })),
         mentions: [],
         sequenceId,
+        ...rawFields,
         membershipKind: changeType === "created" ? "join" : "add",
         ...aliases,
       };
@@ -158,6 +167,7 @@ export function chatEventToDm(
         participants: memberIds.map((userId) => ({ id: userId })),
         mentions: [],
         sequenceId,
+        ...rawFields,
         membershipKind: "leave",
         ...aliases,
       };
@@ -179,6 +189,7 @@ export function chatEventToDm(
         text: edit.text,
         mentions: mentionsIn(edit.text),
         sequenceId,
+        ...rawFields,
         ...(edit.targetSequenceId ? { targetSequenceId: edit.targetSequenceId } : {}),
         ...(edit.targetEventId ? { targetEventId: edit.targetEventId } : {}),
         ...aliases,
@@ -198,6 +209,7 @@ export function chatEventToDm(
         participants: [],
         mentions: [],
         sequenceId,
+        ...rawFields,
         ...(topDelete.targetSequenceId ? { targetSequenceId: topDelete.targetSequenceId } : {}),
         ...(topDelete.targetEventId ? { targetEventId: topDelete.targetEventId } : {}),
         ...(topDelete.targetSequenceIds.length > 0
@@ -368,10 +380,25 @@ function replayAliases(
   raw: RawChatEvent,
   decrypted: DecryptedEvent,
   id: string,
+  payloadSequenceId?: string,
 ): { aliasIds: string[] } | undefined {
   const aliasIds: string[] = [];
   const decryptedId = nonempty(decrypted.id);
   if (decryptedId && decryptedId !== id) aliasIds.push(decryptedId);
+  // Delete uses the envelope sequence. Edits and remote deletes can still name
+  // the decrypted sequence, so that id stays an alias when the two differ.
+  // When there is no envelope id, the decrypted sequence is already `sequenceId`.
+  const envelopeSequenceId = nonempty(raw.sequence_id);
+  const payloadSequence = nonempty(payloadSequenceId);
+  if (
+    envelopeSequenceId &&
+    payloadSequence &&
+    payloadSequence !== envelopeSequenceId &&
+    payloadSequence !== id &&
+    !aliasIds.includes(payloadSequence)
+  ) {
+    aliasIds.push(payloadSequence);
+  }
   const cipher = cipherReplayKey(raw.encoded_event);
   if (cipher) aliasIds.push(cipher);
   if (aliasIds.length === 0) return undefined;

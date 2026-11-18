@@ -60,7 +60,11 @@ export interface ChatHistoryMessageRow {
   deleted_in_x_at: string | null;
   deleted_by: string | null;
   edited: number;
+  raw_sequence_id: string | null;
 }
+
+/** Who stamped `deleted_in_x_at`. The row stays; this is not a SQL delete. */
+export type HistoryDeleteMarker = "purge" | "x" | "mute" | "cleanup";
 
 export interface ChatHistoryMembershipRow {
   id: number;
@@ -126,7 +130,8 @@ export function ensureChatHistorySchema(db: Database.Database): { fts: boolean }
       media TEXT,
       deleted_in_x_at TEXT,
       deleted_by TEXT,
-      edited INTEGER NOT NULL DEFAULT 0
+      edited INTEGER NOT NULL DEFAULT 0,
+      raw_sequence_id TEXT
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_history_message
@@ -190,9 +195,16 @@ export function ensureChatHistorySchema(db: Database.Database): { fts: boolean }
       updated_at TEXT NOT NULL
     );
   `);
+  ensureColumn(db, "chat_history_messages", "raw_sequence_id", "TEXT");
   const fts = ensureFts(db);
   schemaReady.add(db);
   return { fts };
+}
+
+function ensureColumn(db: Database.Database, table: string, column: string, type: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.length === 0 || cols.some((col) => col.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 function ensureFts(db: Database.Database): boolean {
@@ -221,6 +233,7 @@ export function createChatHistory(
  * Decrypted group history in the bot's SQLite file.
  * Append-only aside from edits (text replacement plus `original_text`) and
  * delete stamps (`deleted_in_x_at`). Message text is never logged.
+ * Deleting a message on X stamps the row. It does not remove it.
  */
 export class ChatHistory {
   readonly enabled: boolean;
@@ -312,13 +325,33 @@ export class ChatHistory {
   }
 
   /**
-   * Stamp rows X actually deleted. Text stays. `deleted_by` is `purge` or `x`.
+   * Sequence ids currently stored for one message, including a later
+   * events-list envelope id that replaced the first decrypted sequence.
+   */
+  lookupSequence(
+    conversationId: string,
+    eventId: string,
+  ): { messageId: string; sequenceId?: string; rawSequenceId?: string } | undefined {
+    if (!this.enabled || !conversationId || !eventId) return undefined;
+    const row = this.findRow(conversationId, [eventId]);
+    if (!row) return undefined;
+    return {
+      messageId: row.message_id,
+      ...(row.sequence_id ? { sequenceId: row.sequence_id } : {}),
+      ...(row.raw_sequence_id ? { rawSequenceId: row.raw_sequence_id } : {}),
+    };
+  }
+
+  /**
+   * Stamp rows X actually deleted. Text stays. The row stays.
+   * `deleted_by` is `purge`, `mute`, `cleanup`, or `x` (a delete X delivered).
    * A later copy of the same message keeps the stamp via the tombstone table.
+   * This never runs `DELETE` on `chat_history_messages`.
    */
   markDeleted(
     conversationId: string,
     keys: readonly string[],
-    deletedBy: "purge" | "x",
+    deletedBy: HistoryDeleteMarker,
     deletedAt: string,
   ): number {
     if (!this.enabled || !conversationId) return 0;
@@ -501,6 +534,10 @@ export class ChatHistory {
     return chatHistoryHasRetentionLimit(this.maxMessages, this.maxDays);
   }
 
+  /**
+   * Retention caps only (`CHAT_HISTORY_MAX_MESSAGES` / `CHAT_HISTORY_MAX_DAYS`).
+   * Mute-delete, command cleanup, and `!purge` must not call this.
+   */
   prune(nowMs = Date.now()): { messages: number; membership: number } {
     if (!this.enabled || !this.hasRetentionLimit()) return { messages: 0, membership: 0 };
     const cutoff = this.maxDays > 0 ? nowMs - this.maxDays * DAY_MS : nowMs;
@@ -588,6 +625,7 @@ export class ChatHistory {
     const conversationId = event.conversationId;
     const messageId = event.id;
     const sequenceId = nonempty(event.sequenceId);
+    const rawSequenceId = nonempty(event.rawSequenceId);
     const keys = aliasKeys(event);
     const existing = this.findRow(conversationId, keys);
     const text = event.text ?? "";
@@ -601,6 +639,7 @@ export class ChatHistory {
         conversationId,
         keys,
         sequenceId,
+        rawSequenceId,
         senderId: event.senderId,
         label,
         text,
@@ -616,8 +655,8 @@ export class ChatHistory {
         .prepare(
           `INSERT INTO chat_history_messages (
              conversation_id, message_id, sequence_id, sender_id, sender_label,
-             ts, ts_ms, text, reply_to_id, media, edited
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+             ts, ts_ms, text, reply_to_id, media, edited, raw_sequence_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
         )
         .run(
           conversationId,
@@ -630,6 +669,7 @@ export class ChatHistory {
           text,
           replyTo,
           media,
+          rawSequenceId ?? null,
         );
       const rowId = Number(info.lastInsertRowid);
       this.rememberAliases(conversationId, rowId, keys);
@@ -646,6 +686,7 @@ export class ChatHistory {
       conversationId: string;
       keys: string[];
       sequenceId?: string;
+      rawSequenceId?: string;
       senderId?: string;
       label: string;
       text: string;
@@ -656,11 +697,20 @@ export class ChatHistory {
     },
   ): void {
     this.rememberAliases(incoming.conversationId, existing.id, incoming.keys);
-    const sequenceId =
+    let sequenceId =
       existing.sequence_id ||
       (incoming.sequenceId && !this.sequenceTaken(incoming.conversationId, incoming.sequenceId, existing.id)
         ? incoming.sequenceId
         : existing.sequence_id);
+    // A later events-list copy carries the envelope sequence. That id is what
+    // delete-for-all accepts, so it replaces a sequence learned from decrypt.
+    if (
+      incoming.rawSequenceId &&
+      incoming.rawSequenceId !== sequenceId &&
+      !this.sequenceTaken(incoming.conversationId, incoming.rawSequenceId, existing.id)
+    ) {
+      sequenceId = incoming.rawSequenceId;
+    }
     let text = existing.text;
     let original = existing.original_text;
     if (existing.edited && !original && incoming.text && incoming.text !== existing.text) {
@@ -674,6 +724,7 @@ export class ChatHistory {
       .prepare(
         `UPDATE chat_history_messages
          SET sequence_id = COALESCE(?, sequence_id),
+             raw_sequence_id = COALESCE(?, raw_sequence_id),
              sender_id = COALESCE(sender_id, ?),
              sender_label = ?,
              ts = COALESCE(ts, ?),
@@ -686,6 +737,7 @@ export class ChatHistory {
       )
       .run(
         sequenceId ?? null,
+        incoming.rawSequenceId ?? null,
         incoming.senderId ?? null,
         label,
         incoming.ts,

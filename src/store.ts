@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS chat_message_index (
   event_id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
   sequence_id TEXT,
-  created_at TEXT
+  created_at TEXT,
+  raw_sequence_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_sequence
@@ -185,6 +186,20 @@ CREATE TABLE IF NOT EXISTS chat_authorizations (
   conversation_id TEXT PRIMARY KEY,
   authorized_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS moderation_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  target_id TEXT,
+  action TEXT NOT NULL,
+  detail TEXT,
+  ok INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_moderation_audit_convo
+  ON moderation_audit (conversation_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS feature_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +289,7 @@ export class Store {
     this.db.exec(SCHEMA);
     this.dropRemovedAlertTable();
     this.migrateTrollTargets();
+    this.ensureChatIndexColumns();
     this.grandfatherChatAuthorizations();
     ensureChatHistorySchema(this.db);
     this.restrictFilePermissions();
@@ -290,6 +306,21 @@ export class Store {
    */
   private dropRemovedAlertTable(): void {
     this.db.exec("DROP TABLE IF EXISTS noor_alerts");
+  }
+
+  /**
+   * `raw_sequence_id` on databases created before the envelope id was stored.
+   * The index is created after the column exists. Putting it in the startup
+   * schema would fail on an older table that does not have the column yet.
+   */
+  private ensureChatIndexColumns(): void {
+    const cols = this.db.prepare("PRAGMA table_info(chat_message_index)").all() as { name: string }[];
+    if (cols.length > 0 && !cols.some((col) => col.name === "raw_sequence_id")) {
+      this.db.exec("ALTER TABLE chat_message_index ADD COLUMN raw_sequence_id TEXT");
+    }
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_chat_raw_sequence ON chat_message_index (raw_sequence_id)",
+    );
   }
 
   /**
@@ -679,38 +710,124 @@ export class Store {
     conversationId: string,
     sequenceId: string | undefined,
     createdAt?: string,
+    rawSequenceId?: string,
   ): void {
     this.db
       .prepare(
-        `INSERT INTO chat_message_index (event_id, conversation_id, sequence_id, created_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO chat_message_index (
+           event_id, conversation_id, sequence_id, created_at, raw_sequence_id
+         )
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(event_id) DO UPDATE SET
            conversation_id = excluded.conversation_id,
            sequence_id = COALESCE(excluded.sequence_id, chat_message_index.sequence_id),
-           created_at = COALESCE(excluded.created_at, chat_message_index.created_at)`,
+           created_at = COALESCE(excluded.created_at, chat_message_index.created_at),
+           raw_sequence_id = COALESCE(excluded.raw_sequence_id, chat_message_index.raw_sequence_id)`,
       )
-      .run(eventId, conversationId, sequenceId ?? null, createdAt ?? null);
+      .run(
+        eventId,
+        conversationId,
+        sequenceId ?? null,
+        createdAt ?? null,
+        rawSequenceId ?? null,
+      );
   }
 
   lookupChatMessage(
     id: string,
-  ): { eventId: string; conversationId: string; sequenceId?: string } | undefined {
+  ): { eventId: string; conversationId: string; sequenceId?: string; rawSequenceId?: string } | undefined {
     const row = this.db
       .prepare(
-        `SELECT event_id, conversation_id, sequence_id
+        `SELECT event_id, conversation_id, sequence_id, raw_sequence_id
          FROM chat_message_index
-         WHERE event_id = ? OR sequence_id = ?
+         WHERE event_id = ? OR sequence_id = ? OR raw_sequence_id = ?
          LIMIT 1`,
       )
-      .get(id, id) as
-      | { event_id: string; conversation_id: string; sequence_id: string | null }
+      .get(id, id, id) as
+      | {
+          event_id: string;
+          conversation_id: string;
+          sequence_id: string | null;
+          raw_sequence_id: string | null;
+        }
       | undefined;
     if (!row) return undefined;
     return {
       eventId: row.event_id,
       conversationId: row.conversation_id,
       sequenceId: row.sequence_id ?? undefined,
+      rawSequenceId: row.raw_sequence_id ?? undefined,
     };
+  }
+
+  recordAudit(entry: {
+    createdAt: string;
+    conversationId: string;
+    actorId: string;
+    targetId?: string;
+    action: string;
+    detail?: string;
+    ok: boolean;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO moderation_audit (
+           created_at, conversation_id, actor_id, target_id, action, detail, ok
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        entry.createdAt,
+        entry.conversationId,
+        entry.actorId,
+        entry.targetId ?? null,
+        entry.action,
+        entry.detail ?? null,
+        entry.ok ? 1 : 0,
+      );
+  }
+
+  listAudit(
+    conversationId: string,
+    limit: number,
+  ): {
+    id: number;
+    createdAt: string;
+    conversationId: string;
+    actorId: string;
+    targetId?: string;
+    action: string;
+    detail?: string;
+    ok: boolean;
+  }[] {
+    const cap = Number.isInteger(limit) && limit > 0 ? limit : 10;
+    const rows = this.db
+      .prepare(
+        `SELECT id, created_at, conversation_id, actor_id, target_id, action, detail, ok
+         FROM moderation_audit
+         WHERE conversation_id = ?
+         ORDER BY id DESC
+         LIMIT ?`,
+      )
+      .all(conversationId, cap) as {
+      id: number;
+      created_at: string;
+      conversation_id: string;
+      actor_id: string;
+      target_id: string | null;
+      action: string;
+      detail: string | null;
+      ok: number;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      createdAt: row.created_at,
+      conversationId: row.conversation_id,
+      actorId: row.actor_id,
+      targetId: row.target_id ?? undefined,
+      action: row.action,
+      detail: row.detail ?? undefined,
+      ok: row.ok !== 0,
+    }));
   }
 
   recordLlmUse(

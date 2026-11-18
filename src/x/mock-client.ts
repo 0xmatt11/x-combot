@@ -74,6 +74,8 @@ export class MockXClient implements XClient {
   }[] = [];
   readonly direct: { participantId: string; text: string }[] = [];
   readonly deleted: string[] = [];
+  /** Sequence ids passed into delete, including a raw-envelope retry. */
+  readonly deleteHints: { eventId: string; sequenceId?: string; rawSequenceId?: string }[] = [];
   readonly events: DmEvent[] = [];
   readonly conversationListCalls: { conversationId: string; maxResults?: number }[] = [];
   readonly users = new Map<string, XUser>();
@@ -313,6 +315,11 @@ export class MockXClient implements XClient {
       eventId.startsWith("aud-");
     // Encrypted Chat delete is by sequence id, including another member's command
     // when this account can delete_for_all. Classic deletes do not pass one.
+    this.deleteHints.push({
+      eventId,
+      ...(hint?.sequenceId ? { sequenceId: hint.sequenceId } : {}),
+      ...(hint?.rawSequenceId ? { rawSequenceId: hint.rawSequenceId } : {}),
+    });
     const chatSequence = Boolean(hint?.sequenceId);
     if (!this.allowDeleteOthers && !own && !chatSequence) {
       return {

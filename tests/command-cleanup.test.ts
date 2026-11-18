@@ -312,5 +312,51 @@ describe("command cleanup", () => {
     expect(readme).toMatch(/does not delete or hide that reply/);
     expect(readme).toMatch(/quote strip on the reply can show the command as deleted/);
     expect(COMMAND_CLEANUP_MS).toBe(15 * 60 * 1000);
+    expect(loaded.help).toMatch(/muted member's new command is deleted right away/);
+    expect(readme).toMatch(/deleted_by='mute'/);
+    expect(readme).toMatch(/deleted_by='cleanup'/);
+    expect(readme).toMatch(/!audit/);
+    expect(loaded.admin_help).toMatch(/!audit \[n\]/);
+  });
+
+  it("deletes with the sequence id stored at fire time, not the one saved at schedule time", async () => {
+    vi.useFakeTimers();
+    const { engine, client, store } = setup();
+    store.authorizeChat(chatId);
+    await engine.processEvent(
+      message({
+        id: "cmd-rules",
+        conversationId: chatId,
+        text: "!rules",
+        sequenceId: "41",
+        aliasIds: ["shared-msg"],
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "events-list-rules",
+        conversationId: chatId,
+        text: "!rules",
+        sequenceId: "99",
+        rawSequenceId: "99",
+        aliasIds: ["shared-msg"],
+      }),
+    );
+    await age(COMMAND_CLEANUP_MS);
+    expect(client.deleted).toContain("cmd-rules");
+    expect(client.deleteHints.find((row) => row.eventId === "cmd-rules")?.sequenceId).toBe("99");
+    const rows = store.db
+      .prepare(
+        "SELECT text, deleted_by, deleted_in_x_at FROM chat_history_messages WHERE message_id = ?",
+      )
+      .all("cmd-rules") as { text: string; deleted_by: string | null; deleted_in_x_at: string | null }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.text).toBe("!rules");
+    expect(rows[0]?.deleted_by).toBe("cleanup");
+    expect(rows[0]?.deleted_in_x_at).toBeTruthy();
+    const indexed = store.db
+      .prepare("SELECT COUNT(*) AS n FROM chat_message_index WHERE event_id = ?")
+      .get("cmd-rules") as { n: number };
+    expect(indexed.n).toBe(1);
   });
 });

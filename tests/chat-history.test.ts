@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createChatHistory,
@@ -127,6 +128,144 @@ describe("chat history store", () => {
     expect(rows[0]?.sequence_id).toBe("seq-9");
     expect(rows[0]?.sender_label).toBe("@alice");
     expect(rows[0]?.media).toBeNull();
+  });
+
+  it("replaces a decrypted sequence with a later events-list sequence and keeps the row", () => {
+    const log = history(memoryStore());
+    log.observe(
+      message({
+        id: "activity-1",
+        sequenceId: "payload-seq",
+        text: "keep this body",
+        aliasIds: ["shared-msg"],
+      }),
+    );
+    log.observe(
+      message({
+        id: "events-list-1",
+        sequenceId: "4242",
+        rawSequenceId: "4242",
+        text: "keep this body",
+        aliasIds: ["shared-msg"],
+      }),
+    );
+    const rows = log.listMessages(GROUP);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.text).toBe("keep this body");
+    expect(rows[0]?.sequence_id).toBe("4242");
+    expect(rows[0]?.raw_sequence_id).toBe("4242");
+    expect(rows[0]?.message_id).toBe("activity-1");
+    log.observe({
+      id: "edit-1",
+      eventType: "MessageEdit",
+      conversationId: GROUP,
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      sequenceId: "edit-seq",
+      targetSequenceId: "payload-seq",
+      text: "edited body",
+    });
+    log.observe({
+      id: "del-1",
+      eventType: "MessageDelete",
+      conversationId: GROUP,
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      sequenceId: "del-seq",
+      targetSequenceId: "payload-seq",
+      createdAt: "2026-10-08T12:05:00.000Z",
+    });
+    const after = log.listMessages(GROUP);
+    expect(after).toHaveLength(1);
+    expect(after[0]?.text).toBe("edited body");
+    expect(after[0]?.edited).toBe(1);
+    expect(after[0]?.deleted_by).toBe("x");
+    expect(after[0]?.deleted_in_x_at).toBeTruthy();
+  });
+
+  it("finds an edit or remote delete that names the decrypted sequence", () => {
+    const log = history(memoryStore());
+    const event = chatEventToDm(
+      GROUP,
+      {
+        id: "evt-env",
+        sender_id: alice.id,
+        sequence_id: "4242",
+        created_at: "2026-10-08T12:00:00.000Z",
+      },
+      {
+        type: "message",
+        sequenceId: "payload-seq",
+        senderId: alice.id,
+        content: { contentType: "text", text: "hello from alice" },
+      },
+    );
+    expect(event?.sequenceId).toBe("4242");
+    expect(event?.aliasIds).toContain("payload-seq");
+    log.observe(event!, "@alice");
+    log.observe({
+      id: "edit-env",
+      eventType: "MessageEdit",
+      conversationId: GROUP,
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      targetSequenceId: "payload-seq",
+      text: "edited from the payload id",
+    });
+    log.observe({
+      id: "del-env",
+      eventType: "MessageDelete",
+      conversationId: GROUP,
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      targetSequenceId: "payload-seq",
+      createdAt: "2026-10-08T12:05:00.000Z",
+    });
+    const rows = log.listMessages(GROUP);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.text).toBe("edited from the payload id");
+    expect(rows[0]?.sequence_id).toBe("4242");
+    expect(rows[0]?.deleted_by).toBe("x");
+  });
+
+  it("indexes raw sequence lookups, including a database created before that column", () => {
+    const fresh = memoryStore();
+    fresh.rememberChatMessage("evt-1", GROUP, "stored-seq", undefined, "raw-seq");
+    expect(fresh.lookupChatMessage("raw-seq")?.eventId).toBe("evt-1");
+    const plan = fresh.db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT event_id FROM chat_message_index
+         WHERE event_id = ? OR sequence_id = ? OR raw_sequence_id = ?`,
+      )
+      .all("evt-1", "evt-1", "evt-1") as { detail: string }[];
+    const details = plan.map((row) => row.detail).join("\n");
+    expect(details).toMatch(/idx_chat_raw_sequence/);
+    expect(details).not.toMatch(/SCAN chat_message_index/);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-index-"));
+    dirs.push(dir);
+    const file = path.join(dir, "old.sqlite");
+    const raw = new Database(file);
+    raw.exec(`
+      CREATE TABLE chat_message_index (
+        event_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        sequence_id TEXT,
+        created_at TEXT
+      );
+    `);
+    raw.close();
+    const upgraded = new Store(file);
+    stores.push(upgraded);
+    const columns = upgraded.db.prepare("PRAGMA table_info(chat_message_index)").all() as { name: string }[];
+    expect(columns.some((column) => column.name === "raw_sequence_id")).toBe(true);
+    const indexes = upgraded.db.prepare("PRAGMA index_list(chat_message_index)").all() as { name: string }[];
+    expect(indexes.map((index) => index.name)).toContain("idx_chat_raw_sequence");
   });
 
   it("reloads the same rows after the database is closed and opened again", () => {

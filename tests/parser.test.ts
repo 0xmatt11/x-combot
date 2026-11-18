@@ -98,6 +98,10 @@ describe("parseCommand", () => {
     expect(parseCommand("!admin add")).toEqual({ name: "admin", action: "add" });
     expect(parseCommand("!admin remove")).toEqual({ name: "admin", action: "remove" });
     expect(parseCommand("!warn !!!")).toBeUndefined();
+    expect(parseCommand("!audit")).toEqual({ name: "audit" });
+    expect(parseCommand("!auditlog 5")).toEqual({ name: "audit", count: 5 });
+    expect(parseCommand("/auditlog")).toEqual({ name: "audit" });
+    expect(parseUnknownBang("!audit")).toBeUndefined();
     expect(parseCommand("!del")).toEqual({ name: "del" });
     expect(parseCommand("!note")).toEqual({ name: "note" });
   });

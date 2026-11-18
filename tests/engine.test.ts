@@ -1091,6 +1091,93 @@ describe("ModerationEngine", () => {
     expect(client.conversationListCalls).toHaveLength(0);
   });
 
+  it("deletes a muted member's new command immediately and keeps the history row", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    await engine.processEvent(
+      message({
+        id: "before",
+        senderId: bob.id,
+        text: "already here",
+        conversationId: chatId,
+        sequenceId: "10",
+      }),
+    );
+    await engine.processEvent(
+      message({
+        id: "mute-cmd",
+        senderId: owner.id,
+        text: "!mute @bob 10",
+        conversationId: chatId,
+        sequenceId: "11",
+      }),
+    );
+    expect(client.deleted).not.toContain("before");
+    const sentAfterMute = client.sent.length;
+    const muted = await engine.processEvent(
+      message({
+        id: "bob-help",
+        senderId: bob.id,
+        text: "!help",
+        conversationId: chatId,
+        sequenceId: "12",
+      }),
+    );
+    expect(muted.muted).toBe(true);
+    expect(muted.deletes).toContain("bob-help");
+    expect(client.deleted).toContain("bob-help");
+    expect(client.sent).toHaveLength(sentAfterMute);
+    const history = store.db
+      .prepare(
+        "SELECT text, deleted_by, deleted_in_x_at FROM chat_history_messages WHERE message_id = ?",
+      )
+      .get("bob-help") as { text: string; deleted_by: string | null; deleted_in_x_at: string | null };
+    expect(history.text).toBe("!help");
+    expect(history.deleted_by).toBe("mute");
+    expect(history.deleted_in_x_at).toBeTruthy();
+    expect(store.lookupChatMessage("bob-help")?.sequenceId).toBe("12");
+
+    store.mute(chatId, owner.id, Date.now() + 60_000, "manual");
+    await engine.processEvent(
+      message({
+        id: "owner-help",
+        senderId: owner.id,
+        text: "!help",
+        conversationId: chatId,
+        sequenceId: "13",
+      }),
+    );
+    expect(client.deleted).not.toContain("owner-help");
+    expect(client.sent.at(-1)?.text).toContain("Type !rules");
+
+    await engine.processEvent(
+      message({
+        id: "audit-deny",
+        senderId: alice.id,
+        text: "!audit",
+        conversationId: chatId,
+        sequenceId: "14",
+      }),
+    );
+    expect(client.sent.at(-1)?.text).toMatch(/limited to configured admins/);
+
+    await engine.processEvent(
+      message({
+        id: "audit",
+        senderId: owner.id,
+        text: "!audit 20",
+        conversationId: chatId,
+        sequenceId: "15",
+      }),
+    );
+    const audit = client.sent.at(-1)?.text ?? "";
+    expect(audit).toMatch(/mute ok by u-owner target u-bob/);
+    expect(audit).toMatch(/delete-on-mute ok by bot-1 target u-bob/);
+    expect(audit).toContain("bob-help");
+    expect(audit).toContain("sequence 12");
+  });
+
   it("keeps !purge off public help", () => {
     const loaded = loadDefaults("config/default.yaml");
     expect(loaded.help).not.toMatch(/!purge/);

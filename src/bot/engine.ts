@@ -11,6 +11,7 @@ import { Store } from "../store.js";
 import type {
   BotRuntimeConfig,
   ConversationSettings,
+  DeleteResult,
   DmEvent,
   LlmContextMode,
   MediaCaption,
@@ -659,6 +660,13 @@ export class ModerationEngine {
         isChatAuthMessage(event.text)
       ) {
         this.store.authorizeChat(event.conversationId);
+        this.recordAudit({
+          conversationId: event.conversationId,
+          actorId: event.senderId,
+          action: "auth",
+          ok: true,
+          detail: "authorized",
+        });
         await this.runCommandCleanup(event, () =>
           this.reply(event.conversationId, CHAT_AUTH_OK, actions),
         );
@@ -710,10 +718,7 @@ export class ModerationEngine {
     const vote = parseLevelVote(event.text);
     if (vote && event.replyTo && settings.xpEnabled && settings.xpLevelGrantEnabled) {
       if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
-        actions.muted = true;
-        if (settings.attemptDeleteOnMute) {
-          await this.tryDelete(event.id, actions, event);
-        }
+        await this.suppressMutedSender(event, actions, settings);
         return actions;
       }
       await this.handleLevelVote(event, vote, senderId, settings, actions, nowMs);
@@ -735,6 +740,10 @@ export class ModerationEngine {
       });
 
     if (command && !llmFromCmd) {
+      if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
+        await this.suppressMutedSender(event, actions, settings);
+        return actions;
+      }
       await this.runCommandCleanup(event, () =>
         this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs),
       );
@@ -760,10 +769,7 @@ export class ModerationEngine {
 
     if (llmWake) {
       if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
-        actions.muted = true;
-        if (settings.attemptDeleteOnMute) {
-          await this.tryDelete(event.id, actions, event);
-        }
+        await this.suppressMutedSender(event, actions, settings);
         return actions;
       }
       const run = () =>
@@ -787,10 +793,7 @@ export class ModerationEngine {
     const unknownBang = parseUnknownBang(event.text);
     if (unknownBang) {
       if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
-        actions.muted = true;
-        if (settings.attemptDeleteOnMute) {
-          await this.tryDelete(event.id, actions, event);
-        }
+        await this.suppressMutedSender(event, actions, settings);
         return actions;
       }
       await this.runCommandCleanup(event, () =>
@@ -809,10 +812,7 @@ export class ModerationEngine {
     }
 
     if (!senderIsAdmin && this.store.isMuted(event.conversationId, senderId, nowMs)) {
-      actions.muted = true;
-      if (settings.attemptDeleteOnMute) {
-        await this.tryDelete(event.id, actions, event);
-      }
+      await this.suppressMutedSender(event, actions, settings);
       return actions;
     }
 
@@ -861,6 +861,13 @@ export class ModerationEngine {
           }
           this.store.mute(
             event.conversationId,
+            senderId,
+            nowMs + settings.floodMuteMs,
+            "flood",
+          );
+          this.noteMute(
+            event.conversationId,
+            this.config.botUserId,
             senderId,
             nowMs + settings.floodMuteMs,
             "flood",
@@ -3022,6 +3029,13 @@ export class ModerationEngine {
           return;
         }
         this.store.authorizeChat(conversationId);
+        this.recordAudit({
+          conversationId,
+          actorId: senderId,
+          action: "auth",
+          ok: true,
+          detail: "already authorized",
+        });
         await this.reply(conversationId, CHAT_AUTH_ALREADY, actions);
         return;
       }
@@ -3353,12 +3367,17 @@ export class ModerationEngine {
           actions,
           target,
         );
-        this.store.mute(
+        const kickUntil = Date.now() + settings.autoMuteMs;
+        this.store.mute(conversationId, target.id, kickUntil, "kick-unavailable");
+        this.noteMute(conversationId, senderId, target.id, kickUntil, "kick");
+        this.recordAudit({
           conversationId,
-          target.id,
-          Date.now() + settings.autoMuteMs,
-          "kick-unavailable",
-        );
+          actorId: senderId,
+          targetId: target.id,
+          action: "kick",
+          ok: true,
+          detail: command.reason ?? "kick requested",
+        });
         actions.muted = true;
         await this.reply(
           conversationId,
@@ -3376,11 +3395,13 @@ export class ModerationEngine {
         const target = await this.resolveModerationUser(command.target, event, actions);
         if (!target) return;
         const minutes = command.minutes && command.minutes > 0 ? command.minutes : 30;
-        this.store.mute(conversationId, target.id, Date.now() + minutes * 60_000, "manual");
+        const until = Date.now() + minutes * 60_000;
+        this.store.mute(conversationId, target.id, until, "manual");
+        this.noteMute(conversationId, senderId, target.id, until, "manual");
         actions.muted = true;
         await this.reply(
           conversationId,
-          `${await this.chatLabel(target, target.id, conversationId)} is soft-muted for ${minutes} min (local ignore + delete attempts).`,
+          `${await this.chatLabel(target, target.id, conversationId)} is soft-muted for ${minutes} min. New messages and commands are deleted as they arrive. Messages already in the chat stay.`,
           actions,
         );
         return;
@@ -3389,6 +3410,13 @@ export class ModerationEngine {
         const target = await this.resolveModerationUser(command.target, event, actions);
         if (!target) return;
         this.store.unmute(conversationId, target.id);
+        this.recordAudit({
+          conversationId,
+          actorId: senderId,
+          targetId: target.id,
+          action: "unmute",
+          ok: true,
+        });
         await this.reply(
           conversationId,
           `${await this.chatLabel(target, target.id, conversationId)} is no longer soft-muted.`,
@@ -3408,7 +3436,7 @@ export class ModerationEngine {
           return;
         }
         const result = await this.tryDelete(targetId, actions, { conversationId });
-        if (result) {
+        if (result.deleted) {
           await this.reply(conversationId, `Deleted event ${targetId}.`, actions);
         } else if (isChatGroupId(conversationId)) {
           await this.reply(
@@ -3486,6 +3514,13 @@ export class ModerationEngine {
             conversationId,
             targets.filter((target) => batch.deletedIds.includes(target.id)),
           );
+          this.recordAudit({
+            conversationId,
+            actorId: senderId,
+            action: "purge",
+            ok: batch.deletedIds.length > 0,
+            detail: purgeAuditDetail(command.count, targets.length, batch.deletedIds.length, batch.rejections),
+          });
           if (batch.rateLimited) {
             log.warn(
               `Chat deletes are rate-limited in ${conversationId}; retry after ${batch.rateLimited.retryAfterMs}ms` +
@@ -3517,17 +3552,32 @@ export class ModerationEngine {
         }
         let deleted = 0;
         const purged: DmEvent[] = [];
+        const purgeFailures: { status?: number; message: string; sequenceId: string }[] = [];
         for (const target of targets) {
-          const ok = await this.tryDelete(target.id, actions, {
+          const outcome = await this.tryDelete(target.id, actions, {
             conversationId,
             ...(target.sequenceId ? { sequenceId: target.sequenceId } : {}),
+            ...(target.rawSequenceId ? { rawSequenceId: target.rawSequenceId } : {}),
           });
-          if (ok) {
+          if (outcome.deleted) {
             deleted += 1;
             purged.push(target);
+          } else if (outcome.error) {
+            purgeFailures.push({
+              ...(outcome.status !== undefined ? { status: outcome.status } : {}),
+              message: outcome.error,
+              sequenceId: outcome.sequenceId ?? target.sequenceId ?? "",
+            });
           }
         }
         this.stampPurged(conversationId, purged);
+        this.recordAudit({
+          conversationId,
+          actorId: senderId,
+          action: "purge",
+          ok: deleted > 0,
+          detail: purgeAuditDetail(command.count, targets.length, deleted, purgeFailures),
+        });
         await this.reply(
           conversationId,
           formatPurgeReply({
@@ -3601,6 +3651,13 @@ export class ModerationEngine {
         if (!target) return;
         if (command.action === "add") {
           this.store.addConversationAdmin(conversationId, target.id);
+          this.recordAudit({
+            conversationId,
+            actorId: senderId,
+            targetId: target.id,
+            action: "admin-add",
+            ok: true,
+          });
           await this.reply(
             conversationId,
             `${await this.chatLabel(target, target.id, conversationId)} can now run mod commands in this group.`,
@@ -3608,12 +3665,39 @@ export class ModerationEngine {
           );
         } else {
           this.store.removeConversationAdmin(conversationId, target.id);
+          this.recordAudit({
+            conversationId,
+            actorId: senderId,
+            targetId: target.id,
+            action: "admin-remove",
+            ok: true,
+          });
           await this.reply(
             conversationId,
             `${await this.chatLabel(target, target.id, conversationId)} was removed from this group's admin allowlist.`,
             actions,
           );
         }
+        return;
+      }
+      case "audit": {
+        const requested = command.count && command.count > 0 ? command.count : 10;
+        const limit = Math.min(requested, 30);
+        const rows = this.store.listAudit(conversationId, limit);
+        if (rows.length === 0) {
+          await this.reply(conversationId, "No moderation actions recorded in this group.", actions);
+          return;
+        }
+        const lines = rows.map((row) => {
+          const target = row.targetId ? ` target ${row.targetId}` : "";
+          const detail = row.detail ? ` — ${row.detail}` : "";
+          return `${row.createdAt} ${row.action} ${row.ok ? "ok" : "failed"} by ${row.actorId}${target}${detail}`;
+        });
+        await this.reply(
+          conversationId,
+          `Last ${rows.length} moderation action${rows.length === 1 ? "" : "s"}:\n${lines.join("\n")}`,
+          actions,
+        );
         return;
       }
       case "admins": {
@@ -5025,6 +5109,14 @@ export class ModerationEngine {
   ): Promise<number> {
     const count = this.store.addWarn(event.conversationId, userId, adminId, reason);
     actions.warned = true;
+    this.recordAudit({
+      conversationId: event.conversationId,
+      actorId: adminId,
+      targetId: userId,
+      action: "warn",
+      ok: true,
+      detail: `${reason ? `${reason}; ` : ""}${count}/${settings.warnLimit}`,
+    });
     const label = await this.chatLabel(user ?? event.sender, userId, event.conversationId);
     const reasonText = reason ? ` (${reason})` : "";
     await this.reply(
@@ -5033,12 +5125,9 @@ export class ModerationEngine {
       actions,
     );
     if (count >= settings.warnLimit) {
-      this.store.mute(
-        event.conversationId,
-        userId,
-        Date.now() + settings.autoMuteMs,
-        "warn-limit",
-      );
+      const until = Date.now() + settings.autoMuteMs;
+      this.store.mute(event.conversationId, userId, until, "warn-limit");
+      this.noteMute(event.conversationId, adminId, userId, until, "warn-limit");
       actions.muted = true;
       await this.reply(
         event.conversationId,
@@ -5285,10 +5374,50 @@ export class ModerationEngine {
     const cached = event.senderId ? this.namedUsers.get(event.senderId) : undefined;
     const label = displayName(event.sender ?? cached, event.senderId);
     this.chatHistory.observe(event, label);
+    this.syncChatSequenceIndex(event);
+  }
+
+  /**
+   * Copy the sequence id history just stored onto every id this message is
+   * known by. A later events-list copy can replace a decrypted sequence, and
+   * command cleanup reads that row instead of the id frozen at schedule time.
+   */
+  private syncChatSequenceIndex(event: DmEvent): void {
+    if (!event.id || !event.conversationId) return;
+    const found = this.chatHistory.lookupSequence(event.conversationId, event.id);
+    const sequenceId = found?.sequenceId || event.sequenceId;
+    const rawSequenceId = found?.rawSequenceId || event.rawSequenceId;
+    if (!sequenceId && !rawSequenceId) return;
+    const ids = new Set<string>([event.id]);
+    if (found?.messageId) ids.add(found.messageId);
+    for (const alias of event.aliasIds ?? []) {
+      if (!alias.startsWith("cipher:")) ids.add(alias);
+    }
+    for (const id of ids) {
+      this.store.rememberChatMessage(
+        id,
+        event.conversationId,
+        sequenceId || rawSequenceId,
+        event.createdAt,
+        rawSequenceId,
+      );
+    }
   }
 
   /** `!purge` keeps the text and only stamps rows X actually deleted. */
   private stampPurged(conversationId: string, targets: readonly DmEvent[]): void {
+    this.stampDeleted(conversationId, targets, "purge");
+  }
+
+  /**
+   * Mark local history after X accepted a delete. The message row and the
+   * chat_message_index row stay. Only `deleted_in_x_at` / `deleted_by` change.
+   */
+  private stampDeleted(
+    conversationId: string,
+    targets: readonly { id?: string; sequenceId?: string; aliasIds?: string[] }[],
+    deletedBy: "purge" | "mute" | "cleanup",
+  ): void {
     if (!isChatGroupId(conversationId) || targets.length === 0) return;
     const keys: string[] = [];
     for (const target of targets) {
@@ -5298,7 +5427,7 @@ export class ModerationEngine {
         if (!alias.startsWith("cipher:")) keys.push(alias);
       }
     }
-    this.chatHistory.markDeleted(conversationId, keys, "purge", new Date().toISOString());
+    this.chatHistory.markDeleted(conversationId, keys, deletedBy, new Date().toISOString());
   }
 
   /** Record a message this account just sent so a later `!purge` can delete it. */
@@ -5399,22 +5528,119 @@ export class ModerationEngine {
     return selected;
   }
 
+  /**
+   * Current sequence ids for a delete. History and the message index win over
+   * a sequence captured when a command was scheduled.
+   */
+  private resolveDeleteIds(
+    eventId: string,
+    conversationId: string | undefined,
+    fallback?: { sequenceId?: string; rawSequenceId?: string },
+  ): { sequenceId?: string; rawSequenceId?: string } {
+    const history =
+      conversationId && eventId ? this.chatHistory.lookupSequence(conversationId, eventId) : undefined;
+    const indexed = eventId ? this.store.lookupChatMessage(eventId) : undefined;
+    const sequenceId = history?.sequenceId || indexed?.sequenceId || fallback?.sequenceId;
+    const rawSequenceId = history?.rawSequenceId || indexed?.rawSequenceId || fallback?.rawSequenceId;
+    return {
+      ...(sequenceId ? { sequenceId } : {}),
+      ...(rawSequenceId ? { rawSequenceId } : {}),
+    };
+  }
+
+  /** Soft-mute bookkeeping. Does not delete messages that are already in the chat. */
+  private noteMute(
+    conversationId: string,
+    actorId: string,
+    targetId: string,
+    untilMs: number,
+    reason: string,
+  ): void {
+    const minutes = Math.max(1, Math.round((untilMs - Date.now()) / 60_000));
+    this.recordAudit({
+      conversationId,
+      actorId,
+      targetId,
+      action: "mute",
+      ok: true,
+      detail: `${minutes} min ${reason}`,
+    });
+  }
+
+  private recordAudit(entry: {
+    conversationId: string;
+    actorId: string;
+    targetId?: string;
+    action: string;
+    detail?: string;
+    ok: boolean;
+  }): void {
+    if (!entry.conversationId || !entry.actorId) return;
+    const detail = entry.detail && entry.detail.length > 500 ? `${entry.detail.slice(0, 497)}...` : entry.detail;
+    this.store.recordAudit({
+      createdAt: new Date().toISOString(),
+      conversationId: entry.conversationId,
+      actorId: entry.actorId,
+      ...(entry.targetId ? { targetId: entry.targetId } : {}),
+      action: entry.action,
+      ...(detail ? { detail } : {}),
+      ok: entry.ok,
+    });
+  }
+
+  /**
+   * A muted non-admin's new message, including a bang command, is ignored and
+   * deleted now. Admins are not passed here. Messages sent before the mute stay.
+   */
+  private async suppressMutedSender(
+    event: DmEvent,
+    actions: EngineActions,
+    settings: ResolvedConversationConfig,
+  ): Promise<void> {
+    actions.muted = true;
+    if (!settings.attemptDeleteOnMute) return;
+    const ids = this.resolveDeleteIds(event.id, event.conversationId, {
+      sequenceId: event.sequenceId,
+      rawSequenceId: event.rawSequenceId,
+    });
+    const result = await this.tryDelete(event.id, actions, {
+      conversationId: event.conversationId,
+      ...(ids.sequenceId ? { sequenceId: ids.sequenceId } : {}),
+      ...(ids.rawSequenceId ? { rawSequenceId: ids.rawSequenceId } : {}),
+    });
+    if (result.deleted) {
+      this.stampDeleted(
+        event.conversationId,
+        [{ id: event.id, sequenceId: result.sequenceId ?? ids.sequenceId, aliasIds: event.aliasIds }],
+        "mute",
+      );
+    }
+    this.recordAudit({
+      conversationId: event.conversationId,
+      actorId: this.config.botUserId,
+      ...(event.senderId ? { targetId: event.senderId } : {}),
+      action: "delete-on-mute",
+      ok: result.deleted,
+      detail: deleteAuditDetail(event.id, result.sequenceId ?? ids.sequenceId ?? ids.rawSequenceId, result),
+    });
+  }
+
   private async tryDelete(
     eventId: string,
     actions: EngineActions,
-    hint?: { conversationId?: string; sequenceId?: string },
-  ): Promise<boolean> {
+    hint?: { conversationId?: string; sequenceId?: string; rawSequenceId?: string },
+  ): Promise<DeleteResult> {
     const result = await this.client.deleteEvent(eventId, hint);
     if (result.deleted) {
       actions.deletes.push(eventId);
-      return true;
+      return result;
     }
     const where =
       hint?.conversationId && isChatGroupId(hint.conversationId) ? "Chat message" : "DM event";
     log.warn(
       `Could not delete ${where} ${eventId}. ${result.error ?? "X refused the delete."}`,
     );
-    return false;
+    return result;
   }
 
   /**
@@ -5452,6 +5678,8 @@ export class ModerationEngine {
    * answers, roasts, and other bot replies stay in the chat.
    * The timer is in-process: a restart before it fires leaves the bang up.
    * `@mention` wakes, welcomes, and leaves are not bang commands.
+   * `sequenceId` on the timer is only a fallback. The delete reads the current
+   * id from history and `chat_message_index` when the timer fires.
    */
   private async runCommandCleanup(event: DmEvent, work: () => Promise<void>): Promise<void> {
     try {
@@ -5495,21 +5723,49 @@ export class ModerationEngine {
       llm: false,
     };
     const indexed = this.store.lookupChatMessage(target.eventId);
-    const sequenceId = target.sequenceId || indexed?.sequenceId;
     const conversationId = target.conversationId || indexed?.conversationId;
-    if (isChatGroupId(conversationId)) {
-      if (!sequenceId) {
-        log.info(
-          `Skipping auto-delete of command ${target.eventId} in ${conversationId}: no Chat sequence id.`,
-        );
-        return;
-      }
-      await this.tryDelete(target.eventId, actions, { conversationId, sequenceId });
+    if (!conversationId || !isChatGroupId(conversationId)) {
+      log.info(
+        `Skipping auto-delete of command ${target.eventId}: classic DMs only delete messages this account sent.`,
+      );
       return;
     }
-    log.info(
-      `Skipping auto-delete of command ${target.eventId}: classic DMs only delete messages this account sent.`,
-    );
+    const resolved = this.resolveDeleteIds(target.eventId, conversationId, {
+      sequenceId: target.sequenceId,
+    });
+    if (!resolved.sequenceId && !resolved.rawSequenceId) {
+      log.info(
+        `Skipping auto-delete of command ${target.eventId} in ${conversationId}: no Chat sequence id.`,
+      );
+      this.recordAudit({
+        conversationId,
+        actorId: this.config.botUserId,
+        action: "command-cleanup-delete",
+        ok: false,
+        detail: `event ${target.eventId} no sequence id`,
+      });
+      return;
+    }
+    const sequenceId = resolved.sequenceId || resolved.rawSequenceId || "";
+    const result = await this.tryDelete(target.eventId, actions, {
+      conversationId,
+      sequenceId,
+      ...(resolved.rawSequenceId ? { rawSequenceId: resolved.rawSequenceId } : {}),
+    });
+    if (result.deleted) {
+      this.stampDeleted(
+        conversationId,
+        [{ id: target.eventId, sequenceId: result.sequenceId ?? sequenceId }],
+        "cleanup",
+      );
+    }
+    this.recordAudit({
+      conversationId,
+      actorId: this.config.botUserId,
+      action: "command-cleanup-delete",
+      ok: result.deleted,
+      detail: deleteAuditDetail(target.eventId, result.sequenceId ?? sequenceId, result),
+    });
   }
 
   private featureRequestKey(conversationId: string, userId: string): string {
@@ -6515,4 +6771,26 @@ function formatSettings(settings: ResolvedConversationConfig): string {
     `boobs_vision: ${settings.boobsVision}`,
     `xp_enabled: ${settings.xpEnabled}`,
   ].join("\n");
+}
+
+function deleteAuditDetail(eventId: string, sequenceId: string | undefined, result: DeleteResult): string {
+  const seq = sequenceId ? ` sequence ${sequenceId}` : "";
+  if (result.deleted) return `event ${eventId}${seq} ok`;
+  const status = result.status ? `HTTP ${result.status}` : "failed";
+  const message = result.error ? `: ${result.error}` : "";
+  return `event ${eventId}${seq} ${status}${message}`;
+}
+
+function purgeAuditDetail(
+  requested: number,
+  attempted: number,
+  deleted: number,
+  failures: readonly { status?: number; message: string; sequenceId?: string }[],
+): string {
+  const fail = failures.find((row) => row.status === 400) ?? failures[0];
+  const base = `deleted ${deleted} of ${attempted} (requested ${requested})`;
+  if (!fail) return base;
+  const status = fail.status ? `HTTP ${fail.status}` : "failed";
+  const seq = fail.sequenceId ? ` sequence ${fail.sequenceId}` : "";
+  return `${base}; ${status}${seq}: ${fail.message}`;
 }

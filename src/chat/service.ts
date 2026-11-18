@@ -772,8 +772,14 @@ export class ChatService {
         error: "Not an encrypted Chat message this process has indexed.",
       };
     }
+    const sequenceId = hint?.sequenceId?.trim() || indexed?.sequenceId?.trim();
+    const rawSequenceId = hint?.rawSequenceId?.trim() || indexed?.rawSequenceId?.trim();
     const batch = await this.deleteMessages(conversationId, [
-      { eventId, sequenceId: hint?.sequenceId || indexed?.sequenceId },
+      {
+        eventId,
+        ...(sequenceId ? { sequenceId } : {}),
+        ...(rawSequenceId ? { rawSequenceId } : {}),
+      },
     ]);
     return deleteResultFromBatch(eventId, batch);
   }
@@ -796,13 +802,18 @@ export class ChatService {
     for (const target of targets) {
       const eventId = target.eventId?.trim();
       if (!eventId) continue;
-      const sequenceId =
-        target.sequenceId?.trim() || this.store.lookupChatMessage(eventId)?.sequenceId?.trim();
-      if (!sequenceId) {
+      const indexed = this.store.lookupChatMessage(eventId);
+      const sequenceId = target.sequenceId?.trim() || indexed?.sequenceId?.trim();
+      const rawSequenceId = target.rawSequenceId?.trim() || indexed?.rawSequenceId?.trim();
+      if (!sequenceId && !rawSequenceId) {
         result.missingSequenceIds.push(eventId);
         continue;
       }
-      ready.push({ eventId, sequenceId });
+      ready.push({
+        eventId,
+        sequenceId: sequenceId || rawSequenceId!,
+        ...(rawSequenceId ? { rawSequenceId } : {}),
+      });
     }
     if (ready.length === 0) return result;
 
@@ -860,8 +871,9 @@ export class ChatService {
 
   private async deleteChunk(
     conversationId: string,
-    targets: readonly { eventId: string; sequenceId: string }[],
+    targets: readonly { eventId: string; sequenceId: string; rawSequenceId?: string }[],
     result: DeleteBatchResult,
+    options?: { allowRawRetry?: boolean },
   ): Promise<"ok" | "stop"> {
     if (targets.length === 0) return "ok";
     const blockedFor = this.deleteBlockedUntil - this.now();
@@ -870,10 +882,17 @@ export class ChatService {
       if (!result.blocked) result.blocked = { retryAfterMs: blockedFor };
       return "stop";
     }
+    // One array is signed and posted. chat-xdk signs this list; the body must
+    // carry the same ids in the same order, not a copy taken before a mutation.
     const sequenceIds = targets.map((target) => target.sequenceId);
+    let postedIds = sequenceIds;
+    let deleteAction = "delete_for_all";
     try {
       const signature = this.cipher.prepareMessageDelete(conversationId, sequenceIds, true);
-      const body = deleteMessagesBody(signature, this.cipher.signingPublicKey(), sequenceIds, true);
+      const signingKey = this.cipher.signingPublicKey();
+      const body = deleteMessagesBody(signature, signingKey, sequenceIds, true);
+      postedIds = Array.isArray(body.sequence_ids) ? body.sequence_ids.map(String) : [...sequenceIds];
+      deleteAction = typeof body.delete_message_action === "string" ? body.delete_message_action : deleteAction;
       const response = await this.http.deleteChatMessages(conversationId, body);
       if (!response.deleted) {
         return this.failChunk(conversationId, targets, result, {
@@ -895,6 +914,31 @@ export class ChatService {
       }
       const status = deleteErrorStatus(error);
       const message = error instanceof Error ? error.message : String(error);
+      if (status === 400) {
+        // Sequence ids and the action only. Never the signature, token, or key.
+        log.warn(
+          `Chat delete HTTP 400 in ${conversationId} sequence_ids=${JSON.stringify(postedIds)} delete_message_action=${deleteAction}: ${message}`,
+        );
+      }
+      const sole = targets.length === 1 ? targets[0] : undefined;
+      const raw = sole?.rawSequenceId?.trim();
+      if (
+        status === 400 &&
+        options?.allowRawRetry !== false &&
+        sole &&
+        raw &&
+        raw !== sole.sequenceId
+      ) {
+        log.warn(
+          `Chat delete retrying ${sole.eventId} in ${conversationId} with events-list sequence_id ${raw} after HTTP 400 on ${sole.sequenceId}`,
+        );
+        return this.deleteChunk(
+          conversationId,
+          [{ eventId: sole.eventId, sequenceId: raw }],
+          result,
+          { allowRawRetry: false },
+        );
+      }
       const splittable = status !== undefined && status >= 400 && status < 500;
       return this.failChunk(conversationId, targets, result, { status, message, splittable });
     }
@@ -902,7 +946,7 @@ export class ChatService {
 
   private failChunk(
     conversationId: string,
-    targets: readonly { eventId: string; sequenceId: string }[],
+    targets: readonly { eventId: string; sequenceId: string; rawSequenceId?: string }[],
     result: DeleteBatchResult,
     failure: { status?: number; message: string; splittable: boolean },
   ): Promise<"ok" | "stop"> {
@@ -910,7 +954,15 @@ export class ChatService {
       const mid = Math.floor(targets.length / 2);
       return this.splitChunk(conversationId, targets, mid, result);
     }
-    for (const target of targets) result.rejectedIds.push(target.eventId);
+    for (const target of targets) {
+      result.rejectedIds.push(target.eventId);
+      result.rejections.push({
+        eventId: target.eventId,
+        sequenceId: target.sequenceId,
+        ...(failure.status !== undefined ? { status: failure.status } : {}),
+        message: failure.message,
+      });
+    }
     if (isDeletePermissionError(failure.status, failure.message)) result.permissionDenied = true;
     const ids = targets.map((target) => target.eventId).join(", ");
     log.warn(
@@ -921,7 +973,7 @@ export class ChatService {
 
   private async splitChunk(
     conversationId: string,
-    targets: readonly { eventId: string; sequenceId: string }[],
+    targets: readonly { eventId: string; sequenceId: string; rawSequenceId?: string }[],
     mid: number,
     result: DeleteBatchResult,
   ): Promise<"ok" | "stop"> {
@@ -1151,10 +1203,32 @@ export class ChatService {
       const decrypted = raw.encoded_event ? byB64.get(raw.encoded_event) : undefined;
       const dm = chatEventToDm(conversationId, raw, decrypted);
       if (!dm) continue;
-      this.store.rememberChatMessage(dm.id, dm.conversationId, dm.sequenceId, dm.createdAt);
+      this.store.rememberChatMessage(
+        dm.id,
+        dm.conversationId,
+        dm.sequenceId,
+        dm.createdAt,
+        dm.rawSequenceId,
+      );
       const sentId = decrypted?.id?.trim();
       if (sentId && sentId !== dm.id) {
-        this.store.rememberChatMessage(sentId, dm.conversationId, dm.sequenceId, dm.createdAt);
+        this.store.rememberChatMessage(
+          sentId,
+          dm.conversationId,
+          dm.sequenceId,
+          dm.createdAt,
+          dm.rawSequenceId,
+        );
+      }
+      for (const alias of dm.aliasIds ?? []) {
+        if (!alias || alias.startsWith("cipher:") || alias === dm.id || alias === sentId) continue;
+        this.store.rememberChatMessage(
+          alias,
+          dm.conversationId,
+          dm.sequenceId,
+          dm.createdAt,
+          dm.rawSequenceId,
+        );
       }
       events.push(dm);
     }
@@ -1782,7 +1856,10 @@ function nextReplyQuote(quote: ReplyQuote): ReplyQuote | undefined {
 }
 
 function deleteResultFromBatch(eventId: string, batch: DeleteBatchResult): DeleteResult {
-  if (batch.deletedIds.includes(eventId)) return { deleted: true };
+  if (batch.deletedIds.includes(eventId)) {
+    const sequenceId = batch.rejections.find((row) => row.eventId === eventId)?.sequenceId;
+    return sequenceId ? { deleted: true, sequenceId } : { deleted: true };
+  }
   if (batch.missingSequenceIds.includes(eventId)) {
     return { deleted: false, error: "Missing X Chat sequence id." };
   }
@@ -1793,11 +1870,22 @@ function deleteResultFromBatch(eventId: string, batch: DeleteBatchResult): Delet
   ) {
     return { deleted: false, error: `Rate limited; retry after ${wait}ms` };
   }
+  const rejection = batch.rejections.find((row) => row.eventId === eventId);
   if (batch.permissionDenied) {
     return {
       deleted: false,
       error:
         "This account can delete its own messages, and other people's messages only when it is a group admin.",
+      ...(rejection?.status !== undefined ? { status: rejection.status } : {}),
+      ...(rejection?.sequenceId ? { sequenceId: rejection.sequenceId } : {}),
+    };
+  }
+  if (rejection) {
+    return {
+      deleted: false,
+      error: rejection.message,
+      ...(rejection.status !== undefined ? { status: rejection.status } : {}),
+      ...(rejection.sequenceId ? { sequenceId: rejection.sequenceId } : {}),
     };
   }
   return { deleted: false, error: "X Chat did not delete that message." };
