@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModerationEngine } from "../src/bot/engine.js";
 import { ChatActivityIntake } from "../src/chat/activity.js";
 import type { ChatCipher, DecryptedEvent, EncryptMessageOptions } from "../src/chat/cipher.js";
@@ -237,6 +237,30 @@ describe("Chat delete batches", () => {
     const again = await chat.deleteMessages(GROUP, targets);
     expect(again.deletedIds).toEqual(["evt-a", "evt-b", "evt-c"]);
     expect(http.deletes).toHaveLength(1);
+  });
+
+  it("retries a 400 once with the events-list sequence id and logs the posted ids", async () => {
+    const { http, cipher, service: chat } = service();
+    http.rejectSequenceIds.add("stored-seq");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await chat.deleteMessages(GROUP, [
+        { eventId: "evt-1", sequenceId: "stored-seq", rawSequenceId: "4242" },
+      ]);
+      expect(result.deletedIds).toEqual(["evt-1"]);
+      expect(result.rejectedIds).toEqual([]);
+      expect(cipher.deleted).toEqual([["stored-seq"], ["4242"]]);
+      expect(http.deletes).toHaveLength(1);
+      expect(http.deletes[0]?.sequence_ids).toEqual(["4242"]);
+      expect(http.deletes[0]?.delete_message_action).toBe("delete_for_all");
+      const logged = warn.mock.calls.map((args) => args.map(String).join(" ")).join("\n");
+      expect(logged).toContain('sequence_ids=["stored-seq"]');
+      expect(logged).toContain("delete_message_action=delete_for_all");
+      expect(logged).not.toContain("action_signatures");
+      expect(logged).not.toMatch(/message_event_signature|signing_public_key/);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("splits a 400 so every id except the bad one is deleted", async () => {

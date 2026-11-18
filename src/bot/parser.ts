@@ -83,7 +83,8 @@ export type ParsedCommand =
   | { name: "linkroast"; action?: "on" | "off" }
   | { name: "status" }
   | { name: "auth" }
-  | { name: "request"; idea?: string };
+  | { name: "request"; idea?: string }
+  | { name: "audit"; count?: number };
 
 export const LLM_COMMANDS = new Set(["ask", "summarize", "analyze"]);
 
@@ -185,6 +186,8 @@ const KNOWN_COMMAND_NAMES = new Set([
   "auth",
   "request",
   "featurerequest",
+  "audit",
+  "auditlog",
 ]);
 
 /**
@@ -355,6 +358,13 @@ export function parseCommand(text: string | undefined | null): ParsedCommand | u
       const { head, tail } = splitHead(rest);
       if (!head || !tail) return undefined;
       return { name: "set", key: head, value: tail };
+    }
+    case "audit":
+    case "auditlog": {
+      if (!rest) return { name: "audit" };
+      const count = Number.parseInt(rest, 10);
+      if (!Number.isInteger(count) || count < 1) return { name: "audit" };
+      return { name: "audit", count };
     }
     case "admin": {
       if (!rest) return { name: "admin" };

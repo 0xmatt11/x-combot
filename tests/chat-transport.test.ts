@@ -299,6 +299,20 @@ describe("Chat ids and wire shapes", () => {
     ).toEqual(["1", "2"]);
   });
 
+  it("prefers the events-list sequence id over the decrypted payload sequence", () => {
+    const message = chatEventToDm(
+      GROUP,
+      { id: "evt-env", sender_id: "alice-1", sequence_id: "4242" },
+      {
+        type: "message",
+        sequenceId: "payload-seq",
+        content: { contentType: "text", text: "hello" },
+      },
+    );
+    expect(message?.sequenceId).toBe("4242");
+    expect(message?.rawSequenceId).toBe("4242");
+  });
+
   it("maps decrypted text and member adds onto the DM event shape", () => {
     const message = chatEventToDm(
       GROUP,

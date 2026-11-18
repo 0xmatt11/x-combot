@@ -16,6 +16,7 @@ export function emptyDeleteBatch(): DeleteBatchResult {
     deletedIds: [],
     missingSequenceIds: [],
     rejectedIds: [],
+    rejections: [],
     permissionDenied: false,
   };
 }
@@ -101,6 +102,11 @@ export async function deleteOneByOne(
       break;
     }
     result.rejectedIds.push(target.eventId);
+    result.rejections.push({
+      eventId: target.eventId,
+      sequenceId: target.sequenceId?.trim() ?? "",
+      message: outcome.error ?? "delete failed",
+    });
     if (isDeletePermissionError(undefined, outcome.error ?? "")) result.permissionDenied = true;
   }
   return result;

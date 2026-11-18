@@ -129,6 +129,33 @@ describe("chat history store", () => {
     expect(rows[0]?.media).toBeNull();
   });
 
+  it("replaces a decrypted sequence with a later events-list sequence and keeps the row", () => {
+    const log = history(memoryStore());
+    log.observe(
+      message({
+        id: "activity-1",
+        sequenceId: "payload-seq",
+        text: "keep this body",
+        aliasIds: ["shared-msg"],
+      }),
+    );
+    log.observe(
+      message({
+        id: "events-list-1",
+        sequenceId: "4242",
+        rawSequenceId: "4242",
+        text: "keep this body",
+        aliasIds: ["shared-msg"],
+      }),
+    );
+    const rows = log.listMessages(GROUP);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.text).toBe("keep this body");
+    expect(rows[0]?.sequence_id).toBe("4242");
+    expect(rows[0]?.raw_sequence_id).toBe("4242");
+    expect(rows[0]?.message_id).toBe("activity-1");
+  });
+
   it("reloads the same rows after the database is closed and opened again", () => {
     const { store, file } = fileStore();
     const log = history(store);

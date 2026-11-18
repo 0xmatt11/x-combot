@@ -292,8 +292,16 @@ export interface DmEvent {
   /**
    * X Chat message sequence id. Required for
    * `POST /2/chat/conversations/:id/messages/delete`. Absent on classic DM events.
+   * The events-list envelope `sequence_id` wins over the decrypted payload when
+   * both are present. That envelope id is what delete-for-all accepts.
    */
   sequenceId?: string;
+  /**
+   * `sequence_id` from the events-list or Activity envelope, when that payload
+   * had one. Kept even when `sequenceId` came from the decrypted payload, so a
+   * delete that 400s can retry this id once.
+   */
+  rawSequenceId?: string;
   /** Set when this message is a reply and the decrypted preview (or caller) names a target. */
   replyTo?: ReplyTarget;
   /**
@@ -332,6 +340,8 @@ export interface DmEvent {
 export interface DeleteHint {
   conversationId?: string;
   sequenceId?: string;
+  /** Events-list envelope sequence id, used once after a 400 on `sequenceId`. */
+  rawSequenceId?: string;
 }
 
 export interface SendMessageResult {
@@ -348,6 +358,16 @@ export interface SendMessageResult {
 export interface DeleteTarget {
   eventId: string;
   sequenceId?: string;
+  /** Envelope sequence id. A 400 on `sequenceId` retries this once when it differs. */
+  rawSequenceId?: string;
+}
+
+/** One sequence X refused, with the HTTP status when the transport kept it. */
+export interface DeleteRejection {
+  eventId: string;
+  sequenceId: string;
+  status?: number;
+  message: string;
 }
 
 /**
@@ -361,6 +381,8 @@ export interface DeleteBatchResult {
   missingSequenceIds: string[];
   /** X refused these after a non-rate-limit failure, down to a single id. */
   rejectedIds: string[];
+  /** Why each rejected id failed. Empty when nothing was refused. */
+  rejections: DeleteRejection[];
   /** At least one rejection was HTTP 403 or a permission error. */
   permissionDenied: boolean;
   rateLimited?: { retryAfterMs: number; skippedIds: string[] };
@@ -433,6 +455,10 @@ export interface OutboundAudio {
 export interface DeleteResult {
   deleted: boolean;
   error?: string;
+  /** HTTP status when the transport reported one. 400 is a bad sequence or action. */
+  status?: number;
+  /** Sequence id that was posted, when this delete named one. */
+  sequenceId?: string;
 }
 
 export interface TokenSet {
