@@ -527,6 +527,8 @@ async function openChatService(
         env.chatPublicKeysSummaryMinutes === undefined
           ? undefined
           : env.chatPublicKeysSummaryMinutes * 60_000,
+      ownerId: env.botOwnerId,
+      globalAdminIds: env.adminIds,
     });
   } catch (error) {
     if (!listen.implicitAll) throw error;

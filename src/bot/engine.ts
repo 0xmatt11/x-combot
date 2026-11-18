@@ -512,6 +512,18 @@ const commandContext = new AsyncLocalStorage<DmEvent>();
 /** The member's bang or slash command is removed after this delay. Bot replies stay. */
 export const COMMAND_CLEANUP_MS = 15 * 60 * 1000;
 
+/** `!mute` with no duration. An explicit minute count still wins. */
+export const DEFAULT_MUTE_MINUTES = 6 * 60;
+
+/** User-facing mute length. Whole hours stay hours; anything else stays minutes. */
+export function formatMuteDuration(minutes: number): string {
+  if (minutes > 0 && minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return hours === 1 ? "1 hour" : `${hours} hours`;
+  }
+  return `${minutes} min`;
+}
+
 interface CommandCleanupTarget {
   eventId: string;
   conversationId: string;
@@ -3394,14 +3406,14 @@ export class ModerationEngine {
       case "mute": {
         const target = await this.resolveModerationUser(command.target, event, actions);
         if (!target) return;
-        const minutes = command.minutes && command.minutes > 0 ? command.minutes : 30;
+        const minutes = command.minutes && command.minutes > 0 ? command.minutes : DEFAULT_MUTE_MINUTES;
         const until = Date.now() + minutes * 60_000;
         this.store.mute(conversationId, target.id, until, "manual");
         this.noteMute(conversationId, senderId, target.id, until, "manual");
         actions.muted = true;
         await this.reply(
           conversationId,
-          `${await this.chatLabel(target, target.id, conversationId)} is soft-muted for ${minutes} min. New messages and commands are deleted as they arrive. Messages already in the chat stay.`,
+          `${await this.chatLabel(target, target.id, conversationId)} is soft-muted for ${formatMuteDuration(minutes)}. New messages and commands are deleted as they arrive. Messages already in the chat stay.`,
           actions,
         );
         return;

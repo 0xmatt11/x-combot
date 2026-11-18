@@ -17,7 +17,13 @@ import {
   saveRemoteKeyCache,
 } from "../src/chat/remote-key-cache.js";
 import { missingKeyFetchCooldownMs } from "../src/chat/conversation-keys.js";
-import { ChatService, DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS, type ChatServiceOptions } from "../src/chat/service.js";
+import {
+  ChatService,
+  DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS,
+  decryptErrorNeedsSignatureRefresh,
+  decryptErrorsNeedKeyRefresh,
+  type ChatServiceOptions,
+} from "../src/chat/service.js";
 import { loadEnv } from "../src/env.js";
 import type { RemotePublicKey } from "../src/chat/wire.js";
 import { Store } from "../src/store.js";
@@ -133,6 +139,40 @@ class FakeCipher implements ChatCipher {
   }
 }
 
+const GROK = "1720665183188922368";
+const GROK_KEY_VERSION = "1745865762230";
+const ECDSA_ERROR = `Crypto error: Signature verification failed: ECDSA mismatch: key_version=${GROK_KEY_VERSION}`;
+
+class EcdsaCipher extends FakeCipher {
+  readonly calls: SigningKeyEntry[][] = [];
+  error = ECDSA_ERROR;
+  /** When false, a refreshed key still fails. */
+  acceptFreshKey = true;
+
+  override decryptEvents(eventsB64: string[], signingKeys?: SigningKeyEntry[]) {
+    this.calls.push(signingKeys ?? []);
+    const fresh = (signingKeys ?? []).some((key) => key.publicKeyVersion === GROK_KEY_VERSION);
+    if (!fresh || !this.acceptFreshKey) {
+      const errors: Record<string, string> = {};
+      for (const blob of eventsB64) errors[blob] = this.error;
+      return { messages: [], errors, conversationKeys: this.conversationKeys };
+    }
+    return {
+      messages: eventsB64.map((blob) => ({
+        event: {
+          type: "message",
+          id: "plain-id",
+          senderId: GROK,
+          content: { text: "from grok" },
+        },
+        originalB64: blob,
+      })),
+      errors: {},
+      conversationKeys: this.conversationKeys,
+    };
+  }
+}
+
 class FakeHttp implements ChatHttp {
   readonly keyGets: string[] = [];
   keyError: unknown;
@@ -185,10 +225,11 @@ function service(
   cipher: ChatCipher,
   file: string | undefined,
   options?: Omit<ChatServiceOptions, "remoteKeyCachePath">,
+  store?: Store,
 ): ChatService {
-  const store = new Store(":memory:");
-  stores.push(store);
-  return new ChatService(http, cipher, store, {
+  const db = store ?? new Store(":memory:");
+  stores.push(db);
+  return new ChatService(http, cipher, db, {
     ...options,
     ...(file ? { remoteKeyCachePath: file } : {}),
   });
@@ -1433,4 +1474,258 @@ describe("public_keys fetch summary", () => {
       else process.env.CHAT_PUBLIC_KEYS_SUMMARY_MINUTES = previous;
     }
   });
+
+  it("treats ECDSA and signature-verification failures as a key refresh", () => {
+    expect(decryptErrorNeedsSignatureRefresh(ECDSA_ERROR)).toBe(true);
+    expect(decryptErrorNeedsSignatureRefresh("Message signature verification failed")).toBe(true);
+    expect(decryptErrorNeedsSignatureRefresh("Signature verification failed")).toBe(true);
+    expect(decryptErrorNeedsSignatureRefresh("signature missing or no matching signing key")).toBe(false);
+    expect(decryptErrorsNeedKeyRefresh({ a: ECDSA_ERROR })).toBe(true);
+    expect(decryptErrorsNeedKeyRefresh({ a: "Message signature verification failed" })).toBe(true);
+    expect(decryptErrorsNeedKeyRefresh({ a: "Conversation key version 1 is not in available versions" })).toBe(true);
+    expect(decryptErrorsNeedKeyRefresh({ a: "unrelated" })).toBe(false);
+  });
+
+  it("refreshes the ECDSA sender and retries decrypt with the new signing key", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: GROK_KEY_VERSION })]);
+    http.pages.push(grokPage());
+    const cipher = new EcdsaCipher();
+    const pulled = await service(http, cipher, file).pullNew(GROUP, "evt-old", 10);
+    expect(http.keyGets).toEqual([GROK]);
+    expect(cipher.calls).toHaveLength(2);
+    expect(cipher.calls[1]?.some((key) => key.publicKeyVersion === GROK_KEY_VERSION)).toBe(true);
+    expect(pulled.events.map((event) => event.text)).toEqual(["from grok"]);
+    expect(pulled.events[0]?.senderId).toBe(GROK);
+    expect(pulled.watermarkId).toBe("evt-grok");
+  });
+
+  it("does not refresh the same ECDSA sender again inside the delay", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    let now = 5_000_000;
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+    http.pages.push(grokPage(), grokPage(), grokPage());
+    const cipher = new EcdsaCipher();
+    cipher.acceptFreshKey = false;
+    const chat = service(http, cipher, file, { now: () => now, decryptRefreshMinMs: 15 * 60 * 1000 });
+    await chat.pullNew(GROUP, "evt-old", 10);
+    expect(http.keyGets).toEqual([GROK]);
+    now += 60_000;
+    await chat.pullNew(GROUP, "evt-old", 10);
+    expect(http.keyGets).toEqual([GROK]);
+    now += 15 * 60 * 1000;
+    await chat.pullNew(GROUP, "evt-old", 10);
+    expect(http.keyGets).toEqual([GROK, GROK]);
+  });
+
+  it("deletes a muted non-admin from the envelope sequence when decrypt still fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const file = cachePath();
+      seedGrokKey(file, "1");
+      const http = new FakeHttp();
+      http.memberIds = [GROK];
+      http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      http.pages.push(grokPage());
+      const cipher = new EcdsaCipher();
+      cipher.acceptFreshKey = false;
+      const store = new Store(":memory:");
+      store.authorizeChat(GROUP);
+      store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const pulled = await service(http, cipher, file, { ownerId: "owner-1", globalAdminIds: ["admin-9"] }, store).pullNew(
+        GROUP,
+        "evt-old",
+        10,
+      );
+      expect(pulled.events).toHaveLength(1);
+      expect(pulled.events[0]).toMatchObject({
+        id: "evt-grok",
+        eventType: "MessageCreate",
+        senderId: GROK,
+        text: "",
+        sequenceId: "seq-99",
+        rawSequenceId: "seq-99",
+      });
+      expect(pulled.watermarkId).toBe("evt-grok");
+      expect(store.lookupChatMessage("evt-grok")?.sequenceId).toBe("seq-99");
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      const failed = lines.filter((line) => line.includes("Chat decrypt failed for event"));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toContain(GROK);
+      expect(failed[0]).toContain("evt-grok");
+      expect(failed[0]).toContain(GROUP);
+      expect(failed[0]).toContain("2026-11-18T18:00:00.000Z");
+      expect(failed[0]).toContain(GROK_KEY_VERSION);
+      expect(failed[0]).not.toContain("blob-grok");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not delete a non-muted sender or a muted admin when decrypt fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const file = cachePath();
+      seedGrokKey(file, "1");
+      const http = new FakeHttp();
+      http.memberIds = [GROK];
+      http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      http.pages.push(grokPage());
+      const cipher = new EcdsaCipher();
+      cipher.acceptFreshKey = false;
+      const open = await service(http, cipher, file).pullNew(GROUP, "evt-old", 10);
+      expect(open.events).toEqual([]);
+      expect(open.watermarkId).toBeUndefined();
+
+      const adminFile = cachePath();
+      seedGrokKey(adminFile, "1");
+      const adminHttp = new FakeHttp();
+      adminHttp.memberIds = [GROK];
+      adminHttp.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      adminHttp.pages.push(grokPage());
+      const adminStore = new Store(":memory:");
+      adminStore.authorizeChat(GROUP);
+      adminStore.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const admin = await service(
+        adminHttp,
+        new EcdsaCipher(),
+        adminFile,
+        { ownerId: GROK },
+        adminStore,
+      ).pullNew(GROUP, "evt-old", 10);
+      expect(admin.events).toEqual([]);
+      expect(admin.watermarkId).toBeUndefined();
+
+      const convoFile = cachePath();
+      seedGrokKey(convoFile, "1");
+      const convoHttp = new FakeHttp();
+      convoHttp.memberIds = [GROK];
+      convoHttp.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      convoHttp.pages.push(grokPage());
+      const convoStore = new Store(":memory:");
+      convoStore.authorizeChat(GROUP);
+      convoStore.addConversationAdmin(GROUP, GROK);
+      convoStore.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const convo = await service(convoHttp, new EcdsaCipher(), convoFile, undefined, convoStore).pullNew(
+        GROUP,
+        "evt-old",
+        10,
+      );
+      expect(convo.events).toEqual([]);
+
+      const noSeqFile = cachePath();
+      seedGrokKey(noSeqFile, "1");
+      const noSeqHttp = new FakeHttp();
+      noSeqHttp.memberIds = [GROK];
+      noSeqHttp.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      noSeqHttp.pages.push({
+        data: [
+          {
+            id: "evt-grok",
+            sender_id: GROK,
+            created_at: "2026-11-18T18:00:00.000Z",
+            encoded_event: "blob-grok",
+          },
+          { id: "evt-old", sender_id: GROK, encoded_event: "old" },
+        ],
+      });
+      const noSeqStore = new Store(":memory:");
+      noSeqStore.authorizeChat(GROUP);
+      noSeqStore.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const noSeq = await service(noSeqHttp, new EcdsaCipher(), noSeqFile, undefined, noSeqStore).pullNew(
+        GROUP,
+        "evt-old",
+        10,
+      );
+      expect(noSeq.events).toEqual([]);
+      expect(noSeq.watermarkId).toBeUndefined();
+
+      const quietFile = cachePath();
+      seedGrokKey(quietFile, "1");
+      const quietHttp = new FakeHttp();
+      quietHttp.memberIds = [GROK];
+      quietHttp.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      quietHttp.pages.push(grokPage());
+      const quietStore = new Store(":memory:");
+      quietStore.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const quiet = await service(quietHttp, new EcdsaCipher(), quietFile, undefined, quietStore).pullNew(
+        GROUP,
+        "evt-old",
+        10,
+      );
+      expect(quiet.events).toEqual([]);
+      expect(quiet.watermarkId).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("returns the envelope placeholder from Activity when the muted sender still will not decrypt", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+    const cipher = new EcdsaCipher();
+    cipher.acceptFreshKey = false;
+    cipher.error = "Message signature verification failed";
+    const store = new Store(":memory:");
+    store.authorizeChat(GROUP);
+    store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+    const events = await service(http, cipher, file, undefined, store).ingestActivity({
+      conversationId: GROUP,
+      raw: {
+        id: "evt-grok",
+        sender_id: GROK,
+        sequence_id: "seq-99",
+        created_at: "2026-11-18T18:00:00.000Z",
+        encoded_event: "blob-grok",
+      },
+      keyEvents: [],
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      senderId: GROK,
+      sequenceId: "seq-99",
+      text: "",
+    });
+    expect(http.keyGets).toEqual([GROK]);
+  });
 });
+
+function seedGrokKey(file: string, version: string): void {
+  saveRemoteKeyCache(file, {
+    users: new Map([
+      [
+        GROK,
+        {
+          fetchedAt: Date.now(),
+          keys: [aliceKey({ userId: GROK, publicKeyVersion: version })],
+          signing: [],
+        },
+      ],
+    ]),
+    conversations: new Map(),
+  });
+}
+
+function grokPage(): RawChatEventsPage {
+  return {
+    data: [
+      {
+        id: "evt-grok",
+        sender_id: GROK,
+        sequence_id: "seq-99",
+        created_at: "2026-11-18T18:00:00.000Z",
+        encoded_event: "blob-grok",
+      },
+      { id: "evt-old", sender_id: GROK, encoded_event: "old" },
+    ],
+  };
+}
