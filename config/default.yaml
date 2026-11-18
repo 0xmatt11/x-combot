@@ -23,7 +23,7 @@ rules: |
   3. Follow X's rules: https://help.x.com/rules-and-policies
 
 help: |
-  Commands. / works like !. Your command deletes after 15 minutes; the reply stays. A muted member's new command is deleted right away and is not run. Older messages stay. Admin commands: !admin.
+  Commands. / works like !. Your command deletes after 15 minutes; the reply stays. A muted member's new command is deleted right away and is not run. A mute with no duration lasts 6 hours. Older messages stay. Admin commands: !admin.
 
   Fun
   !troll @user — add them to this chat's troll list. More than one can be on it. !troll all roasts anyone who talks here. !troll shows troll-all and who is enabled. !untroll @user removes them. !untroll all clears the list and troll-all (!untroll clear). A reply to the bot, @bot, or a !request answer is not roasted
@@ -81,7 +81,7 @@ admin_help: |
   !warns @user — warning count
   !unwarn @user — remove one
   !kick @user [reason] — warn and mute. No real kick
-  !mute @user [minutes] — soft-mute. New messages and commands are deleted as they arrive. Messages already in the chat stay
+  !mute @user [minutes] — soft-mute for 6 hours when no minutes are given. New messages and commands are deleted as they arrive, including when the text cannot be decrypted. Admins are not deleted. Messages already in the chat stay
   !unmute @user — clear a mute
   !audit [n] — recent moderation actions in this group (!auditlog). Default 10, max 30
   !del [id] — delete a message when the API allows

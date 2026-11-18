@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { leaveAnnouncementText, ModerationEngine, PURGE_HISTORY_RETRY_CAP_MS } from "../src/bot/engine.js";
+import {
+  DEFAULT_MUTE_MINUTES,
+  leaveAnnouncementText,
+  ModerationEngine,
+  PURGE_HISTORY_RETRY_CAP_MS,
+} from "../src/bot/engine.js";
 import type { EngineDeps } from "../src/bot/engine.js";
 import { loadDefaults } from "../src/config.js";
 import { collectNewEvents } from "../src/poller.js";
@@ -1176,6 +1181,116 @@ describe("ModerationEngine", () => {
     expect(audit).toMatch(/delete-on-mute ok by bot-1 target u-bob/);
     expect(audit).toContain("bob-help");
     expect(audit).toContain("sequence 12");
+  });
+
+  it("mutes for 6 hours by default and still honors an explicit duration", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    const now = Date.now();
+    await engine.processEvent(
+      message({
+        id: "mute-default",
+        senderId: owner.id,
+        text: "!mute @bob",
+        conversationId: chatId,
+        sequenceId: "20",
+      }),
+    );
+    expect(client.sent.at(-1)?.text).toMatch(/soft-muted for 6 hours/);
+    expect(client.sent.at(-1)?.text).toMatch(/New messages and commands are deleted as they arrive/);
+    const muted = store.db
+      .prepare("SELECT until_ms FROM mutes WHERE conversation_id = ? AND user_id = ?")
+      .get(chatId, bob.id) as { until_ms: number };
+    expect(muted.until_ms).toBeGreaterThanOrEqual(now + DEFAULT_MUTE_MINUTES * 60_000 - 2_000);
+    expect(muted.until_ms).toBeLessThanOrEqual(Date.now() + DEFAULT_MUTE_MINUTES * 60_000 + 2_000);
+
+    await engine.processEvent(
+      message({
+        id: "mute-explicit",
+        senderId: owner.id,
+        text: "!mute @alice 15",
+        conversationId: chatId,
+        sequenceId: "21",
+      }),
+    );
+    expect(client.sent.at(-1)?.text).toMatch(/soft-muted for 15 min/);
+    const explicit = store.db
+      .prepare("SELECT until_ms FROM mutes WHERE conversation_id = ? AND user_id = ?")
+      .get(chatId, alice.id) as { until_ms: number };
+    expect(explicit.until_ms - Date.now()).toBeLessThan(16 * 60_000);
+    expect(explicit.until_ms - Date.now()).toBeGreaterThan(14 * 60_000);
+
+    const loaded = loadDefaults("config/default.yaml");
+    const readme = fs.readFileSync("README.md", "utf8");
+    expect(loaded.help).toMatch(/6 hours/);
+    expect(loaded.help).toMatch(/muted member's new command is deleted right away/);
+    expect(loaded.admin_help).toMatch(/6 hours/);
+    expect(loaded.admin_help).toMatch(/cannot be decrypted/);
+    expect(readme).toMatch(/6 hours when minutes are omitted/);
+    expect(readme).toMatch(/fails to decrypt/);
+  });
+
+  it("deletes a muted member from an envelope placeholder and keeps the history row", async () => {
+    const { engine, client, store } = setup();
+    const chatId = "g2029561975647150382";
+    store.authorizeChat(chatId);
+    store.mute(chatId, bob.id, Date.now() + 60_000, "manual");
+    const muted = await engine.processEvent(
+      message({
+        id: "bob-sealed",
+        senderId: bob.id,
+        text: "",
+        conversationId: chatId,
+        sequenceId: "44",
+        rawSequenceId: "44",
+      }),
+    );
+    expect(muted.muted).toBe(true);
+    expect(muted.deletes).toContain("bob-sealed");
+    expect(client.deleteHints.at(-1)).toMatchObject({ eventId: "bob-sealed", sequenceId: "44" });
+    const history = store.db
+      .prepare(
+        "SELECT text, deleted_by, deleted_in_x_at FROM chat_history_messages WHERE message_id = ?",
+      )
+      .get("bob-sealed") as { text: string; deleted_by: string | null; deleted_in_x_at: string | null };
+    expect(history.text).toBe("");
+    expect(history.deleted_by).toBe("mute");
+    expect(history.deleted_in_x_at).toBeTruthy();
+    const audit = store.db
+      .prepare(
+        "SELECT ok, target_id FROM moderation_audit WHERE action = 'delete-on-mute' AND target_id = ?",
+      )
+      .get(bob.id) as { ok: number; target_id: string };
+    expect(audit.ok).toBe(1);
+    expect(audit.target_id).toBe(bob.id);
+
+    const open = await engine.processEvent(
+      message({
+        id: "alice-sealed",
+        senderId: alice.id,
+        text: "",
+        conversationId: chatId,
+        sequenceId: "45",
+        rawSequenceId: "45",
+      }),
+    );
+    expect(open.muted).toBe(false);
+    expect(open.deletes).not.toContain("alice-sealed");
+    expect(client.deleted).not.toContain("alice-sealed");
+
+    store.mute(chatId, owner.id, Date.now() + 60_000, "manual");
+    await engine.processEvent(
+      message({
+        id: "owner-sealed",
+        senderId: owner.id,
+        text: "",
+        conversationId: chatId,
+        sequenceId: "46",
+        rawSequenceId: "46",
+      }),
+    );
+    expect(client.deleted).not.toContain("owner-sealed");
   });
 
   it("keeps !purge off public help", () => {

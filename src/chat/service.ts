@@ -30,6 +30,7 @@ import type {
 import { logDecryptErrors } from "./decrypt-log.js";
 import {
   MISSING_KEY_VERSION_ATTEMPTS,
+  isMissingConversationKeyError,
   latestKeyVersion,
   mergeConversationKeySets,
   missingConversationKeyVersion,
@@ -42,9 +43,10 @@ import {
   CHAT_MEDIA_TYPE_VIDEO,
   type ChatCipher,
   type ChatMediaAttachment,
+  type ConversationKeySet,
+  type DecryptEventsResult,
   type EncryptMessageOptions,
   type EncryptReplyOptions,
-  type ConversationKeySet,
   type SigningKeyEntry,
 } from "./cipher.js";
 import { loadWasmModule } from "./wasm-engine.js";
@@ -147,6 +149,13 @@ export interface ChatServiceOptions {
    * The timer is unref'd so a short script is not held open.
    */
   publicKeySummaryIntervalMs?: number;
+  /**
+   * `BOT_OWNER_ID`. Together with `globalAdminIds` and per-group admins,
+   * this sender is not mute-deleted when their ciphertext will not decrypt.
+   */
+  ownerId?: string;
+  /** `ADMIN_IDS`. Per-group admins are read from the store. */
+  globalAdminIds?: readonly string[];
 }
 
 interface DecryptBatch {
@@ -173,6 +182,15 @@ export class ChatService {
   private readonly remoteFetchedAt = new Map<string, number>();
   /** Earliest time a decrypt failure may refresh this user's keys. */
   private readonly forceRefreshAfter = new Map<string, number>();
+  /**
+   * Last time an ECDSA / signature-verification failure refreshed this sender.
+   * The next refresh waits {@link decryptRefreshMinMs}.
+   */
+  private readonly signatureRefreshedAt = new Map<string, number>();
+  /** Successful public_keys writes. A cache hit does not increment this. */
+  private readonly remoteFetchGeneration = new Map<string, number>();
+  private readonly ownerId: string;
+  private readonly globalAdminIds: readonly string[];
   /**
    * `fetchedAt` of a refresh that already ran because decrypt failed.
    * Further decrypt errors wait until the TTL replaces that fetch.
@@ -283,6 +301,8 @@ export class ChatService {
         ? Math.floor(attempts)
         : MISSING_KEY_VERSION_ATTEMPTS;
     this.publicKeySummaryIntervalMs = resolvePublicKeySummaryIntervalMs(options?.publicKeySummaryIntervalMs);
+    this.ownerId = options?.ownerId?.trim() ?? "";
+    this.globalAdminIds = options?.globalAdminIds ?? [];
     this.nextPublicKeySummaryAt = this.now() + this.publicKeySummaryIntervalMs;
     if (this.remoteKeyCachePath) this.hydrateRemoteKeyCache();
     this.armPublicKeySummary();
@@ -292,7 +312,9 @@ export class ChatService {
    * Fetch the newest page (and older pages until the watermark is found).
    * Ciphertext at or before the watermark is not decrypted again. Ciphertext
    * newer than the watermark that fails to decrypt is retried next poll — the
-   * cursor does not move past it. A failure that names a conversation-key
+   * cursor does not move past it. A muted non-admin is the exception: when the
+   * envelope still has a sender id and a sequence id, that message is returned
+   * so the engine can delete it, and the cursor moves past it. A failure that names a conversation-key
    * version this process does not hold triggers at most one older-page fetch
    * for this conversation on this poll. Each version is fetched once, then
    * waits out the cooldown stored beside the remote keys. After that version
@@ -317,7 +339,11 @@ export class ChatService {
       return { newestId, events: [], watermarkId: newestId ?? "empty" };
     }
 
-    let batch = await this.decryptPageBatch(conversationId, pages, { onlyEncoded, logErrors: false });
+    let batch = await this.decryptPageBatch(conversationId, pages, {
+      onlyEncoded,
+      logErrors: false,
+      recoverMuted: true,
+    });
     const openMissing = () =>
       missingVersionsOn(newer, batch.errorsByBlob).filter(
         (version) => !this.gaveUpKeyVersions.has(missingKeyAttemptId(conversationId, version)),
@@ -351,6 +377,7 @@ export class ChatService {
           onlyEncoded,
           logErrors: false,
           forceKeyEvents: forced,
+          recoverMuted: true,
         });
       }
       if (didFetch) this.noteMissingKeyFetches(conversationId, sought, "not_found");
@@ -399,7 +426,7 @@ export class ChatService {
       data: [input.raw],
       meta: { conversation_key_events: input.keyEvents },
     };
-    return this.decryptPages(input.conversationId, [normalizeChatPage(page)]);
+    return this.decryptPages(input.conversationId, [normalizeChatPage(page)], { recoverMuted: true });
   }
 
   /**
@@ -1109,7 +1136,7 @@ export class ChatService {
   private async decryptPages(
     conversationId: string,
     pages: RawChatEventsPage[],
-    options?: { onlyEncoded?: ReadonlySet<string> },
+    options?: { onlyEncoded?: ReadonlySet<string>; recoverMuted?: boolean },
   ): Promise<DmEvent[]> {
     return (await this.decryptPageBatch(conversationId, pages, options)).events;
   }
@@ -1122,10 +1149,24 @@ export class ChatService {
       logErrors?: boolean;
       /** Key-change blobs to include even when they were already seen. */
       forceKeyEvents?: readonly string[];
+      /**
+       * When decrypt still fails, return a placeholder MessageCreate for a
+       * muted non-admin so the engine can delete that envelope. History
+       * backfill leaves this off.
+       */
+      recoverMuted?: boolean;
     },
   ): Promise<DecryptBatch> {
-    const membersReady = await this.ensureMemberKeys(conversationId);
     const normalized = pages.map((page) => normalizeChatPage(page));
+    const generationAtEntry = new Map<string, number>();
+    for (const page of normalized) {
+      for (const raw of page.data ?? []) {
+        const senderId = raw.sender_id?.trim();
+        if (!senderId || generationAtEntry.has(senderId)) continue;
+        generationAtEntry.set(senderId, this.remoteFetchGeneration.get(senderId) ?? 0);
+      }
+    }
+    const membersReady = await this.ensureMemberKeys(conversationId);
     const includeEncoded = (raw: RawChatEvent): boolean => {
       if (!options?.onlyEncoded) return true;
       return Boolean(raw.encoded_event && options.onlyEncoded.has(raw.encoded_event));
@@ -1174,16 +1215,31 @@ export class ChatService {
     if (encoded.length === 0) return empty;
     const signingKeys = this.currentSigningKeys();
     const prior = this.conversationKeySet(conversationId);
-    const result = this.cipher.decryptEvents(
+    let result = this.cipher.decryptEvents(
       encoded,
       signingKeys.length > 0 ? signingKeys : undefined,
       prior,
     );
     this.rememberConversationKeys(conversationId, result.conversationKeys);
-    if (decryptErrorsNeedKeyRefresh(result.errors)) {
+    let errorsByBlob = errorsByEncodedBlob(encoded, result.errors);
+    const signatureSenders = sendersWithDecryptError(raws, errorsByBlob, decryptErrorNeedsSignatureRefresh);
+    if (signatureSenders.length > 0) {
+      const retry = await this.refreshSignatureKeys(signatureSenders, generationAtEntry);
+      if (retry) {
+        const retrySigning = this.currentSigningKeys();
+        const retried = this.cipher.decryptEvents(
+          encoded,
+          retrySigning.length > 0 ? retrySigning : undefined,
+          this.conversationKeySet(conversationId),
+        );
+        this.rememberConversationKeys(conversationId, retried.conversationKeys);
+        result = mergeDecryptResults(encoded, result, retried);
+        errorsByBlob = errorsByEncodedBlob(encoded, result.errors);
+      }
+    }
+    if (legacyDecryptErrorsNeedKeyRefresh(result.errors)) {
       this.noteDecryptKeyFailure(conversationId, senderIds);
     }
-    const errorsByBlob = errorsByEncodedBlob(encoded, result.errors);
     if (options?.logErrors !== false) {
       this.reportDecryptErrors(conversationId, { errors: result.errors, errorsByBlob, events: [], raws });
     }
@@ -1231,6 +1287,24 @@ export class ChatService {
         );
       }
       events.push(dm);
+    }
+    const emitted = new Set(events.map((event) => event.id));
+    for (const raw of raws) {
+      if (!raw.encoded_event) continue;
+      const error = errorsByBlob.get(raw.encoded_event);
+      if (!error) continue;
+      this.warnDecryptFailure(conversationId, raw, error);
+      if (!options?.recoverMuted || (raw.id && emitted.has(raw.id))) continue;
+      const placeholder = this.mutedDecryptFallback(conversationId, raw);
+      if (!placeholder) continue;
+      this.store.rememberChatMessage(
+        placeholder.id,
+        placeholder.conversationId,
+        placeholder.sequenceId,
+        placeholder.createdAt,
+        placeholder.rawSequenceId,
+      );
+      events.push(placeholder);
     }
     return { events, errors: result.errors, errorsByBlob, raws };
   }
@@ -1495,6 +1569,95 @@ export class ChatService {
     return forceAt !== undefined && this.now() >= forceAt;
   }
 
+  /**
+   * ECDSA / signature-verification failures name a sender whose cached signing
+   * key did not verify. Refresh that sender now and tell the caller to decrypt
+   * again. A fetch that already happened before this decrypt does not count:
+   * those keys were already used. Another refresh waits `decryptRefreshMinMs`.
+   */
+  private async refreshSignatureKeys(
+    userIds: readonly string[],
+    generationAtEntry: ReadonlyMap<string, number>,
+  ): Promise<boolean> {
+    let retry = false;
+    for (const userId of userIds) {
+      if (!userId || !this.signatureRefreshDue(userId)) continue;
+      if (this.publicKeyBackoffActive()) break;
+      const atEntry = generationAtEntry.get(userId) ?? 0;
+      const current = this.remoteFetchGeneration.get(userId) ?? 0;
+      if (current !== atEntry) {
+        this.signatureRefreshedAt.set(userId, this.now());
+        continue;
+      }
+      try {
+        await this.loadRemoteKeys(userId, { refresh: true });
+      } catch (error) {
+        if (rateLimitWaitMs(error) !== undefined) throw error;
+        log.warn(`GET /2/users/${userId}/public_keys failed during signature refresh`, error);
+        continue;
+      }
+      if ((this.remoteFetchGeneration.get(userId) ?? 0) === current) continue;
+      this.signatureRefreshedAt.set(userId, this.now());
+      retry = true;
+    }
+    return retry;
+  }
+
+  private signatureRefreshDue(userId: string): boolean {
+    const at = this.signatureRefreshedAt.get(userId);
+    if (at === undefined) return true;
+    return this.now() - at >= this.decryptRefreshMinMs;
+  }
+
+  private warnDecryptFailure(conversationId: string, raw: RawChatEvent, error: string): void {
+    if (isMissingConversationKeyError(error)) return;
+    const eventId = raw.id?.trim() || "unknown";
+    const mark = `${conversationId}\0${eventId}\0decrypt`;
+    if (this.skippedDecryptLogged.has(mark)) return;
+    this.skippedDecryptLogged.add(mark);
+    const senderId = raw.sender_id?.trim() || "unknown";
+    const createdAt = raw.created_at?.trim() || "unknown";
+    log.warn(
+      `Chat decrypt failed for event ${eventId} in ${conversationId} from sender ${senderId} created at ${createdAt} (${decryptFailureReason(error)}).`,
+    );
+  }
+
+  /**
+   * A muted non-admin whose ciphertext will not decrypt still has an envelope
+   * sequence id. The engine deletes that id and stamps a history placeholder.
+   * Admins, people who are not muted, and envelopes with no sequence stay put.
+   */
+  private mutedDecryptFallback(conversationId: string, raw: RawChatEvent): DmEvent | undefined {
+    const senderId = raw.sender_id?.trim();
+    const sequenceId = raw.sequence_id?.trim();
+    const id = raw.id?.trim();
+    if (!senderId || !sequenceId || !id) return undefined;
+    if (!this.store.isChatAuthorized(conversationId)) return undefined;
+    if (this.senderIsAdmin(conversationId, senderId)) return undefined;
+    if (!this.store.isMuted(conversationId, senderId, this.now())) return undefined;
+    return {
+      id,
+      eventType: "MessageCreate",
+      conversationId: raw.conversation_id?.trim() || conversationId,
+      ...(raw.created_at?.trim() ? { createdAt: raw.created_at.trim() } : {}),
+      senderId,
+      participantIds: [],
+      participants: [],
+      text: "",
+      mentions: [],
+      sequenceId,
+      rawSequenceId: sequenceId,
+    };
+  }
+
+  private senderIsAdmin(conversationId: string, userId: string): boolean {
+    return (
+      (this.ownerId.length > 0 && userId === this.ownerId) ||
+      this.globalAdminIds.includes(userId) ||
+      this.store.listConversationAdmins(conversationId).includes(userId)
+    );
+  }
+
   private noteDecryptKeyFailure(conversationId: string, senderIds: Iterable<string>): void {
     const ids = new Set<string>();
     for (const id of this.membersByConversation.get(conversationId) ?? []) {
@@ -1516,6 +1679,7 @@ export class ChatService {
     this.remoteByUser.set(userId, keys);
     const fetchedAt = this.now();
     this.remoteFetchedAt.set(userId, fetchedAt);
+    this.remoteFetchGeneration.set(userId, (this.remoteFetchGeneration.get(userId) ?? 0) + 1);
     this.forceRefreshAfter.delete(userId);
     if (wasForced) this.decryptRefreshedAt.set(userId, fetchedAt);
     else this.decryptRefreshedAt.delete(userId);
@@ -1795,11 +1959,87 @@ function selectLoadedKey(
   return byMaterial;
 }
 
-function decryptErrorsNeedKeyRefresh(errors: Record<string, string>): boolean {
+/** True when a decrypt error should refresh the sender's signing key and retry. */
+export function decryptErrorNeedsSignatureRefresh(message: string): boolean {
+  return /ecdsa mismatch|message signature verification failed|signature verification failed/i.test(message);
+}
+
+/**
+ * Signing-key and public-key failures, including an ECDSA mismatch.
+ * Signature failures refresh that sender immediately. The other phrases keep
+ * the delayed refresh.
+ */
+export function decryptErrorsNeedKeyRefresh(errors: Record<string, string>): boolean {
   for (const message of Object.values(errors)) {
-    if (/signing key|public key|no matching|not in available versions/i.test(message)) return true;
+    if (legacyDecryptKeyRefreshMessage(message) || decryptErrorNeedsSignatureRefresh(message)) return true;
   }
   return false;
+}
+
+function legacyDecryptErrorsNeedKeyRefresh(errors: Record<string, string>): boolean {
+  for (const message of Object.values(errors)) {
+    if (decryptErrorNeedsSignatureRefresh(message)) continue;
+    if (legacyDecryptKeyRefreshMessage(message)) return true;
+  }
+  return false;
+}
+
+function legacyDecryptKeyRefreshMessage(message: string): boolean {
+  return /signing key|public key|no matching|not in available versions/i.test(message);
+}
+
+function decryptFailureReason(error: string): string {
+  if (decryptErrorNeedsSignatureRefresh(error)) {
+    const version = error.match(/key_version=(\d+)/)?.[1];
+    return version
+      ? `ECDSA signature verification failed, key_version=${version}`
+      : "ECDSA signature verification failed";
+  }
+  const clipped = error.replace(/\s+/g, " ").trim();
+  return clipped.length > 180 ? `${clipped.slice(0, 177)}...` : clipped || "decrypt failed";
+}
+
+function sendersWithDecryptError(
+  raws: readonly RawChatEvent[],
+  errorsByBlob: ReadonlyMap<string, string>,
+  match: (message: string) => boolean,
+): string[] {
+  const ids: string[] = [];
+  for (const raw of raws) {
+    const senderId = raw.sender_id?.trim();
+    if (!senderId || !raw.encoded_event) continue;
+    const message = errorsByBlob.get(raw.encoded_event);
+    if (!message || !match(message)) continue;
+    if (!ids.includes(senderId)) ids.push(senderId);
+  }
+  return ids;
+}
+
+function mergeDecryptResults(
+  encoded: string[],
+  first: DecryptEventsResult,
+  second: DecryptEventsResult,
+): DecryptEventsResult {
+  const byBlob = new Map<string, DecryptEventsResult["messages"][number]>();
+  for (const message of first.messages) {
+    if (message.originalB64) byBlob.set(message.originalB64, message);
+  }
+  for (const message of second.messages) {
+    if (message.originalB64) byBlob.set(message.originalB64, message);
+  }
+  const firstErrors = errorsByEncodedBlob(encoded, first.errors);
+  const secondErrors = errorsByEncodedBlob(encoded, second.errors);
+  const errors: Record<string, string> = {};
+  encoded.forEach((blob, index) => {
+    if (byBlob.has(blob)) return;
+    const message = secondErrors.get(blob) ?? firstErrors.get(blob);
+    if (message) errors[String(index)] = message;
+  });
+  return {
+    messages: [...byBlob.values()],
+    errors,
+    conversationKeys: second.conversationKeys ?? first.conversationKeys,
+  };
 }
 
 function missingKeyAttemptId(conversationId: string, version: string): string {
