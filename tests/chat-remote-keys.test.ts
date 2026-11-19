@@ -205,7 +205,10 @@ class FakeHttp implements ChatHttp {
     return { messageId: "sent" };
   }
 
-  async deleteChatMessages() {
+  readonly deletes: Record<string, unknown>[] = [];
+
+  async deleteChatMessages(_conversationId?: string, body?: Record<string, unknown>) {
+    if (body) this.deletes.push(body);
     return { deleted: true };
   }
 
@@ -1696,6 +1699,401 @@ describe("public_keys fetch summary", () => {
       text: "",
     });
     expect(http.keyGets).toEqual([GROK]);
+  });
+
+  it("uses a numeric event id when sequence_id is absent", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+    const snowflake = "1987654321098765432";
+    let gets = 0;
+    const inner = http.getConversationEvents.bind(http);
+    http.getConversationEvents = async (conversationId, params) => {
+      gets += 1;
+      return inner(conversationId, params);
+    };
+    http.pages.push({
+      data: [
+        {
+          id: snowflake,
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:00.000Z",
+          encoded_event: "blob-grok",
+        },
+        { id: "evt-old", sender_id: GROK, encoded_event: "old" },
+      ],
+    });
+    const cipher = new EcdsaCipher();
+    cipher.acceptFreshKey = false;
+    const store = new Store(":memory:");
+    store.authorizeChat(GROUP);
+    store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+    const pulled = await service(http, cipher, file, undefined, store).pullNew(GROUP, "evt-old", 10);
+    expect(gets).toBe(1);
+    expect(pulled.events).toHaveLength(1);
+    expect(pulled.events[0]).toMatchObject({
+      id: snowflake,
+      senderId: GROK,
+      text: "",
+      sequenceId: snowflake,
+      rawSequenceId: snowflake,
+    });
+    expect(pulled.watermarkId).toBe(snowflake);
+  });
+
+  it("resolves a UUID-only activity event from the events list", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+    const snowflake = "1987654321098765432";
+    const closer = "1987654321098765001";
+    let gets = 0;
+    const inner = http.getConversationEvents.bind(http);
+    http.getConversationEvents = async (conversationId, params) => {
+      gets += 1;
+      return inner(conversationId, params);
+    };
+    http.pages.push({
+      data: [
+        {
+          id: closer,
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:00.200Z",
+          encoded_event: "other-blob",
+        },
+        {
+          id: snowflake,
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:04.000Z",
+          encoded_event: "blob-grok",
+        },
+      ],
+    });
+    const cipher = new EcdsaCipher();
+    cipher.acceptFreshKey = false;
+    const store = new Store(":memory:");
+    store.authorizeChat(GROUP);
+    store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+    const events = await service(http, cipher, file, undefined, store).ingestActivity({
+      conversationId: GROUP,
+      raw: {
+        id: "550e8400-e29b-41d4-a716-446655440000",
+        sender_id: GROK,
+        created_at: "2026-11-18T18:00:00.000Z",
+        encoded_event: "blob-grok",
+      },
+      keyEvents: [],
+    });
+    expect(gets).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      senderId: GROK,
+      text: "",
+      sequenceId: snowflake,
+      rawSequenceId: snowflake,
+    });
+    expect(events[0]?.aliasIds).toContain(snowflake);
+  });
+
+  it("resolves a UUID by the closest sender time when the ciphertext does not match", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+    http.pages.push({
+      data: [
+        {
+          id: "444",
+          sender_id: "someone-else",
+          created_at: "2026-11-18T18:00:00.200Z",
+          encoded_event: "other-d",
+        },
+        {
+          id: "111",
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:01.000Z",
+          encoded_event: "other-a",
+        },
+        {
+          id: "222",
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:04.000Z",
+          encoded_event: "other-b",
+        },
+        {
+          id: "333",
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:09.000Z",
+          encoded_event: "other-c",
+        },
+      ],
+    });
+    const cipher = new EcdsaCipher();
+    cipher.acceptFreshKey = false;
+    const store = new Store(":memory:");
+    store.authorizeChat(GROUP);
+    store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+    const events = await service(http, cipher, file, undefined, store).ingestActivity({
+      conversationId: GROUP,
+      raw: {
+        id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        sender_id: GROK,
+        created_at: "2026-11-18T18:00:00.000Z",
+        encoded_event: "blob-grok",
+      },
+      keyEvents: [],
+    });
+    expect(events[0]?.sequenceId).toBe("111");
+  });
+
+  it("backs off a muted snowflake lookup after 429 and does not loop", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const file = cachePath();
+      seedGrokKey(file, "1");
+      const http = new FakeHttp();
+      http.memberIds = [GROK];
+      http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      let now = 5_000_000;
+      let attempts = 0;
+      const snowflake = "1987654321098765432";
+      http.getConversationEvents = async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error("Rate limited; retry after 5000ms"), {
+            status: 429,
+            retryAfterMs: 5_000,
+          });
+        }
+        return {
+          data: [
+            {
+              id: snowflake,
+              sender_id: GROK,
+              created_at: "2026-11-18T18:00:00.000Z",
+              encoded_event: "blob-grok",
+            },
+          ],
+        };
+      };
+      const cipher = new EcdsaCipher();
+      cipher.acceptFreshKey = false;
+      const store = new Store(":memory:");
+      store.authorizeChat(GROUP);
+      store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const chat = service(http, cipher, file, { now: () => now }, store);
+      const activity = (id: string) =>
+        chat.ingestActivity({
+          conversationId: GROUP,
+          raw: {
+            id,
+            sender_id: GROK,
+            created_at: "2026-11-18T18:00:00.000Z",
+            encoded_event: "blob-grok",
+          },
+          keyEvents: [],
+        });
+      expect(await activity("uuid-rate-1")).toEqual([]);
+      expect(attempts).toBe(1);
+      expect(await activity("uuid-rate-2")).toEqual([]);
+      expect(attempts).toBe(1);
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines.some((line) => line.includes("lookup failed; rate limited, retry after 5000ms"))).toBe(true);
+      expect(lines.some((line) => /lookup skipped; rate-limit backoff has \d+ms left/.test(line))).toBe(true);
+      now += 5_000;
+      const resolved = await activity("uuid-rate-3");
+      expect(attempts).toBe(2);
+      expect(resolved[0]?.sequenceId).toBe(snowflake);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not post the same muted snowflake twice", async () => {
+    const file = cachePath();
+    seedGrokKey(file, "1");
+    const http = new FakeHttp();
+    http.memberIds = [GROK];
+    http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+    const snowflake = "1987654321098765432";
+    const list = {
+      data: [
+        {
+          id: snowflake,
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:00.200Z",
+          encoded_event: "blob-grok",
+        },
+        { id: "evt-old", sender_id: GROK, encoded_event: "old" },
+      ],
+    };
+    http.pages.push(list, list);
+    const cipher = new EcdsaCipher();
+    cipher.acceptFreshKey = false;
+    const store = new Store(":memory:");
+    store.authorizeChat(GROUP);
+    store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+    const chat = service(http, cipher, file, undefined, store);
+    const activity = await chat.ingestActivity({
+      conversationId: GROUP,
+      raw: {
+        id: "550e8400-e29b-41d4-a716-446655440000",
+        sender_id: GROK,
+        created_at: "2026-11-18T18:00:00.000Z",
+        encoded_event: "blob-grok",
+      },
+      keyEvents: [],
+    });
+    const polled = await chat.pullNew(GROUP, "evt-old", 10);
+    expect(activity[0]?.sequenceId).toBe(snowflake);
+    expect(polled.events[0]?.sequenceId).toBe(snowflake);
+    const first = await chat.deleteEvent(activity[0]!.id, {
+      conversationId: GROUP,
+      sequenceId: activity[0]!.sequenceId,
+    });
+    const second = await chat.deleteEvent(polled.events[0]!.id, {
+      conversationId: GROUP,
+      sequenceId: polled.events[0]!.sequenceId,
+    });
+    expect(first.deleted).toBe(true);
+    expect(second.deleted).toBe(true);
+    expect(http.deletes.map((body) => body.sequence_ids)).toEqual([[snowflake]]);
+  });
+
+  it("logs why a muted decrypt fallback was skipped", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const reasons = async (
+        label: string,
+        prepare: (http: FakeHttp, store: Store) => void,
+        raw: {
+          id?: string;
+          sender_id?: string;
+          created_at?: string;
+          encoded_event?: string;
+          sequence_id?: string;
+        },
+        options?: { ownerId?: string; globalAdminIds?: string[] },
+      ): Promise<string[]> => {
+        const file = cachePath();
+        seedGrokKey(file, "1");
+        const http = new FakeHttp();
+        http.memberIds = [GROK];
+        http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+        const store = new Store(":memory:");
+        prepare(http, store);
+        const cipher = new EcdsaCipher();
+        cipher.acceptFreshKey = false;
+        let gets = 0;
+        const inner = http.getConversationEvents.bind(http);
+        http.getConversationEvents = async (conversationId, params) => {
+          gets += 1;
+          return inner(conversationId, params);
+        };
+        const before = warn.mock.calls.length;
+        await service(http, cipher, file, options, store).ingestActivity({
+          conversationId: GROUP,
+          raw,
+          keyEvents: [],
+        });
+        const lines = warn.mock.calls.slice(before).map((call) => String(call[0]));
+        return [...lines, `gets:${gets}`, label];
+      };
+      const created = "2026-11-18T18:00:00.000Z";
+      const uuid = "550e8400-e29b-41d4-a716-446655440000";
+      const blob = { created_at: created, encoded_event: "blob-grok" };
+
+      const noSender = await reasons("no-sender", (http, store) => {
+        store.authorizeChat(GROUP);
+        store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+        http.pages.push({ data: [] });
+      }, { id: uuid, ...blob });
+      expect(noSender.some((line) => line.includes("no sender id"))).toBe(true);
+      expect(noSender).toContain("gets:0");
+
+      const noId = await reasons("no-id", (_http, store) => {
+        store.authorizeChat(GROUP);
+        store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      }, { sender_id: GROK, ...blob });
+      expect(noId.some((line) => line.includes("no event id"))).toBe(true);
+
+      const unauthorized = await reasons("unauthorized", (_http, store) => {
+        store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      }, { id: uuid, sender_id: GROK, ...blob });
+      expect(unauthorized.some((line) => line.includes("conversation is not authorized"))).toBe(true);
+      expect(unauthorized).toContain("gets:0");
+
+      const notMuted = await reasons("not-muted", (_http, store) => {
+        store.authorizeChat(GROUP);
+      }, { id: uuid, sender_id: GROK, sequence_id: "seq-99", ...blob });
+      expect(notMuted.some((line) => line.includes("sender is not muted"))).toBe(true);
+      expect(notMuted).toContain("gets:0");
+
+      const owner = await reasons(
+        "owner",
+        (_http, store) => {
+          store.authorizeChat(GROUP);
+          store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+        },
+        { id: uuid, sender_id: GROK, ...blob },
+        { ownerId: GROK },
+      );
+      expect(owner.some((line) => line.includes("sender is an admin"))).toBe(true);
+      expect(owner).toContain("gets:0");
+
+      const globalAdmin = await reasons(
+        "global-admin",
+        (_http, store) => {
+          store.authorizeChat(GROUP);
+          store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+        },
+        { id: uuid, sender_id: GROK, ...blob },
+        { globalAdminIds: [GROK] },
+      );
+      expect(globalAdmin.some((line) => line.includes("sender is an admin"))).toBe(true);
+
+      const convoAdmin = await reasons("convo-admin", (_http, store) => {
+        store.authorizeChat(GROUP);
+        store.addConversationAdmin(GROUP, GROK);
+        store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      }, { id: uuid, sender_id: GROK, ...blob });
+      expect(convoAdmin.some((line) => line.includes("sender is an admin"))).toBe(true);
+      expect(convoAdmin).toContain("gets:0");
+
+      const missing = await reasons("missing", (http, store) => {
+        store.authorizeChat(GROUP);
+        store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+        http.pages.push({
+          data: [
+            {
+              id: "444",
+              sender_id: "someone-else",
+              created_at: created,
+              encoded_event: "other",
+            },
+          ],
+        });
+      }, { id: uuid, sender_id: GROK, ...blob });
+      expect(missing.some((line) => line.includes("no resolvable snowflake id"))).toBe(true);
+      expect(missing).toContain("gets:1");
+
+      const failed = await reasons("lookup-failed", (http, store) => {
+        store.authorizeChat(GROUP);
+        store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+        http.getConversationEvents = async () => {
+          throw new Error("socket hang up");
+        };
+      }, { id: "6ba7b811-9dad-11d1-80b4-00c04fd430c8", sender_id: GROK, ...blob });
+      expect(failed.some((line) => line.includes("lookup failed: socket hang up"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
