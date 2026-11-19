@@ -51,7 +51,7 @@ import {
 } from "./cipher.js";
 import { loadWasmModule } from "./wasm-engine.js";
 import type { ChatHttp, RawChatEvent, RawChatEventsPage } from "./http.js";
-import { chatEventToDm } from "./normalize.js";
+import { chatEventToDm, cipherReplayKey } from "./normalize.js";
 import { newestRawId, nextWatermarkId, normalizeChatPage, rawEventsAfterWatermark } from "./raw.js";
 import {
   DECRYPT_KEY_REFRESH_MIN_MS,
@@ -81,6 +81,11 @@ const MIN_PUBLIC_KEY_SUMMARY_INTERVAL_MS = 60 * 1000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /** Key-change blobs kept for a later decrypt. This is not an HTTP retry loop. */
 const MAX_PENDING_KEY_BLOBS = 80;
+/** Activity `created_at` and the events-list copy of the same message can differ by this much. */
+const MUTED_SNOWFLAKE_WINDOW_MS = 5_000;
+/** One events-list page when an Activity UUID has to be matched to a snowflake. */
+const MUTED_LOOKUP_MAX_RESULTS = 50;
+const SNOWFLAKE_ID = /^\d+$/;
 
 /**
  * Max length of the base64 raw event passed as `replyToEvent`.
@@ -228,6 +233,15 @@ export class ChatService {
   private publicKeyBlockedUntil = 0;
   /** After a delete 429/402, skip further delete calls until this time. */
   private deleteBlockedUntil = 0;
+  /** After an events-list 429/402 while resolving a muted snowflake. */
+  private mutedLookupBlockedUntil = 0;
+  /**
+   * Sequence ids handed to the engine for a muted decrypt fallback.
+   * A later sight of the same id is not posted to X again.
+   */
+  private readonly muteDeleteIds = new Set<string>();
+  /** Mute sequence ids X already accepted. A second delete is a no-op. */
+  private readonly muteDeletedIds = new Set<string>();
   /**
    * Last successful public_keys GET. Seeded from the newest cached `fetched_at`
    * so a restart does not look like the route has been idle.
@@ -313,8 +327,10 @@ export class ChatService {
    * Ciphertext at or before the watermark is not decrypted again. Ciphertext
    * newer than the watermark that fails to decrypt is retried next poll — the
    * cursor does not move past it. A muted non-admin is the exception: when the
-   * envelope still has a sender id and a sequence id, that message is returned
-   * so the engine can delete it, and the cursor moves past it. A failure that names a conversation-key
+   * envelope has a sender id and a deletable sequence id (the envelope
+   * `sequence_id`, a numeric event id, or a snowflake resolved from the events
+   * list), that message is returned so the engine can delete it, and the cursor
+   * moves past it. A failure that names a conversation-key
    * version this process does not hold triggers at most one older-page fetch
    * for this conversation on this poll. Each version is fetched once, then
    * waits out the cooldown stored beside the remote keys. After that version
@@ -343,6 +359,7 @@ export class ChatService {
       onlyEncoded,
       logErrors: false,
       recoverMuted: true,
+      eventsList: true,
     });
     const openMissing = () =>
       missingVersionsOn(newer, batch.errorsByBlob).filter(
@@ -378,6 +395,7 @@ export class ChatService {
           logErrors: false,
           forceKeyEvents: forced,
           recoverMuted: true,
+          eventsList: true,
         });
       }
       if (didFetch) this.noteMissingKeyFetches(conversationId, sought, "not_found");
@@ -836,9 +854,15 @@ export class ChatService {
         result.missingSequenceIds.push(eventId);
         continue;
       }
+      const postedId = sequenceId || rawSequenceId!;
+      if (this.muteDeletedIds.has(postedId)) {
+        result.deletedIds.push(eventId);
+        this.logMutedDeleteReplay(conversationId, eventId, postedId);
+        continue;
+      }
       ready.push({
         eventId,
-        sequenceId: sequenceId || rawSequenceId!,
+        sequenceId: postedId,
         ...(rawSequenceId ? { rawSequenceId } : {}),
       });
     }
@@ -927,7 +951,12 @@ export class ChatService {
           splittable: true,
         });
       }
-      for (const target of targets) result.deletedIds.push(target.eventId);
+      for (const target of targets) {
+        result.deletedIds.push(target.eventId);
+        if (this.muteDeleteIds.has(target.sequenceId)) this.muteDeletedIds.add(target.sequenceId);
+        const raw = target.rawSequenceId?.trim();
+        if (raw && this.muteDeleteIds.has(raw)) this.muteDeletedIds.add(raw);
+      }
       return "ok";
     } catch (error) {
       const wait = deleteRetryAfterMs(error);
@@ -1155,6 +1184,11 @@ export class ChatService {
        * backfill leaves this off.
        */
       recoverMuted?: boolean;
+      /**
+       * `pages` already came from `GET /2/chat/conversations/:id/events`.
+       * A UUID on that list is not fetched again.
+       */
+      eventsList?: boolean;
     },
   ): Promise<DecryptBatch> {
     const normalized = pages.map((page) => normalizeChatPage(page));
@@ -1289,13 +1323,17 @@ export class ChatService {
       events.push(dm);
     }
     const emitted = new Set(events.map((event) => event.id));
+    const known = normalized.flatMap((page) => page.data ?? []);
     for (const raw of raws) {
       if (!raw.encoded_event) continue;
       const error = errorsByBlob.get(raw.encoded_event);
       if (!error) continue;
       this.warnDecryptFailure(conversationId, raw, error);
       if (!options?.recoverMuted || (raw.id && emitted.has(raw.id))) continue;
-      const placeholder = this.mutedDecryptFallback(conversationId, raw);
+      const placeholder = await this.mutedDecryptFallback(conversationId, raw, {
+        known,
+        eventsList: options?.eventsList === true,
+      });
       if (!placeholder) continue;
       this.store.rememberChatMessage(
         placeholder.id,
@@ -1623,18 +1661,43 @@ export class ChatService {
   }
 
   /**
-   * A muted non-admin whose ciphertext will not decrypt still has an envelope
-   * sequence id. The engine deletes that id and stamps a history placeholder.
-   * Admins, people who are not muted, and envelopes with no sequence stay put.
+   * A muted non-admin whose ciphertext will not decrypt is still deleted.
+   * The sequence id is the envelope `sequence_id`, the numeric event id, or a
+   * snowflake matched on the conversation events list. The engine deletes that
+   * id and stamps a history placeholder. Every skip is logged.
    */
-  private mutedDecryptFallback(conversationId: string, raw: RawChatEvent): DmEvent | undefined {
+  private async mutedDecryptFallback(
+    conversationId: string,
+    raw: RawChatEvent,
+    options: { known: readonly RawChatEvent[]; eventsList: boolean },
+  ): Promise<DmEvent | undefined> {
     const senderId = raw.sender_id?.trim();
-    const sequenceId = raw.sequence_id?.trim();
     const id = raw.id?.trim();
-    if (!senderId || !sequenceId || !id) return undefined;
-    if (!this.store.isChatAuthorized(conversationId)) return undefined;
-    if (this.senderIsAdmin(conversationId, senderId)) return undefined;
-    if (!this.store.isMuted(conversationId, senderId, this.now())) return undefined;
+    if (!senderId) {
+      this.logMutedFallbackSkip(conversationId, raw, "no sender id", "no-sender");
+      return undefined;
+    }
+    if (!id) {
+      this.logMutedFallbackSkip(conversationId, raw, "no event id", "no-id");
+      return undefined;
+    }
+    if (!this.store.isChatAuthorized(conversationId)) {
+      this.logMutedFallbackSkip(conversationId, raw, "conversation is not authorized", "unauthorized");
+      return undefined;
+    }
+    if (this.senderIsAdmin(conversationId, senderId)) {
+      this.logMutedFallbackSkip(conversationId, raw, "sender is an admin", "admin");
+      return undefined;
+    }
+    if (!this.store.isMuted(conversationId, senderId, this.now())) {
+      this.logMutedFallbackSkip(conversationId, raw, "sender is not muted", "not-muted");
+      return undefined;
+    }
+    const resolved = await this.resolveMutedSequenceId(conversationId, raw, options);
+    if (!resolved) return undefined;
+    this.muteDeleteIds.add(resolved.sequenceId);
+    this.logMutedFallbackHit(conversationId, raw, senderId, resolved.sequenceId, resolved.via);
+    const aliasIds = mutedPlaceholderAliases(raw, id, resolved.sequenceId);
     return {
       id,
       eventType: "MessageCreate",
@@ -1645,9 +1708,135 @@ export class ChatService {
       participants: [],
       text: "",
       mentions: [],
-      sequenceId,
-      rawSequenceId: sequenceId,
+      sequenceId: resolved.sequenceId,
+      rawSequenceId: resolved.sequenceId,
+      ...(aliasIds ? { aliasIds } : {}),
     };
+  }
+
+  /**
+   * Delete-for-all needs the numeric snowflake. Activity `chat.received` carries
+   * a UUID `id` and no `sequence_id`. The events list keeps that snowflake in `id`.
+   */
+  private async resolveMutedSequenceId(
+    conversationId: string,
+    raw: RawChatEvent,
+    options: { known: readonly RawChatEvent[]; eventsList: boolean },
+  ): Promise<{ sequenceId: string; via: string } | undefined> {
+    const explicit = raw.sequence_id?.trim();
+    if (explicit) return { sequenceId: explicit, via: "sequence_id" };
+    const id = raw.id?.trim();
+    if (isSnowflakeId(id)) return { sequenceId: id, via: "numeric event id" };
+    const known = matchMutedSnowflake(raw, options.known);
+    if (known) return { sequenceId: known, via: "events-list snowflake" };
+    if (options.eventsList) {
+      this.logMutedFallbackSkip(conversationId, raw, "no resolvable snowflake id", "no-snowflake");
+      return undefined;
+    }
+    const looked = await this.lookupMutedSnowflake(conversationId, raw);
+    if (!looked.snowflake) {
+      this.logMutedFallbackSkip(
+        conversationId,
+        raw,
+        looked.skip ?? "no resolvable snowflake id",
+        looked.dedupeKey ?? "no-snowflake",
+      );
+      return undefined;
+    }
+    return { sequenceId: looked.snowflake, via: "events-list snowflake" };
+  }
+
+  /**
+   * One `GET /2/chat/conversations/:id/events`. A 429/402 arms a backoff and
+   * does not retry inside this call. An events-list page the poller already
+   * loaded is not fetched again.
+   */
+  private async lookupMutedSnowflake(
+    conversationId: string,
+    raw: RawChatEvent,
+  ): Promise<{ snowflake?: string; skip?: string; dedupeKey?: string }> {
+    const blocked = this.mutedLookupBackoffMs();
+    if (blocked > 0) {
+      return {
+        skip: `lookup skipped; rate-limit backoff has ${blocked}ms left`,
+        dedupeKey: "backoff",
+      };
+    }
+    let page: RawChatEventsPage;
+    try {
+      page = normalizeChatPage(
+        await this.http.getConversationEvents(conversationId, {
+          maxResults: MUTED_LOOKUP_MAX_RESULTS,
+        }),
+      );
+    } catch (error) {
+      const wait = rateLimitWaitMs(error);
+      if (wait !== undefined) {
+        this.mutedLookupBlockedUntil = Math.max(this.mutedLookupBlockedUntil, this.now() + wait);
+        return {
+          skip: `lookup failed; rate limited, retry after ${wait}ms`,
+          dedupeKey: "rate-limited",
+        };
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return { skip: `lookup failed: ${clipReason(message)}`, dedupeKey: "lookup-failed" };
+    }
+    const snowflake = matchMutedSnowflake(raw, page.data ?? []);
+    if (!snowflake) return { skip: "no resolvable snowflake id", dedupeKey: "no-snowflake" };
+    return { snowflake };
+  }
+
+  /** Events-list reads stay quiet while public_keys, delete, or this lookup is backed off. */
+  private mutedLookupBackoffMs(): number {
+    const now = this.now();
+    return Math.max(
+      0,
+      this.mutedLookupBlockedUntil - now,
+      this.publicKeyBlockedUntil - now,
+      this.deleteBlockedUntil - now,
+    );
+  }
+
+  private logMutedFallbackSkip(
+    conversationId: string,
+    raw: RawChatEvent,
+    reason: string,
+    dedupeKey: string,
+  ): void {
+    const eventId = raw.id?.trim() || "unknown";
+    const mark = `${conversationId}\0${eventId}\0mute-skip\0${dedupeKey}`;
+    if (this.skippedDecryptLogged.has(mark)) return;
+    this.skippedDecryptLogged.add(mark);
+    const sender = raw.sender_id?.trim();
+    const who = sender ? ` from sender ${sender}` : "";
+    log.warn(
+      `Muted decrypt fallback skipped for event ${eventId} in ${conversationId}${who}: ${reason}.`,
+    );
+  }
+
+  private logMutedFallbackHit(
+    conversationId: string,
+    raw: RawChatEvent,
+    senderId: string,
+    sequenceId: string,
+    via: string,
+  ): void {
+    const eventId = raw.id?.trim() || "unknown";
+    const mark = `${conversationId}\0${eventId}\0mute-hit`;
+    if (this.skippedDecryptLogged.has(mark)) return;
+    this.skippedDecryptLogged.add(mark);
+    log.info(
+      `Muted decrypt fallback using ${via} ${sequenceId} for event ${eventId} in ${conversationId} from sender ${senderId}.`,
+    );
+  }
+
+  private logMutedDeleteReplay(conversationId: string, eventId: string, sequenceId: string): void {
+    const mark = `${conversationId}\0${eventId}\0mute-replay\0${sequenceId}`;
+    if (this.skippedDecryptLogged.has(mark)) return;
+    this.skippedDecryptLogged.add(mark);
+    log.info(
+      `Muted decrypt fallback already deleted sequence ${sequenceId} in ${conversationId}; skipping a second delete of event ${eventId}.`,
+    );
   }
 
   private senderIsAdmin(conversationId: string, userId: string): boolean {
@@ -2135,6 +2324,74 @@ function resolvePublicKeySummaryIntervalMs(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_PUBLIC_KEY_SUMMARY_INTERVAL_MS;
   if (value < MIN_PUBLIC_KEY_SUMMARY_INTERVAL_MS) return MIN_PUBLIC_KEY_SUMMARY_INTERVAL_MS;
   return value;
+}
+
+function isSnowflakeId(value: string | undefined): value is string {
+  return Boolean(value && SNOWFLAKE_ID.test(value));
+}
+
+function snowflakeOf(raw: RawChatEvent): string | undefined {
+  const id = raw.id?.trim();
+  if (isSnowflakeId(id)) return id;
+  const sequence = raw.sequence_id?.trim();
+  if (isSnowflakeId(sequence)) return sequence;
+  return undefined;
+}
+
+function createdAtMillis(raw: RawChatEvent): number | undefined {
+  const text = raw.created_at?.trim();
+  if (!text) return undefined;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * Snowflakes for one Activity envelope. An equal `encoded_event` wins.
+ * A timestamp match is only for a row that has no ciphertext. A different
+ * `encoded_event` is another message, so it is not this snowflake. The
+ * catch-up poll deletes the real id once the events list shows it.
+ */
+function matchMutedSnowflake(needle: RawChatEvent, candidates: readonly RawChatEvent[]): string | undefined {
+  const encoded = needle.encoded_event?.trim();
+  const sender = needle.sender_id?.trim();
+  const needleMs = createdAtMillis(needle);
+  const needleId = needle.id?.trim();
+  let encodedHit: { snowflake: string; distance: number } | undefined;
+  let timeHit: { snowflake: string; distance: number } | undefined;
+  for (const raw of candidates) {
+    const rawId = raw.id?.trim();
+    if (needleId && rawId === needleId) continue;
+    const snowflake = snowflakeOf(raw);
+    if (!snowflake || snowflake === needleId) continue;
+    const candidateBlob = raw.encoded_event?.trim();
+    const sameBlob = Boolean(encoded && candidateBlob === encoded);
+    const rawMs = createdAtMillis(raw);
+    const distance = needleMs !== undefined && rawMs !== undefined ? Math.abs(rawMs - needleMs) : undefined;
+    if (sameBlob) {
+      const rank = distance ?? Number.POSITIVE_INFINITY;
+      if (!encodedHit || rank < encodedHit.distance) encodedHit = { snowflake, distance: rank };
+      continue;
+    }
+    if (encoded && candidateBlob && candidateBlob !== encoded) continue;
+    if (!sender || raw.sender_id?.trim() !== sender) continue;
+    if (distance === undefined || distance > MUTED_SNOWFLAKE_WINDOW_MS) continue;
+    if (!timeHit || distance < timeHit.distance) timeHit = { snowflake, distance };
+  }
+  return encodedHit?.snowflake ?? timeHit?.snowflake;
+}
+
+function mutedPlaceholderAliases(raw: RawChatEvent, eventId: string, sequenceId: string): string[] | undefined {
+  const aliasIds: string[] = [];
+  const cipher = cipherReplayKey(raw.encoded_event);
+  if (cipher) aliasIds.push(cipher);
+  if (isSnowflakeId(sequenceId) && sequenceId !== eventId) aliasIds.push(sequenceId);
+  return aliasIds.length > 0 ? aliasIds : undefined;
+}
+
+function clipReason(message: string): string {
+  const clipped = message.replace(/\s+/g, " ").trim();
+  if (!clipped) return "lookup failed";
+  return clipped.length > 180 ? `${clipped.slice(0, 177)}...` : clipped;
 }
 
 function rateLimitWaitMs(error: unknown): number | undefined {
