@@ -1800,7 +1800,66 @@ describe("public_keys fetch summary", () => {
     expect(events[0]?.aliasIds).toContain(snowflake);
   });
 
-  it("resolves a UUID by the closest sender time when the ciphertext does not match", async () => {
+  it("does not treat a nearby different ciphertext as this muted message", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const file = cachePath();
+      seedGrokKey(file, "1");
+      const http = new FakeHttp();
+      http.memberIds = [GROK];
+      http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
+      http.pages.push({
+        data: [
+          {
+            id: "444",
+            sender_id: "someone-else",
+            created_at: "2026-11-18T18:00:00.200Z",
+            encoded_event: "other-d",
+          },
+          {
+            id: "111",
+            sender_id: GROK,
+            created_at: "2026-11-18T18:00:01.000Z",
+            encoded_event: "other-a",
+          },
+          {
+            id: "222",
+            sender_id: GROK,
+            created_at: "2026-11-18T18:00:04.000Z",
+            encoded_event: "other-b",
+          },
+          {
+            id: "333",
+            sender_id: GROK,
+            created_at: "2026-11-18T18:00:09.000Z",
+            encoded_event: "other-c",
+          },
+        ],
+      });
+      const cipher = new EcdsaCipher();
+      cipher.acceptFreshKey = false;
+      const store = new Store(":memory:");
+      store.authorizeChat(GROUP);
+      store.mute(GROUP, GROK, Date.now() + 60_000, "manual");
+      const events = await service(http, cipher, file, undefined, store).ingestActivity({
+        conversationId: GROUP,
+        raw: {
+          id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+          sender_id: GROK,
+          created_at: "2026-11-18T18:00:00.000Z",
+          encoded_event: "blob-grok",
+        },
+        keyEvents: [],
+      });
+      expect(events).toEqual([]);
+      const lines = warn.mock.calls.map((call) => String(call[0]));
+      expect(lines.some((line) => line.includes("no resolvable snowflake id"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("uses sender time only when the nearby row has no ciphertext", async () => {
     const file = cachePath();
     seedGrokKey(file, "1");
     const http = new FakeHttp();
@@ -1808,12 +1867,6 @@ describe("public_keys fetch summary", () => {
     http.keysByUser.set(GROK, [aliceKey({ userId: GROK, publicKeyVersion: "still-old" })]);
     http.pages.push({
       data: [
-        {
-          id: "444",
-          sender_id: "someone-else",
-          created_at: "2026-11-18T18:00:00.200Z",
-          encoded_event: "other-d",
-        },
         {
           id: "111",
           sender_id: GROK,
@@ -1824,13 +1877,11 @@ describe("public_keys fetch summary", () => {
           id: "222",
           sender_id: GROK,
           created_at: "2026-11-18T18:00:04.000Z",
-          encoded_event: "other-b",
         },
         {
           id: "333",
           sender_id: GROK,
           created_at: "2026-11-18T18:00:09.000Z",
-          encoded_event: "other-c",
         },
       ],
     });
@@ -1849,7 +1900,7 @@ describe("public_keys fetch summary", () => {
       },
       keyEvents: [],
     });
-    expect(events[0]?.sequenceId).toBe("111");
+    expect(events[0]?.sequenceId).toBe("222");
   });
 
   it("backs off a muted snowflake lookup after 429 and does not loop", async () => {

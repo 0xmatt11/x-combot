@@ -2347,8 +2347,9 @@ function createdAtMillis(raw: RawChatEvent): number | undefined {
 
 /**
  * Snowflakes for one Activity envelope. An equal `encoded_event` wins.
- * Otherwise the same sender and the closest `created_at` inside
- * {@link MUTED_SNOWFLAKE_WINDOW_MS}.
+ * A timestamp match is only for a row that has no ciphertext. A different
+ * `encoded_event` is another message, so it is not this snowflake. The
+ * catch-up poll deletes the real id once the events list shows it.
  */
 function matchMutedSnowflake(needle: RawChatEvent, candidates: readonly RawChatEvent[]): string | undefined {
   const encoded = needle.encoded_event?.trim();
@@ -2362,7 +2363,8 @@ function matchMutedSnowflake(needle: RawChatEvent, candidates: readonly RawChatE
     if (needleId && rawId === needleId) continue;
     const snowflake = snowflakeOf(raw);
     if (!snowflake || snowflake === needleId) continue;
-    const sameBlob = Boolean(encoded && raw.encoded_event?.trim() === encoded);
+    const candidateBlob = raw.encoded_event?.trim();
+    const sameBlob = Boolean(encoded && candidateBlob === encoded);
     const rawMs = createdAtMillis(raw);
     const distance = needleMs !== undefined && rawMs !== undefined ? Math.abs(rawMs - needleMs) : undefined;
     if (sameBlob) {
@@ -2370,6 +2372,7 @@ function matchMutedSnowflake(needle: RawChatEvent, candidates: readonly RawChatE
       if (!encodedHit || rank < encodedHit.distance) encodedHit = { snowflake, distance: rank };
       continue;
     }
+    if (encoded && candidateBlob && candidateBlob !== encoded) continue;
     if (!sender || raw.sender_id?.trim() !== sender) continue;
     if (distance === undefined || distance > MUTED_SNOWFLAKE_WINDOW_MS) continue;
     if (!timeHit || distance < timeHit.distance) timeHit = { snowflake, distance };
