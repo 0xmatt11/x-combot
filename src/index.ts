@@ -346,10 +346,14 @@ async function main(): Promise<void> {
     getUserById: (userId) => xClient.getUserById(userId),
     sendMessage: (conversationId, text, caption) =>
       xClient.sendMessage(conversationId, text, caption),
+    lookupSenderLabel: (userId) => engine.lookupSenderLabel(userId),
+    isAuthorized: (conversationId) => store.isChatAuthorized(conversationId),
+    listAuthorized: () => store.listChatAuthorizations(),
+    runCommand: (request) => engine.runQueuedCommand(request),
   });
   notificationPoller.start();
   log.info(
-    `Ready notifications: drop JSON in ${readyNotifications.pending}. Sent files move to done/; failures move to failed/.`,
+    `Ready notifications: drop JSON in ${readyNotifications.pending}. Sent files move to done/; failures move to failed/. A file with "run": true executes an allowlisted command such as !milady.`,
   );
 
   const intervalMs = env.pollIntervalMs ?? defaults.poll.interval_ms;

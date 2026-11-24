@@ -3,6 +3,7 @@ import path from "node:path";
 import { isChatGroupId } from "../chat/ids.js";
 import { log } from "../log.js";
 import type { MediaCaption } from "../types.js";
+import { parseCommand } from "./parser.js";
 
 /** How often the live process checks `pending/`. */
 export const NOTIFICATION_POLL_INTERVAL_MS = 5_000;
@@ -13,22 +14,46 @@ export const NOTIFICATION_BATCH = 20;
 const TEXT_MAX = 500;
 const RAW_MAX = 2_000;
 const REASON_MAX = 300;
+const CONVERSATION_LIST_MAX = 100;
 const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$/;
 const COMMAND_NAME = /^!?[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const USER_ID = /^\d{1,25}$/;
 const HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 
+/** A conversation send returned this when the bot is no longer in the group. */
+export const NOT_IN_GROUP_REASON = "Bot is not in that group (404).";
+
+export const NOT_AUTHORIZED_REASON = "Conversation is not authorized.";
+
+/**
+ * Commands a queue file may execute. Owner and admin commands (`!auth`,
+ * `!purge`, `!warn`, `!kick`, `!mute`, `!admin`, `!set`, and the rest of
+ * that set) are not included, so a file cannot run them even when `userId`
+ * is the owner. Add a name here to allow it.
+ */
+export const QUEUE_RUN_COMMANDS: ReadonlySet<string> = new Set(["milady"]);
+
 /**
  * JSON Chief of Staff writes into `pending/`.
  * `text`, when set, is the body after the @handle and replaces the default line.
  * `command` is the bang that shipped, used when `text` is omitted.
- * One of `text` or `command` is required. Extra fields are ignored on read.
+ * One of `text` or `command` is required, unless `run` is set: then `command`
+ * is the line to execute (`!milady`, `!milady 3`).
+ * `conversationId` may be `"all"`. `conversationIds` fans out to those groups.
+ * Extra fields are ignored on read.
  */
 export interface ReadyNotification {
-  conversationId: string;
+  /** Encrypted group id, or `"all"` for every authorized group. */
+  conversationId?: string;
+  /** Explicit groups. Not combined with `conversationId`. */
+  conversationIds?: string[];
   userId: string;
   command?: string;
   text?: string;
+  /** Execute `command` through the chat engine instead of posting a mention. */
+  run?: boolean;
+  /** Used when X has no @handle for `userId`. */
+  handle?: string;
 }
 
 export interface NotificationDirs {
@@ -49,6 +74,27 @@ export interface NotificationUser {
  * Chat send plus the user lookup the mention needs.
  * `chatAvailable` is false when the Chat identity is not open.
  */
+export interface NotificationRunRequest {
+  conversationId: string;
+  userId: string;
+  handle: string;
+  /** Full command line, such as `!milady` or `!milady 3`. */
+  command: string;
+  /** Synthetic inbound id. Not a real Chat message. */
+  messageId: string;
+}
+
+export interface NotificationRunResult {
+  messageIds: string[];
+}
+
+export interface NotificationTargetResult {
+  conversationId: string;
+  status: "sent" | "failed" | "skipped";
+  messageIds?: string[];
+  reason?: string;
+}
+
 export interface NotificationTransport {
   chatAvailable(): boolean;
   getUserById(userId: string): Promise<NotificationUser | undefined>;
@@ -57,6 +103,17 @@ export interface NotificationTransport {
     text: string,
     caption?: MediaCaption,
   ): Promise<unknown>;
+  /** Newest `sender_label` for this user in `chat_history_messages`. */
+  lookupSenderLabel?(userId: string): string | undefined;
+  /** True when `conversationId` is in `chat_authorizations`. */
+  isAuthorized?(conversationId: string): boolean;
+  /** Every authorized group, used when `conversationId` is `"all"`. */
+  listAuthorized?(): readonly string[];
+  /**
+   * Dispatch `command` through the same engine path as an inbound chat message.
+   * Absent means a `run` file fails closed.
+   */
+  runCommand?(request: NotificationRunRequest): Promise<NotificationRunResult>;
 }
 
 export interface NotificationPollResult {
@@ -127,38 +184,70 @@ export function parseReadyNotification(value: unknown): ParsedReadyNotification 
     return { ok: false, reason: "Notification file must be a JSON object." };
   }
   const record = value as Record<string, unknown>;
-  const conversationId = readRequiredString(record.conversationId);
-  if (!conversationId) return { ok: false, reason: "conversationId is required." };
-  if (!isChatGroupId(conversationId)) {
-    return { ok: false, reason: "conversationId must be an encrypted Chat group id." };
-  }
+  const audience = readAudience(record);
+  if (!audience.ok) return audience;
   const userId = readRequiredString(record.userId);
   if (!userId) return { ok: false, reason: "userId is required." };
   if (!USER_ID.test(userId)) {
     return { ok: false, reason: "userId must be a numeric X user id." };
   }
+  const runFlag = readOptionalBoolean(record.run, "run");
+  if (!runFlag.ok) return runFlag;
+  const mode = readOptionalString(record.mode, "mode");
+  if (!mode.ok) return mode;
+  if (mode.value !== undefined && mode.value !== "run") {
+    return { ok: false, reason: 'mode must be "run".' };
+  }
+  if (runFlag.value === false && mode.value === "run") {
+    return { ok: false, reason: "run and mode disagree." };
+  }
+  const wantsRun = runFlag.value === true || mode.value === "run";
   const command = readOptionalString(record.command, "command");
   if (!command.ok) return command;
-  if (command.value !== undefined && !COMMAND_NAME.test(command.value)) {
-    return { ok: false, reason: "command must be a bang name such as !undertow." };
-  }
   const text = readOptionalString(record.text, "text");
   if (!text.ok) return text;
   if (text.value !== undefined && text.value.length > TEXT_MAX) {
     return { ok: false, reason: "text is too long." };
   }
-  if (!command.value && !text.value) {
+  const handle = readOptionalString(record.handle, "handle");
+  if (!handle.ok) return handle;
+  const normalizedHandle = handle.value ? normalizeHandle(handle.value) : undefined;
+  if (handle.value !== undefined && !normalizedHandle) {
+    return { ok: false, reason: "handle must be an @handle." };
+  }
+  if (wantsRun) {
+    if (!command.value) return { ok: false, reason: "A queue run needs command." };
+    if (command.value.length > TEXT_MAX) return { ok: false, reason: "command is too long." };
+    if (!/^[!/]/.test(command.value)) {
+      return { ok: false, reason: "command must be a bang such as !milady." };
+    }
+  } else if (command.value !== undefined && !COMMAND_NAME.test(command.value)) {
+    return { ok: false, reason: "command must be a bang name such as !undertow." };
+  } else if (!command.value && !text.value) {
     return { ok: false, reason: "Notification needs text or command." };
   }
   return {
     ok: true,
     value: {
-      conversationId,
+      ...audience.value,
       userId,
       ...(command.value ? { command: command.value } : {}),
       ...(text.value ? { text: text.value } : {}),
+      ...(wantsRun ? { run: true } : {}),
+      ...(normalizedHandle ? { handle: normalizedHandle } : {}),
     },
   };
+}
+
+/**
+ * Why this command line cannot be queue-run.
+ * Undefined means `parseCommand` accepts it and the name is allowlisted.
+ */
+export function queueRunBlockReason(command: string): string | undefined {
+  const parsed = parseCommand(command);
+  if (parsed && QUEUE_RUN_COMMANDS.has(parsed.name)) return undefined;
+  const head = command.trim().split(/\s+/)[0] ?? command;
+  return `${spokenCommand(head)} cannot be run from the notification queue.`;
 }
 
 /**
@@ -336,45 +425,233 @@ async function deliverOne(
     return "skipped";
   }
 
+  if (notice.value.run) {
+    if (!transport.runCommand) {
+      await writeFailed(dirs, name, parsed, "Queue run is unavailable.", now, raw);
+      return "failed";
+    }
+    const blocked = queueRunBlockReason(notice.value.command ?? "");
+    if (blocked) {
+      await writeFailed(dirs, name, parsed, blocked, now, raw);
+      log.warn(`Notification blocked file=${name} reason=${blocked}`);
+      return "failed";
+    }
+  }
+
+  const targets = resolveTargets(notice.value, transport);
+  if (!targets.ok) {
+    await writeFailed(dirs, name, parsed, targets.reason, now, raw);
+    log.warn(`Notification blocked file=${name} reason=${targets.reason}`);
+    return "failed";
+  }
+
+  const handle = await resolveHandle(notice.value, transport);
+  if (!handle.ok) {
+    await writeFailed(dirs, name, parsed, handle.reason, now, raw);
+    return "failed";
+  }
+
+  const results: NotificationTargetResult[] = [];
+  for (let index = 0; index < targets.ids.length; index += 1) {
+    const conversationId = targets.ids[index]!;
+    results.push(
+      await deliverTarget(transport, notice.value, {
+        name,
+        conversationId,
+        handle: handle.handle,
+        fanout: targets.fanout,
+        index,
+      }),
+    );
+  }
+  logOutcomes(name, notice.value, results);
+
+  if (results.some((row) => row.status === "sent")) {
+    if (!notice.value.run && !targets.fanout) {
+      await fs.rm(path.join(dirs.done, name), { force: true });
+      await fs.rename(processingPath, path.join(dirs.done, name));
+    } else {
+      await writeDone(dirs, name, parsed, results, now);
+    }
+    return "sent";
+  }
+
+  await writeFailed(
+    dirs,
+    name,
+    parsed,
+    failureReason(results),
+    now,
+    raw,
+    notice.value.run || targets.fanout ? results : undefined,
+  );
+  return "failed";
+}
+
+async function deliverTarget(
+  transport: NotificationTransport,
+  notice: ReadyNotification,
+  target: {
+    name: string;
+    conversationId: string;
+    handle: string;
+    fanout: boolean;
+    index: number;
+  },
+): Promise<NotificationTargetResult> {
+  const { conversationId } = target;
+  if (transport.isAuthorized && !transport.isAuthorized(conversationId)) {
+    return { conversationId, status: "failed", reason: NOT_AUTHORIZED_REASON };
+  }
+
+  try {
+    if (notice.run) {
+      const ran = await transport.runCommand!({
+        conversationId,
+        userId: notice.userId,
+        handle: target.handle,
+        command: notice.command ?? "",
+        messageId: queueMessageId(target.name, conversationId, target.index),
+      });
+      const messageIds = (ran.messageIds ?? []).map((id) => id.trim()).filter(Boolean);
+      return {
+        conversationId,
+        status: "sent",
+        ...(messageIds.length > 0 ? { messageIds } : {}),
+      };
+    }
+
+    const message = formatReadyNotification(target.handle, notice);
+    const sent = await transport.sendMessage(conversationId, message.text, message.caption);
+    const messageId = messageIdOf(sent);
+    return {
+      conversationId,
+      status: "sent",
+      ...(messageId ? { messageIds: [messageId] } : {}),
+    };
+  } catch (error) {
+    if (isMissingGroup(error)) {
+      return {
+        conversationId,
+        status: target.fanout ? "skipped" : "failed",
+        reason: NOT_IN_GROUP_REASON,
+      };
+    }
+    const verb = notice.run ? "Command" : "Send";
+    return {
+      conversationId,
+      status: "failed",
+      reason: clipReason(`${verb} failed: ${errorText(error)}`),
+    };
+  }
+}
+
+/**
+ * `getUserById`, then the file's `handle`, then the newest stored
+ * `sender_label`. A lookup that throws still fails the file.
+ */
+async function resolveHandle(
+  notice: ReadyNotification,
+  transport: NotificationTransport,
+): Promise<{ ok: true; handle: string } | { ok: false; reason: string }> {
   let user: NotificationUser | undefined;
   try {
-    user = await transport.getUserById(notice.value.userId);
+    user = await transport.getUserById(notice.userId);
   } catch (error) {
-    await writeFailed(
-      dirs,
-      name,
-      parsed,
-      clipReason(`Could not look up that user: ${errorText(error)}`),
-      now,
-      raw,
+    return { ok: false, reason: clipReason(`Could not look up that user: ${errorText(error)}`) };
+  }
+  const fromApi = normalizeHandle(user?.username);
+  if (fromApi) return { ok: true, handle: fromApi };
+  const fromJob = normalizeHandle(notice.handle);
+  if (fromJob) return { ok: true, handle: fromJob };
+  let stored: string | undefined;
+  try {
+    stored = transport.lookupSenderLabel?.(notice.userId);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: clipReason(`Could not read that user's handle from history: ${errorText(error)}`),
+    };
+  }
+  const fromHistory = normalizeHandle(stored);
+  if (fromHistory) return { ok: true, handle: fromHistory };
+  return { ok: false, reason: "No @handle for that userId." };
+}
+
+function resolveTargets(
+  notice: ReadyNotification,
+  transport: NotificationTransport,
+): { ok: true; ids: string[]; fanout: boolean } | { ok: false; reason: string } {
+  if (notice.conversationId === "all") {
+    if (!transport.listAuthorized) {
+      return { ok: false, reason: 'conversationId "all" needs the authorization list.' };
+    }
+    let listed: readonly string[];
+    try {
+      listed = transport.listAuthorized();
+    } catch (error) {
+      return { ok: false, reason: clipReason(`Could not list authorized groups: ${errorText(error)}`) };
+    }
+    const ids = uniqueGroupIds(listed).sort();
+    if (ids.length === 0) return { ok: false, reason: "No authorized groups." };
+    return { ok: true, ids, fanout: true };
+  }
+  if (notice.conversationIds && notice.conversationIds.length > 0) {
+    return { ok: true, ids: notice.conversationIds, fanout: true };
+  }
+  if (notice.conversationId && isChatGroupId(notice.conversationId)) {
+    return { ok: true, ids: [notice.conversationId], fanout: false };
+  }
+  return { ok: false, reason: "conversationId is required." };
+}
+
+function logOutcomes(name: string, notice: ReadyNotification, results: NotificationTargetResult[]): void {
+  const sent = results.filter((row) => row.status === "sent").length;
+  const failed = results.filter((row) => row.status === "failed").length;
+  const skipped = results.filter((row) => row.status === "skipped").length;
+  const mode = notice.run ? "run" : "post";
+  log.info(`Notification file=${name} mode=${mode} sent=${sent} failed=${failed} skipped=${skipped}`);
+  for (const row of results) {
+    if (row.status === "sent") {
+      const ids = row.messageIds?.join(",") || "none";
+      log.info(`Notification sent file=${name} conversation=${row.conversationId} messages=${ids}`);
+      continue;
+    }
+    const level = row.status === "failed" ? "warn" : "info";
+    log[level](
+      `Notification ${row.status} file=${name} conversation=${row.conversationId} reason=${row.reason ?? ""}`,
     );
-    return "failed";
   }
+}
 
-  const username = normalizeHandle(user?.username);
-  if (!username) {
-    await writeFailed(dirs, name, parsed, "No @handle for that userId.", now, raw);
-    return "failed";
-  }
+function failureReason(results: NotificationTargetResult[]): string {
+  if (results.length === 1) return results[0]?.reason ?? "Notification failed.";
+  const failed = results.filter((row) => row.status === "failed");
+  if (failed.length === 0) return "Bot is not in those groups (404).";
+  const first = failed[0]?.reason;
+  if (failed.length === results.length && failed.every((row) => row.reason === first) && first) return first;
+  const skipped = results.length - failed.length;
+  return `No group was posted. ${failed.length} failed, ${skipped} skipped.`;
+}
 
-  let message: ReadyNotificationMessage;
-  try {
-    message = formatReadyNotification(username, notice.value);
-  } catch (error) {
-    await writeFailed(dirs, name, parsed, clipReason(errorText(error)), now, raw);
-    return "failed";
-  }
-
-  try {
-    await transport.sendMessage(notice.value.conversationId, message.text, message.caption);
-  } catch (error) {
-    await writeFailed(dirs, name, parsed, clipReason(`Send failed: ${errorText(error)}`), now, raw);
-    return "failed";
-  }
-
-  await fs.rm(path.join(dirs.done, name), { force: true });
-  await fs.rename(processingPath, path.join(dirs.done, name));
-  return "sent";
+async function writeDone(
+  dirs: NotificationDirs,
+  name: string,
+  parsed: unknown,
+  results: NotificationTargetResult[],
+  now: () => Date,
+): Promise<void> {
+  const base =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>) }
+      : {};
+  const record = { ...base, results, completedAt: now().toISOString() };
+  const finalPath = path.join(dirs.done, name);
+  const tmpPath = path.join(dirs.done, `.${name}.tmp`);
+  await fs.writeFile(tmpPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+  await fs.rm(finalPath, { force: true });
+  await fs.rename(tmpPath, finalPath);
+  await fs.rm(path.join(dirs.processing, name), { force: true });
 }
 
 async function writeFailed(
@@ -384,13 +661,19 @@ async function writeFailed(
   reason: string,
   now: () => Date,
   raw?: string,
+  results?: NotificationTargetResult[],
 ): Promise<void> {
   const failedAt = now().toISOString();
   const base =
     parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? { ...(parsed as Record<string, unknown>) }
       : { raw: clipRaw(raw ?? "") };
-  const record = { ...base, reason, failedAt };
+  const record = {
+    ...base,
+    reason,
+    failedAt,
+    ...(results && results.length > 0 ? { results } : {}),
+  };
   const finalPath = path.join(dirs.failed, name);
   const tmpPath = path.join(dirs.failed, `.${name}.tmp`);
   await fs.writeFile(tmpPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
@@ -408,6 +691,66 @@ async function listJson(dir: string): Promise<string[]> {
     throw error;
   }
   return names.filter(isNotificationFileName).sort();
+}
+
+function readAudience(
+  record: Record<string, unknown>,
+): { ok: true; value: Pick<ReadyNotification, "conversationId" | "conversationIds"> } | { ok: false; reason: string } {
+  const idField = readOptionalString(record.conversationId, "conversationId");
+  if (!idField.ok) return idField;
+  const listField = readConversationIds(record.conversationIds);
+  if (!listField.ok) return listField;
+  const id = idField.value;
+  const list = listField.value;
+  if (id === "all") {
+    if (list) return { ok: false, reason: 'Use conversationId "all" or conversationIds, not both.' };
+    return { ok: true, value: { conversationId: "all" } };
+  }
+  if (list) {
+    if (id) return { ok: false, reason: 'Use conversationId "all" or conversationIds, not both.' };
+    return { ok: true, value: { conversationIds: list } };
+  }
+  if (!id) return { ok: false, reason: "conversationId is required." };
+  if (!isChatGroupId(id)) {
+    return { ok: false, reason: "conversationId must be an encrypted Chat group id." };
+  }
+  return { ok: true, value: { conversationId: id } };
+}
+
+function readConversationIds(
+  value: unknown,
+): { ok: true; value?: string[] } | { ok: false; reason: string } {
+  if (value === undefined || value === null) return { ok: true };
+  if (!Array.isArray(value)) return { ok: false, reason: "conversationIds must be an array of group ids." };
+  if (value.length === 0) return { ok: false, reason: "conversationIds must list at least one group." };
+  if (value.length > CONVERSATION_LIST_MAX) {
+    return { ok: false, reason: "conversationIds lists too many groups." };
+  }
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      return { ok: false, reason: "conversationIds must be an array of group ids." };
+    }
+    const trimmed = entry.trim();
+    if (!isChatGroupId(trimmed)) {
+      return { ok: false, reason: "conversationIds must be encrypted Chat group ids." };
+    }
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    ids.push(trimmed);
+  }
+  if (ids.length === 0) return { ok: false, reason: "conversationIds must list at least one group." };
+  return { ok: true, value: ids };
+}
+
+function readOptionalBoolean(
+  value: unknown,
+  field: string,
+): { ok: true; value?: boolean } | { ok: false; reason: string } {
+  if (value === undefined || value === null) return { ok: true };
+  if (typeof value !== "boolean") return { ok: false, reason: `${field} must be a boolean.` };
+  return { ok: true, value };
 }
 
 function readRequiredString(value: unknown): string | undefined {
@@ -432,6 +775,36 @@ function safeNotificationId(id: string): string {
     throw new Error("notification file id is empty");
   }
   return clean;
+}
+
+function uniqueGroupIds(ids: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of ids) {
+    const trimmed = id.trim();
+    if (!trimmed || seen.has(trimmed) || !isChatGroupId(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function queueMessageId(fileName: string, conversationId: string, index: number): string {
+  const nonce = Math.random().toString(36).slice(2, 10);
+  const stem = fileName.replace(/\.json$/i, "").replace(/[^A-Za-z0-9._-]/g, "");
+  return `queue-${stem || "job"}-${index}-${nonce}-${conversationId}`;
+}
+
+function messageIdOf(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const id = (result as { dmEventId?: unknown }).dmEventId;
+  return typeof id === "string" && id.trim() ? id.trim() : undefined;
+}
+
+function isMissingGroup(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 404 || status === 410;
 }
 
 function alreadyAddresses(body: string, label: string): boolean {
