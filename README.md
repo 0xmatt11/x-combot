@@ -834,13 +834,23 @@ The bot creates all four directories on its poll. If Chief of Staff drops a file
 
 Write the body to `pending/.<id>.json.tmp`, then rename it to `pending/<id>.json`. The name is a safe token such as a UUID. The rename is the signal that the JSON is complete. Files that start with `.` or do not end in `.json` are left alone.
 
-The poll runs every 5 seconds. Each tick renames a pending file into `processing/` before reading it, so two polls cannot send it twice. A successful send renames that file into `done/` and leaves the original JSON. Anything that cannot be posted is rewritten into `failed/` with `reason` and `failedAt` added. The original fields stay, so copying that file back to `pending/` retries it (`reason` and `failedAt` are ignored on the way in). A file left in `processing/` by a crash is tried again on the next tick. If that send had already reached the chat, the retry posts the same line again.
+The poll runs every 5 seconds. Each tick renames a pending file into `processing/` before reading it, so two polls cannot send it twice. A successful mention to one group renames that file into `done/` and leaves the original JSON. A queue run, or a send to more than one group, is rewritten into `done/` with `results` and `completedAt` added. Anything that cannot be posted is rewritten into `failed/` with `reason` and `failedAt` added. A run or fan-out that posts nowhere also keeps `results`. The original fields stay, so copying that file back to `pending/` retries it (`reason`, `failedAt`, `results`, and `completedAt` are ignored on the way in). A file left in `processing/` by a crash is tried again on the next tick. If that send had already reached the chat, the retry posts the same line, or runs the command, again.
 
-`userId` is resolved with `GET /2/users/:id` (`getUserById`). The chat line is `@handle your !command is live` when `text` is omitted. When `text` is set, that string is the body and the handle is still prefixed, unless the body already starts with that `@handle`. The post goes through Chat `sendMessage`. The mention entity covers the `@handle` bytes only, the same range other outbound mentions use. The default line does not name another chat app. Do not put that name in `text`.
+`userId` is resolved with `GET /2/users/:id` (`getUserById`). When that lookup returns no @handle, the file's optional `handle` is used, then the newest `sender_label` for that sender in `chat_history_messages` (`data/bot.sqlite`) that is an @handle. A display name does not count. If all three miss, the file moves to `failed/` with `reason` `No @handle for that userId.` A lookup that throws does not fall through. This order is the same for a mention post and a queue run.
+
+The chat line is `@handle your !command is live` when `text` is omitted. When `text` is set, that string is the body and the handle is still prefixed, unless the body already starts with that `@handle`. The post goes through Chat `sendMessage`. The mention entity covers the `@handle` bytes only, the same range other outbound mentions use. The default line does not name another chat app. Do not put that name in `text`.
 
 If the Chat identity is not open, the file is not sent. It moves to `failed/` with `reason` `Chat is unavailable.` A lookup or send that throws, a user with no @handle, or a file that is not the schema below also moves to `failed/` with its own `reason`.
 
-Schema Chief of Staff writes:
+A group that is not in `chat_authorizations` is not posted to and is not a place a command runs. One group in the file fails that file with `reason` `Conversation is not authorized.` In a list, that group is one failed `results` entry with the same reason. `!auth` in the chat is still the way a group gets onto that list. A queue file cannot authorize a group.
+
+**Run a real command.** `"run": true` or `"mode": "run"` executes `command` through the same parser and handlers as a member typing it. `command` is the full line, such as `!milady` or `!milady 3`. The output is the handler's own post. For `!milady` that is the native memedepot image with the requester's `@handle` caption. `text` is not also posted. The engine is given a synthetic inbound message: the group id, the requester's user id and handle, and a unique message id that was never sent in Chat. That id is not written into chat history and is not auto-deleted. A real inbound message from the bot is still ignored. A queue file may set `userId` to the bot's own id; only that queue path skips the bot's own-message check.
+
+Only an allowlist may be queue-run. Today that list is `!milady` (the `/milady` form is the same command). Owner and admin commands are not on it, including `!auth`, `!purge`, `!warn`, `!kick`, `!mute`, `!admin`, and `!set`. A file that names one fails with `reason` `!purge cannot be run from the notification queue.` (the bang in the reason is the one in the file). Adding a command means adding its name to `QUEUE_RUN_COMMANDS` in `src/bot/notifications.ts`. `!help` does not mention the queue.
+
+**Several groups.** `conversationIds` is a list of encrypted group ids. `"conversationId": "all"` means every row in `chat_authorizations`, which is the set of groups the bot was authorized in and is still asked to post to. Do not set both. Each id is checked against `chat_authorizations`. A send or command that returns HTTP 404 or 410 is skipped: the bot is no longer in that group. The other groups still run. The done or failed file gets a `results` array, one object per group, with `status` `sent`, `failed`, or `skipped`, `messageIds` when a send returned them, and `reason` when it did not. A file is `done/` when at least one group was posted, and `failed/` when none were. A single `conversationId` that 404s fails the file with `Bot is not in that group (404).` Copying a failed file back to `pending/` runs it again, including a command that already posted.
+
+Mention post Chief of Staff writes:
 
 ```json
 {
@@ -851,14 +861,77 @@ Schema Chief of Staff writes:
 }
 ```
 
+Run `!milady` in that group. `"mode": "run"` is the same switch as `"run": true`.
+
+```json
+{
+  "conversationId": "g2029561975647150382",
+  "userId": "1577700998226890753",
+  "run": true,
+  "command": "!milady"
+}
+```
+
+```json
+{
+  "conversationId": "g2029561975647150382",
+  "userId": "1577700998226890753",
+  "mode": "run",
+  "command": "!milady 3",
+  "handle": "alice"
+}
+```
+
+`handle` is optional. It is used only when `getUserById` returns no @handle, and it wins over `sender_label`.
+
+Fan out to every authorized group the bot is still in, or to a list:
+
+```json
+{
+  "conversationId": "all",
+  "userId": "1577700998226890753",
+  "run": true,
+  "command": "!milady"
+}
+```
+
+```json
+{
+  "conversationIds": ["g2029561975647150382", "g2029561975647150999"],
+  "userId": "1577700998226890753",
+  "run": true,
+  "command": "!milady"
+}
+```
+
+A finished run file in `done/` keeps the fields above and adds `results` and `completedAt`:
+
+```json
+{
+  "conversationId": "all",
+  "userId": "1577700998226890753",
+  "run": true,
+  "command": "!milady",
+  "results": [
+    { "conversationId": "g2029561975647150382", "status": "sent", "messageIds": ["123"] },
+    { "conversationId": "g2029561975647150999", "status": "skipped", "reason": "Bot is not in that group (404)." }
+  ],
+  "completedAt": "2026-11-24T19:00:00.000Z"
+}
+```
+
 | Field | Required | |
 | --- | --- | --- |
-| `conversationId` | yes | Encrypted Chat group id: `g` plus digits. The chat where `!request` was filed |
-| `userId` | yes | Numeric X user id of the requester. The bot looks up the @handle. It does not read a username from this file |
-| `command` | one of these | Bang that shipped, such as `!undertow`. Used only when `text` is omitted. The posted line is `@handle your !undertow is live` |
-| `text` | one of these | Body after the @handle. When set, this is the line (the bot still prefixes `@handle`). Max 500 characters |
+| `conversationId` | one target | Encrypted Chat group id (`g` plus digits), or `"all"` for every `chat_authorizations` row. Not together with `conversationIds` |
+| `conversationIds` | one target | Array of those group ids. Duplicates are dropped. Max 100 |
+| `userId` | yes | Numeric X user id of the requester. The bot looks up the @handle |
+| `handle` | no | `@handle` used when the lookup returns nothing, before `sender_label` |
+| `command` | one of these, and required for a run | Mention mode: bang name such as `!undertow`, used only when `text` is omitted. The posted line is `@handle your !undertow is live`. Run mode: the line to execute, such as `!milady` or `!milady 3` |
+| `text` | one of these | Mention mode only. Body after the @handle. When set, this is the line (the bot still prefixes `@handle`). Max 500 characters. Ignored when `run` is set |
+| `run` | no | `true` executes `command`. Omit it to post the mention line |
+| `mode` | no | `"run"` is the same as `"run": true`. Any other value fails the file |
 
-`text` wins when both are set. Other fields are ignored. `command` is a letter, then letters, digits, or underscores, with an optional leading `!`.
+`text` wins when both `text` and `command` are set and `run` is not. Other fields are ignored. In mention mode, `command` is a letter, then letters, digits, or underscores, with an optional leading `!`. The process logs each file to `logs/bot.log` with the mode, the conversation id, sent message ids, and the reason when a group is skipped or fails. Message text is not logged.
 
 ## Public timelines, web search, and workers
 

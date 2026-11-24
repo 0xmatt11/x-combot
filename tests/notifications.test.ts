@@ -2,22 +2,28 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ModerationEngine } from "../src/bot/engine.js";
 import {
   defaultNotificationRoot,
   formatReadyNotification,
   handleMention,
   isNotificationFileName,
+  NOT_AUTHORIZED_REASON,
+  NOT_IN_GROUP_REASON,
   NotificationPoller,
   notificationDirs,
   parseReadyNotification,
   pollReadyNotifications,
+  queueRunBlockReason,
   writeReadyNotificationFile,
   type NotificationDirs,
   type NotificationTransport,
   type NotificationUser,
   type ReadyNotification,
 } from "../src/bot/notifications.js";
-import type { MediaCaption } from "../src/types.js";
+import { Store } from "../src/store.js";
+import type { BotRuntimeConfig, DefaultsConfig, DmEvent, MediaCaption } from "../src/types.js";
+import { MockXClient } from "../src/x/mock-client.js";
 
 const GROUP = "g2029561975647150382";
 const USER_ID = "1577700998226890753";
@@ -158,6 +164,76 @@ describe("ready notification JSON", () => {
     expect(
       parseReadyNotification({ conversationId: GROUP, userId: USER_ID, text: "x".repeat(501) }),
     ).toMatchObject({ ok: false, reason: "text is too long." });
+    expect(
+      parseReadyNotification({ conversationId: GROUP, userId: USER_ID, command: "!milady 3" }),
+    ).toMatchObject({ ok: false, reason: "command must be a bang name such as !undertow." });
+    expect(
+      parseReadyNotification({ conversationId: GROUP, userId: USER_ID, run: true, text: "hi" }),
+    ).toMatchObject({ ok: false, reason: "A queue run needs command." });
+    expect(
+      parseReadyNotification({ conversationId: GROUP, userId: USER_ID, run: "yes", command: "!milady" }),
+    ).toMatchObject({ ok: false, reason: "run must be a boolean." });
+    expect(
+      parseReadyNotification({ conversationId: GROUP, userId: USER_ID, mode: "notify", command: "!milady" }),
+    ).toMatchObject({ ok: false, reason: 'mode must be "run".' });
+    expect(
+      parseReadyNotification({
+        conversationId: "all",
+        conversationIds: [GROUP],
+        userId: USER_ID,
+        run: true,
+        command: "!milady",
+      }),
+    ).toMatchObject({ ok: false, reason: 'Use conversationId "all" or conversationIds, not both.' });
+    expect(
+      parseReadyNotification({ conversationId: GROUP, userId: USER_ID, command: "!undertow", handle: "not a handle" }),
+    ).toMatchObject({ ok: false, reason: "handle must be an @handle." });
+  });
+
+  it("accepts a queue run, an optional handle, and a group list", () => {
+    expect(
+      parseReadyNotification({
+        conversationId: GROUP,
+        userId: USER_ID,
+        run: true,
+        command: "!milady 3",
+        handle: "@alice",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        conversationId: GROUP,
+        userId: USER_ID,
+        run: true,
+        command: "!milady 3",
+        handle: "alice",
+      },
+    });
+    expect(
+      parseReadyNotification({
+        conversationId: "all",
+        userId: USER_ID,
+        mode: "run",
+        command: "!milady",
+      }),
+    ).toEqual({
+      ok: true,
+      value: { conversationId: "all", userId: USER_ID, run: true, command: "!milady" },
+    });
+    expect(
+      parseReadyNotification({
+        conversationIds: [GROUP, `  ${GROUP}  `, "g2029561975647150383"],
+        userId: USER_ID,
+        text: "hello",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        conversationIds: [GROUP, "g2029561975647150383"],
+        userId: USER_ID,
+        text: "hello",
+      },
+    });
   });
 
   it("names the pending, processing, done, and failed folders beside the database", () => {
@@ -386,7 +462,322 @@ describe("ready notification docs", () => {
     expect(readme).toMatch(/!undertow/);
     expect(readme).toMatch(/Chat is unavailable/);
     expect(readme).toMatch(/@handle your !command is live/);
+    expect(readme).toMatch(/"run": true/);
+    expect(readme).toMatch(/!milady 3/);
+    expect(readme).toMatch(/conversationIds/);
+    expect(readme).toMatch(/sender_label/);
+    expect(readme).toMatch(/chat_authorizations/);
+    expect(readme).toMatch(/Bot is not in that group \(404\)\./);
+    expect(readme).toMatch(/!purge cannot be run from the notification queue/);
+    expect(readme).toMatch(/QUEUE_RUN_COMMANDS/);
     const help = fs.readFileSync("config/default.yaml", "utf8");
     expect(help).not.toMatch(/!notify/);
+    expect(help).not.toMatch(/notification queue/);
+  });
+});
+
+const GROUP_B = "g2029561975647150383";
+const GROUP_C = "g2029561975647150384";
+const MILADY_IMAGE =
+  "https://memedepot.com/cdn-cgi/imagedelivery/naCPMwxXX46-hrE49eZovw/57b85cf0-f015-4285-ad1c-8a3ea4eda400/public";
+
+const queueDefaults: DefaultsConfig = {
+  welcome: { enabled: false, text: "Welcome @{username}!" },
+  rules: "Be nice.",
+  help: "Type !rules",
+  flood: { max_messages: 0, window_ms: 10_000, mute_ms: 60_000, warn_on_flood: false },
+  warns: { limit: 3, auto_mute_ms: 60_000, notify_admins: false },
+  filters: [],
+  poll: { interval_ms: 1000, max_results: 50 },
+  delete: { attempt_on_filter: false, attempt_on_flood: false, attempt_on_mute: false },
+};
+
+function queueRuntime(botUserId: string): BotRuntimeConfig {
+  return {
+    botUserId,
+    ownerId: USER_ID,
+    globalAdminIds: [],
+    defaults: queueDefaults,
+  };
+}
+
+function notFound(): Error & { status: number } {
+  const error = new Error("Conversation not found") as Error & { status: number };
+  error.status = 404;
+  return error;
+}
+
+describe("notification queue runs", () => {
+  const stores: Store[] = [];
+
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  function rig(botUserId = "bot-1"): {
+    store: Store;
+    client: MockXClient;
+    engine: ModerationEngine;
+  } {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const client = new MockXClient({ id: botUserId, username: "modbot", name: "Mod Bot" });
+    client.addUser({ id: USER_ID, username: "alice", name: "Alice" });
+    const engine = new ModerationEngine(store, client, queueRuntime(botUserId), undefined, {
+      milady: {
+        async randomImage() {
+          return { url: MILADY_IMAGE };
+        },
+        async randomImages(count: number) {
+          return Array.from({ length: count }, () => ({ url: MILADY_IMAGE }));
+        },
+      },
+      fetchImage: async () => ({ bytes: Uint8Array.from([1, 2, 3]), mimeType: "image/png" }),
+      commandCleanupMs: 60 * 60 * 1000,
+    });
+    return { store, client, engine };
+  }
+
+  function wired(
+    parts: ReturnType<typeof rig>,
+    getUserById?: NotificationTransport["getUserById"],
+  ): NotificationTransport {
+    return {
+      chatAvailable: () => true,
+      getUserById: getUserById ?? ((userId) => parts.client.getUserById(userId)),
+      sendMessage: (conversationId, text, caption) => parts.client.sendMessage(conversationId, text, caption),
+      lookupSenderLabel: (userId) => parts.engine.lookupSenderLabel(userId),
+      isAuthorized: (conversationId) => parts.store.isChatAuthorized(conversationId),
+      listAuthorized: () => parts.store.listChatAuthorizations(),
+      runCommand: (request) => parts.engine.runQueuedCommand(request),
+    };
+  }
+
+  function rememberHandle(store: Store, senderId: string, label: string, ts: number): void {
+    store.db
+      .prepare(
+        `INSERT INTO chat_history_messages (
+           conversation_id, message_id, sender_id, sender_label, text, ts_ms
+         ) VALUES (?, ?, ?, ?, 'hi', ?)`,
+      )
+      .run(GROUP, `hist-${senderId}-${ts}`, senderId, label, ts);
+  }
+
+  it("runs !milady through the engine and posts the native image", async () => {
+    const dirs = tempDirs();
+    const parts = rig();
+    parts.store.authorizeChat(GROUP);
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "milady",
+      payload: { conversationId: GROUP, userId: USER_ID, run: true, command: "!milady" },
+    });
+
+    const result = await pollReadyNotifications(dirs, wired(parts));
+    expect(result).toEqual({ skipped: false, sent: 1, failed: 0 });
+    expect(parts.client.images).toHaveLength(1);
+    expect(parts.client.images[0]).toMatchObject({
+      conversationId: GROUP,
+      url: MILADY_IMAGE,
+      caption: "@alice",
+      mention: "alice",
+      mimeType: "image/png",
+    });
+    expect(parts.client.sent).toEqual([]);
+    const done = await readJson(path.join(dirs.done, "milady.json"));
+    expect(done.command).toBe("!milady");
+    expect(done.run).toBe(true);
+    expect(done.results).toEqual([
+      { conversationId: GROUP, status: "sent", messageIds: ["img-1"] },
+    ]);
+    expect(done.completedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const stored = parts.store.db
+      .prepare("SELECT text FROM chat_history_messages WHERE text LIKE '%!milady%'")
+      .all();
+    expect(stored).toEqual([]);
+  });
+
+  it("runs !milady 3 as one album", async () => {
+    const dirs = tempDirs();
+    const parts = rig();
+    parts.store.authorizeChat(GROUP);
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "three",
+      payload: { conversationId: GROUP, userId: USER_ID, mode: "run", command: "!milady 3" } as ReadyNotification,
+    });
+
+    await pollReadyNotifications(dirs, wired(parts));
+    expect(parts.client.imageBatches).toHaveLength(1);
+    expect(parts.client.imageBatches[0]?.urls).toEqual([MILADY_IMAGE, MILADY_IMAGE, MILADY_IMAGE]);
+    expect(parts.client.imageBatches[0]).toMatchObject({ caption: "@alice", mention: "alice" });
+    expect(parts.client.sent).toEqual([]);
+    const done = await readJson(path.join(dirs.done, "three.json"));
+    expect(done.results).toEqual([
+      { conversationId: GROUP, status: "sent", messageIds: ["img-batch-1"] },
+    ]);
+  });
+
+  it("still ignores a real message from the bot, and runs a queue file that names the bot", async () => {
+    const dirs = tempDirs();
+    const parts = rig(USER_ID);
+    parts.client.addUser({ id: USER_ID, username: "alice", name: "Alice" });
+    parts.store.authorizeChat(GROUP);
+    const inbound: DmEvent = {
+      id: "real-from-bot",
+      eventType: "MessageCreate",
+      conversationId: GROUP,
+      senderId: USER_ID,
+      sender: { id: USER_ID, username: "alice" },
+      text: "!milady",
+      participantIds: [],
+      participants: [],
+      mentions: [],
+    };
+    await parts.engine.processEvent(inbound);
+    expect(parts.client.images).toHaveLength(0);
+
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "self",
+      payload: { conversationId: GROUP, userId: USER_ID, run: true, command: "!milady" },
+    });
+    const result = await pollReadyNotifications(dirs, wired(parts));
+    expect(result).toEqual({ skipped: false, sent: 1, failed: 0 });
+    expect(parts.client.images).toHaveLength(1);
+    expect(parts.client.images[0]).toMatchObject({ caption: "@alice", mention: "alice" });
+  });
+
+  it("blocks owner commands that are not on the queue allowlist", async () => {
+    const dirs = tempDirs();
+    const parts = rig();
+    parts.store.authorizeChat(GROUP);
+    expect(queueRunBlockReason("!purge")).toBe("!purge cannot be run from the notification queue.");
+    expect(queueRunBlockReason("!auth")).toBe("!auth cannot be run from the notification queue.");
+    expect(queueRunBlockReason("!milady 3")).toBeUndefined();
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "purge",
+      payload: { conversationId: GROUP, userId: USER_ID, run: true, command: "!purge" },
+    });
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "auth",
+      payload: { conversationId: GROUP, userId: USER_ID, run: true, command: "!auth" },
+    });
+
+    const result = await pollReadyNotifications(dirs, wired(parts));
+    expect(result).toEqual({ skipped: false, sent: 0, failed: 2 });
+    expect((await readJson(path.join(dirs.failed, "purge.json"))).reason).toBe(
+      "!purge cannot be run from the notification queue.",
+    );
+    expect((await readJson(path.join(dirs.failed, "auth.json"))).reason).toBe(
+      "!auth cannot be run from the notification queue.",
+    );
+    expect(parts.client.sent).toEqual([]);
+    expect(parts.client.images).toEqual([]);
+    expect(parts.client.deleted).toEqual([]);
+  });
+
+  it("fails a run when the group is not authorized", async () => {
+    const dirs = tempDirs();
+    const parts = rig();
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "locked",
+      payload: { conversationId: GROUP, userId: USER_ID, run: true, command: "!milady" },
+    });
+
+    const result = await pollReadyNotifications(dirs, wired(parts));
+    expect(result).toEqual({ skipped: false, sent: 0, failed: 1 });
+    const failed = await readJson(path.join(dirs.failed, "locked.json"));
+    expect(failed.reason).toBe(NOT_AUTHORIZED_REASON);
+    expect(parts.client.images).toEqual([]);
+    expect(parts.client.sent).toEqual([]);
+    await expect(
+      parts.engine.runQueuedCommand({
+        conversationId: GROUP,
+        userId: USER_ID,
+        handle: "alice",
+        command: "!milady",
+        messageId: "queue-direct",
+      }),
+    ).rejects.toThrow(NOT_AUTHORIZED_REASON);
+  });
+
+  it("falls back to sender_label, then a job handle, after a missed lookup", async () => {
+    const dirs = tempDirs();
+    const parts = rig();
+    parts.store.authorizeChat(GROUP);
+    rememberHandle(parts.store, USER_ID, "@oldname", 1);
+    rememberHandle(parts.store, USER_ID, "Alice Jones", 2);
+    rememberHandle(parts.store, USER_ID, "@alice", 3);
+    const missing = wired(parts, async () => undefined);
+
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "history",
+      payload: { conversationId: GROUP, userId: USER_ID, command: "!undertow" },
+    });
+    await pollReadyNotifications(dirs, missing);
+    expect(parts.client.sent.map((row) => row.text)).toEqual(["@alice your !undertow is live"]);
+
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "named",
+      payload: { conversationId: GROUP, userId: USER_ID, handle: "bob", text: "your !undertow is live" },
+    });
+    await pollReadyNotifications(dirs, missing);
+    expect(parts.client.sent.map((row) => row.text)).toEqual([
+      "@alice your !undertow is live",
+      "@bob your !undertow is live",
+    ]);
+
+    const live = wired(parts, async (userId) => ({ id: userId, username: "alice" }));
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "live",
+      payload: {
+        conversationId: GROUP,
+        userId: USER_ID,
+        handle: "bob",
+        text: "your !undertow is live",
+      },
+    });
+    await pollReadyNotifications(dirs, live);
+    expect(parts.client.sent.at(-1)?.text).toBe("@alice your !undertow is live");
+  });
+
+  it("fans a run out to every authorized group and skips a 404", async () => {
+    const dirs = tempDirs();
+    const parts = rig();
+    for (const id of [GROUP_C, GROUP, GROUP_B]) parts.store.authorizeChat(id);
+    const sendImage = parts.client.sendImage.bind(parts.client);
+    const sendMessage = parts.client.sendMessage.bind(parts.client);
+    parts.client.sendImage = async (conversationId, image) => {
+      if (conversationId === GROUP_B) throw notFound();
+      return sendImage(conversationId, image);
+    };
+    parts.client.sendMessage = async (conversationId, text, caption) => {
+      if (conversationId === GROUP_B) throw notFound();
+      return sendMessage(conversationId, text, caption);
+    };
+
+    await writeReadyNotificationFile({
+      pendingDir: dirs.pending,
+      id: "everywhere",
+      payload: { conversationId: "all", userId: USER_ID, run: true, command: "!milady" },
+    });
+    const result = await pollReadyNotifications(dirs, wired(parts));
+    expect(result).toEqual({ skipped: false, sent: 1, failed: 0 });
+    expect(parts.client.images.map((image) => image.conversationId)).toEqual([GROUP, GROUP_C]);
+    expect(parts.client.images.every((image) => image.caption === "@alice" && image.mention === "alice")).toBe(true);
+    expect(parts.client.sent).toEqual([]);
+    const done = await readJson(path.join(dirs.done, "everywhere.json"));
+    expect(done.results).toEqual([
+      { conversationId: GROUP, status: "sent", messageIds: ["img-1"] },
+      { conversationId: GROUP_B, status: "skipped", reason: NOT_IN_GROUP_REASON },
+      { conversationId: GROUP_C, status: "sent", messageIds: ["img-2"] },
+    ]);
   });
 });

@@ -543,6 +543,15 @@ interface FeatureRequestSession {
   busy: boolean;
 }
 
+interface IncomingOptions {
+  backgroundLlm?: boolean;
+  /**
+   * Set only by `runQueuedCommand`. Bypasses the bot's own-message skip.
+   * Real inbound events must leave this unset.
+   */
+  queueRun?: boolean;
+}
+
 export class ModerationEngine {
   private readonly recentImages: RecentImageMemory;
   /**
@@ -597,6 +606,11 @@ export class ModerationEngine {
   private ownedWorkers?: LlmWorkerPool;
   /** Plaintext group history in this process's SQLite file. */
   private readonly chatHistory: ChatHistory;
+  /**
+   * Message ids from sends that happen inside `runQueuedCommand`.
+   * Real inbound events do not open this store.
+   */
+  private readonly outboundIds = new AsyncLocalStorage<string[]>();
   /** 429/402 on the Chat events list. Backfill will not run while this is open. */
   private readonly historyBackoff = new HistoryReadBackoff();
 
@@ -609,6 +623,9 @@ export class ModerationEngine {
   ) {
     this.client = trackBotOutbound(client, (conversationId, sent, detail) => {
       this.rememberBotOutbound(conversationId, sent, detail);
+      const captured = this.outboundIds.getStore();
+      const id = sent.dmEventId?.trim();
+      if (captured && id) captured.push(id);
     });
     this.chatHistory = createChatHistory(store.db, deps.chatHistory ?? {});
     if (this.chatHistory.enabled && this.chatHistory.hasRetentionLimit()) {
@@ -627,15 +644,66 @@ export class ModerationEngine {
   async processEvent(
     event: DmEvent,
     nowMs = Date.now(),
-    options?: { backgroundLlm?: boolean },
+    options?: IncomingOptions,
   ): Promise<EngineActions> {
     return commandContext.run(event, () => this.handleIncoming(event, nowMs, options));
+  }
+
+  /**
+   * Run one allowlisted command as if `userId` typed it in `conversationId`.
+   * Notification-queue only. Real Activity and poll events use `processEvent`
+   * without `queueRun`, so a message from this bot is still ignored.
+   * The synthetic id is not stored as chat history and is not auto-deleted.
+   */
+  async runQueuedCommand(input: {
+    conversationId: string;
+    userId: string;
+    handle: string;
+    command: string;
+    messageId: string;
+  }): Promise<{ messageIds: string[] }> {
+    const conversationId = input.conversationId.trim();
+    if (!isChatGroupId(conversationId)) {
+      throw new Error("conversationId must be an encrypted Chat group id.");
+    }
+    if (!this.store.isChatAuthorized(conversationId)) {
+      throw new Error("Conversation is not authorized.");
+    }
+    const userId = input.userId.trim();
+    const handle = input.handle.trim().replace(/^@+/, "");
+    const command = input.command.trim();
+    const messageId = input.messageId.trim();
+    if (!userId || !handle || !command || !messageId) {
+      throw new Error("Queue run is missing userId, handle, command, or messageId.");
+    }
+    const event: DmEvent = {
+      id: messageId,
+      eventType: "MessageCreate",
+      conversationId,
+      senderId: userId,
+      sender: { id: userId, username: handle },
+      participantIds: [],
+      participants: [],
+      mentions: [],
+      text: command,
+      createdAt: new Date().toISOString(),
+    };
+    const messageIds: string[] = [];
+    await this.outboundIds.run(messageIds, () =>
+      this.processEvent(event, Date.now(), { queueRun: true }),
+    );
+    return { messageIds };
+  }
+
+  /** Newest @handle stored for this sender in `chat_history_messages`. */
+  lookupSenderLabel(userId: string): string | undefined {
+    return this.chatHistory.latestSenderLabel(userId);
   }
 
   private async handleIncoming(
     event: DmEvent,
     nowMs: number,
-    options?: { backgroundLlm?: boolean },
+    options?: IncomingOptions,
   ): Promise<EngineActions> {
     const actions: EngineActions = {
       replies: [],
@@ -646,8 +714,12 @@ export class ModerationEngine {
       llm: false,
     };
 
-    this.purgeMemory.remember(event);
-    this.recordChatHistory(event);
+    // A queue file is not a message anyone sent. Recording it would put a
+    // command they did not type into !ask and !purge.
+    if (!options?.queueRun) {
+      this.purgeMemory.remember(event);
+      this.recordChatHistory(event);
+    }
 
     if (event.eventType === "MessageEdit" || event.eventType === "MessageDelete") {
       this.alreadyHandled(event);
@@ -666,6 +738,9 @@ export class ModerationEngine {
     }
 
     if (!this.chatMayAct(event.conversationId)) {
+      if (options?.queueRun) {
+        throw new Error("Conversation is not authorized.");
+      }
       if (
         event.eventType === "MessageCreate" &&
         event.senderId === this.config.ownerId &&
@@ -693,7 +768,9 @@ export class ModerationEngine {
       return actions;
     }
 
-    if (event.senderId && event.senderId === this.config.botUserId) {
+    // This bot's own chat lines are not commands. A queue file may name the
+    // bot's user id; that path is the only one that sets queueRun.
+    if (!options?.queueRun && event.senderId && event.senderId === this.config.botUserId) {
       return actions;
     }
 
@@ -724,8 +801,10 @@ export class ModerationEngine {
       convoAdmins,
     );
 
-    this.rememberInboundAliases(event);
-    this.rememberEventMembers(event);
+    if (!options?.queueRun) {
+      this.rememberInboundAliases(event);
+      this.rememberEventMembers(event);
+    }
 
     const vote = parseLevelVote(event.text);
     if (vote && event.replyTo && settings.xpEnabled && settings.xpLevelGrantEnabled) {
@@ -756,9 +835,12 @@ export class ModerationEngine {
         await this.suppressMutedSender(event, actions, settings);
         return actions;
       }
-      await this.runCommandCleanup(event, () =>
-        this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs),
-      );
+      const runCommand = () =>
+        this.handleCommand(event, command, senderIsAdmin, settings, actions, nowMs);
+      // There is no Chat message to delete. Scheduling cleanup would call
+      // delete with the synthetic id.
+      if (options?.queueRun) await runCommand();
+      else await this.runCommandCleanup(event, runCommand);
       if (command.name !== "troll" && command.name !== "untroll") {
         await this.trollIfTarget(event, senderId, actions, nowMs);
       }

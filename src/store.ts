@@ -435,6 +435,14 @@ export class Store {
     return Boolean(row);
   }
 
+  /** Authorized encrypted groups, in id order. */
+  listChatAuthorizations(): string[] {
+    const rows = this.db
+      .prepare("SELECT conversation_id FROM chat_authorizations ORDER BY conversation_id")
+      .all() as { conversation_id: string }[];
+    return rows.map((row) => row.conversation_id);
+  }
+
   /**
    * Record that this conversation may be moderated. Returns true when the
    * row was new.

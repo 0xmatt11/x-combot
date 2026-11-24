@@ -277,6 +277,31 @@ export class ChatHistory {
     return { messages: inserted ? 1 : 0, membership: 0 };
   }
 
+  /**
+   * Newest stored label for this sender that is an @handle.
+   * Display names and "someone" are skipped so a later name does not hide
+   * an earlier handle. Used when X cannot resolve the account.
+   */
+  latestSenderLabel(userId: string): string | undefined {
+    const id = userId.trim();
+    if (!id) return undefined;
+    const rows = this.db
+      .prepare(
+        `SELECT sender_label FROM chat_history_messages
+         WHERE sender_id = ?
+           AND sender_label IS NOT NULL
+           AND sender_label != ''
+           AND sender_label != 'someone'
+         ORDER BY ts_ms DESC, id DESC
+         LIMIT 40`,
+      )
+      .all(id) as { sender_label: string }[];
+    for (const row of rows) {
+      if (isHandleLabel(row.sender_label)) return row.sender_label;
+    }
+    return undefined;
+  }
+
   /** Remember a handle learned after the row was written. Skips "someone". */
   noteSender(userId: string, label: string): void {
     if (!this.enabled || !userId || !label || label === "someone") return;
@@ -1206,6 +1231,12 @@ function ftsPresent(db: Database.Database): boolean {
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_history_fts'")
     .get();
   return Boolean(row);
+}
+
+/** `@handle` or `handle`. Display names (spaces, other punctuation) are not. */
+function isHandleLabel(label: string): boolean {
+  const stripped = label.trim().replace(/^@+/, "");
+  return /^[A-Za-z0-9_]{1,15}$/.test(stripped) && !/^\d+$/.test(stripped);
 }
 
 function nonempty(value: string | undefined): string | undefined {
